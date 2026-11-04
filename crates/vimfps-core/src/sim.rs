@@ -1063,6 +1063,13 @@ impl Room {
                 self.drop_gun(g, pos);
             }
             self.roster_dirty = true;
+            let dist = if attacker == victim {
+                0.0
+            } else {
+                self.players
+                    .get(&attacker)
+                    .map_or(0.0, |a| r2(a.pos.distance(pos)))
+            };
             self.send(
                 Target::All,
                 ServerMsg::Kill {
@@ -1070,6 +1077,7 @@ impl Room {
                     victim,
                     cause,
                     head,
+                    dist,
                 },
             );
         }
@@ -1538,7 +1546,7 @@ mod tests {
         let out = r.drain();
         assert!(
             out.iter()
-                .any(|(_, m)| matches!(m, ServerMsg::Kill { head: true, .. }))
+                .any(|(_, m)| matches!(m, ServerMsg::Kill { head: true, dist, .. } if (*dist - 10.0).abs() < 0.05))
         );
         assert!(r.player_hp(b).unwrap() <= 0.0);
     }

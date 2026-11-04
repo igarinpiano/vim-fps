@@ -125,6 +125,15 @@ body.uianim .balloon.out { opacity: 0; transition: opacity 0.4s; }
 #cmdwin label { font: 700 16px var(--mono); }
 #cmdinput { flex: 1; width: auto; }
 #cmdwin .hint { flex-basis: 100%; }
+.btnrow { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; flex-basis: 100%; }
+.xpbtn { font: 13px var(--font); min-width: 96px; padding: 4px 12px; border: 1px solid #003c74; border-radius: 3px; color: #000; cursor: default;
+  background: linear-gradient(180deg, #ffffff, #ece9d8 85%, #d6d0bd); }
+.xpbtn:active { background: linear-gradient(180deg, #e3e0d0, #f3f1e8); }
+body:not(.touch) .btnrow { display: none; }
+/* Touch screens: the typing windows go to the top, above the key pad (and
+   clear of the on-screen keyboard), with large buttons. */
+body.touch #chatwin, body.touch #cmdwin { top: 56px; bottom: auto; z-index: 45; }
+body.touch .xpbtn { min-height: 40px; font-size: 15px; flex: 1; }
 #msgwin { left: 50%; top: 45%; transform: translate(-50%, -50%); max-width: calc(100vw - 32px); }
 #msg-body { margin: 0; font: 13px/1.5 var(--mono); background: #fff; border: 1px solid #7f9db9; padding: 8px 10px; max-height: calc(100vh - 200px); max-width: calc(100vw - 60px); overflow: auto; white-space: pre; min-width: min(560px, calc(100vw - 60px)); }
 #msg-body .err { color: #c00000; }

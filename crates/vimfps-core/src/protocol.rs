@@ -224,6 +224,10 @@ pub enum ServerMsg {
         victim: ClientId,
         cause: Cause,
         head: bool,
+        /// Metres between killer and victim (0 for a suicide). Clients that
+        /// predate it ignore it, so the protocol number stays.
+        #[serde(default)]
+        dist: f32,
     },
     Explode {
         pos: Vec3,
