@@ -167,6 +167,8 @@ function showMsg(title, lines, isError = false) {
     body.appendChild(div);
   }
   show('msgwin');
+  body.scrollTop = 0;
+  body.scrollLeft = 0;
   msgReturn = vim.mode === 'command' ? cmdReturn : vim.mode;
   if (msgReturn === 'msg') msgReturn = game.map ? 'normal' : 'menu';
   // The title window would cover it.
@@ -1020,6 +1022,17 @@ const vim = new Vim(settings, {
   insert: openChat,
   command: () => openCommand(''),
   closeMsg,
+  msgScroll(kind, n) {
+    const body = $('msg-body');
+    const line = parseFloat(getComputedStyle(body).lineHeight) || 20;
+    const page = Math.max(line, body.clientHeight - line);
+    if (kind === 'line') body.scrollTop += n * line;
+    else if (kind === 'half') body.scrollTop += n * Math.round(page / 2);
+    else if (kind === 'page') body.scrollTop += n * page;
+    else if (kind === 'top') body.scrollTop = 0;
+    else if (kind === 'bottom') body.scrollTop = body.scrollHeight;
+    else if (kind === 'side') body.scrollLeft += n * 8 * (line / 1.5);
+  },
   menuMove(n) {
     menu.sel = Math.max(0, Math.min(menu.items.length - 1, menu.sel + n));
     renderMenu();

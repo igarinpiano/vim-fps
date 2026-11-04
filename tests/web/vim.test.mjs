@@ -158,3 +158,35 @@ test('aim: long press stays slow (fine) before accelafter', () => {
   for (let i = 0; i < 100; i++) total += aim.update(0.01).yaw;
   assert.ok(total < -10, 'speeds up later');
 });
+
+test('message window: j/k, counts, Ctrl-d/u/f/b, gg/G, h/l, close', () => {
+  const { log, down, vim } = setup();
+  vim.mode = 'msg';
+  down('j');
+  down('3');
+  down('k');
+  vim.key({ type: 'down', key: 'd', code: 'KeyD', ctrl: true });
+  vim.key({ type: 'down', key: 'u', code: 'KeyU', ctrl: true });
+  vim.key({ type: 'down', key: 'f', code: 'KeyF', ctrl: true });
+  vim.key({ type: 'down', key: 'b', code: 'KeyB', ctrl: true });
+  down('g');
+  down('g');
+  down('G');
+  down('l');
+  down('h');
+  assert.deepEqual(only(log, 'msgScroll'), [
+    ['msgScroll', 'line', 1],
+    ['msgScroll', 'line', -3],
+    ['msgScroll', 'half', 1],
+    ['msgScroll', 'half', -1],
+    ['msgScroll', 'page', 1],
+    ['msgScroll', 'page', -1],
+    ['msgScroll', 'top', 1],
+    ['msgScroll', 'bottom', 1],
+    ['msgScroll', 'side', 1],
+    ['msgScroll', 'side', -1],
+  ]);
+  assert.equal(only(log, 'closeMsg').length, 0);
+  down('q');
+  assert.equal(only(log, 'closeMsg').length, 1);
+});

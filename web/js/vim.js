@@ -9,6 +9,8 @@
 //              throw, r reload, v scope, Esc back
 //   INVENTORY  j/k select, gg/G, {n}, Enter/Esc/s close
 //   MAP        Esc/m/q close
+//   MESSAGE    (:help, :options, :spec ...) j/k scroll, Ctrl-d/u half page,
+//              Ctrl-f/b page, gg/G top/bottom, h/l sideways, Enter/Esc/q close
 //
 // Pure: the caller passes key events in and gets callbacks out.
 
@@ -104,7 +106,8 @@ export class Vim {
       // for list navigation.
       return this.mode === 'inventory' || this.mode === 'menu' ? this.keyDown(ev, key) : true;
     }
-    if (ev.ctrl && key !== 'Escape') return false;
+    // Ctrl is free for the browser except Esc (Ctrl-[) and paging a message.
+    if (ev.ctrl && key !== 'Escape' && !(this.mode === 'msg' && /^[dufbey]$/i.test(key))) return false;
     return this.keyDown(ev, key);
   }
 
@@ -141,9 +144,7 @@ export class Vim {
       case 'menu':
         return this.menu(ev, key);
       case 'msg':
-        if (['Escape', 'Enter', 'q', ' '].includes(key)) this.call('closeMsg');
-        else if (key === ':') this.call('command');
-        return true;
+        return this.msg(ev, key);
       default:
         return false; // insert / command: the text box handles keys
     }
@@ -356,6 +357,77 @@ export class Vim {
         break;
       default:
         break;
+    }
+    this.showcmd();
+    return true;
+  }
+
+  /// Scrolling a message window, as in Vim's pager.
+  msg(ev, key) {
+    if (this.pending === 'g') {
+      this.pending = '';
+      if (key === 'g') this.call('msgScroll', 'top', 1);
+      this.clear();
+      return true;
+    }
+    if (ev.ctrl) {
+      const k = key.toLowerCase();
+      const n = this.takeCount(1);
+      if (k === 'd') this.call('msgScroll', 'half', n);
+      else if (k === 'u') this.call('msgScroll', 'half', -n);
+      else if (k === 'f') this.call('msgScroll', 'page', n);
+      else if (k === 'b') this.call('msgScroll', 'page', -n);
+      else if (k === 'e') this.call('msgScroll', 'line', n);
+      else if (k === 'y') this.call('msgScroll', 'line', -n);
+      this.showcmd();
+      return true;
+    }
+    if (this.digit(key)) return true;
+    switch (key) {
+      case 'j':
+      case 'J':
+      case 'ArrowDown':
+        this.call('msgScroll', 'line', this.takeCount(1));
+        break;
+      case 'k':
+      case 'K':
+      case 'ArrowUp':
+        this.call('msgScroll', 'line', -this.takeCount(1));
+        break;
+      case 'l':
+      case 'ArrowRight':
+        this.call('msgScroll', 'side', this.takeCount(1));
+        break;
+      case 'h':
+      case 'ArrowLeft':
+        this.call('msgScroll', 'side', -this.takeCount(1));
+        break;
+      case 'PageDown':
+        this.call('msgScroll', 'page', 1);
+        break;
+      case 'PageUp':
+        this.call('msgScroll', 'page', -1);
+        break;
+      case 'g':
+        this.pend('g');
+        return true;
+      case 'G':
+        this.takeCount();
+        this.call('msgScroll', 'bottom', 1);
+        break;
+      case ':':
+        this.count = '';
+        this.call('command');
+        break;
+      case 'Escape':
+      case 'Enter':
+      case 'q':
+      case ' ':
+        this.count = '';
+        this.call('closeMsg');
+        return true;
+      default:
+        this.count = '';
     }
     this.showcmd();
     return true;

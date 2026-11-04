@@ -2,7 +2,7 @@
 # archive from GitHub Releases, checks it against SHA256SUMS, installs
 # vimfps.exe and adds its folder to your user PATH.
 #
-#   irm https://igarinpiano.github.io/vim-fps/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/igarinpiano/vim-fps/main/scripts/install.ps1 | iex
 #
 # Environment:
 #   VIMFPS_VERSION      version to install (e.g. 1.1.1; default: latest)

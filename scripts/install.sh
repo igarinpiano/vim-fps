@@ -103,7 +103,7 @@ detect_target() {
       if [ "$os" = FreeBSD ]; then echo "x86_64-unknown-freebsd"; else echo "x86_64-unknown-netbsd"; fi
       ;;
     SunOS) echo "x86_64-unknown-illumos" ;;
-    MINGW* | MSYS* | CYGWIN*) die "Windows では PowerShell で: irm https://igarinpiano.github.io/vim-fps/install.ps1 | iex" ;;
+    MINGW* | MSYS* | CYGWIN*) die "Windows では PowerShell で: irm https://raw.githubusercontent.com/igarinpiano/vim-fps/main/scripts/install.ps1 | iex" ;;
     *) die "この OS ($os) 向けのビルドはありません" ;;
   esac
 }

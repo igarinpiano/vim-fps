@@ -48,7 +48,9 @@ json.dump({"version": version, "protocol": protocol, "files": files}, open(f"{ro
 print(f"dist/site: v{version}, protocol {protocol}, {len(files)} files")
 PY
 
-# The installers, served next to the client:
+# The shell installer, served next to the client:
 #   curl -fsSL https://igarinpiano.github.io/vim-fps/install.sh | sh
-#   irm https://igarinpiano.github.io/vim-fps/install.ps1 | iex
-cp scripts/install.sh scripts/install.ps1 dist/site/
+# (The PowerShell one is used from raw.githubusercontent.com, which serves
+# it as UTF-8 text:
+#   irm https://raw.githubusercontent.com/igarinpiano/vim-fps/main/scripts/install.ps1 | iex)
+cp scripts/install.sh dist/site/
