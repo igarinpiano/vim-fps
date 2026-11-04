@@ -49,7 +49,7 @@
   <div id="chatwin" class="window hidden">
     <div class="titlebar"><span>チャット — 全員に送信</span><span class="tb-btns"><i class="x">×</i></span></div>
     <div class="body">
-      <input id="chatinput" maxlength="120" autocomplete="off" spellcheck="false" enterkeyhint="send">
+      <form id="chatform" action="#"><input id="chatinput" maxlength="120" autocomplete="off" spellcheck="false" enterkeyhint="send"></form>
       <div class="btnrow"><button type="button" id="chat-send" class="xpbtn">送信 (Enter)</button><button type="button" id="chat-cancel" class="xpbtn">取り消し (Esc)</button></div>
       <div class="hint">Enter で送信 · Esc / Ctrl-[ で取り消し</div>
     </div>
@@ -59,7 +59,7 @@
   <div id="cmdwin" class="window hidden">
     <div class="titlebar"><span>コマンドの実行</span><span class="tb-btns"><i class="x">×</i></span></div>
     <div class="body">
-      <label for="cmdinput">:</label><input id="cmdinput" autocomplete="off" spellcheck="false" autocapitalize="off" enterkeyhint="go">
+      <form id="cmdform" action="#"><label for="cmdinput">:</label><input id="cmdinput" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" enterkeyhint="go"></form>
       <div class="btnrow"><button type="button" id="cmd-run" class="xpbtn">実行 (Enter)</button><button type="button" id="cmd-cancel" class="xpbtn">取り消し (Esc)</button></div>
       <div class="hint">:set · :help · :ls · :q · Tab で補完 · ↑↓ で履歴</div>
     </div>

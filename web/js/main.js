@@ -1416,6 +1416,35 @@ for (const [btn, fn] of [
   el.addEventListener('click', (e) => e.preventDefault());
 }
 
+// Phone keyboards send "Go"/"Send" as a form submission, not always as an
+// Enter keydown.
+$('cmdform').addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (vim.mode === 'command') submitCommand();
+});
+$('chatform').addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (vim.mode === 'insert') submitChat();
+});
+
+// The × of each window works as Esc there.
+const CLOSERS = {
+  cmdwin: () => closeCommand(),
+  chatwin: () => closeChat(),
+  msgwin: () => closeMsg(),
+  inventory: () => vim.setMode('normal'),
+  mapwin: () => vim.setMode('normal'),
+};
+for (const [id, fn] of Object.entries(CLOSERS)) {
+  const x = document.querySelector(`#${id} .titlebar .x`);
+  if (!x) continue;
+  x.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fn();
+  });
+}
+
 async function boot() {
   showTitle();
   try {

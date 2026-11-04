@@ -35,13 +35,26 @@ export class TouchPad {
       const mq = window.matchMedia('(pointer: coarse)');
       if (mq.addEventListener) mq.addEventListener('change', () => this.update());
     }
+    // Some phones and tablets do not report a coarse pointer: the first
+    // touch counts as one.
+    this.touched = false;
+    window.addEventListener(
+      'touchstart',
+      () => {
+        if (!this.touched) {
+          this.touched = true;
+          this.update();
+        }
+      },
+      { passive: true },
+    );
   }
 
   wanted() {
     const t = this.s.get('touch');
     if (t === 'on') return true;
     if (t === 'off') return false;
-    return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+    return this.touched || !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
   }
 
   update() {

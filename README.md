@@ -16,8 +16,27 @@ FPS の経験よりも、どのモードで何をするかの判断と、キー�
 ### 1 人で練習する
 https://igarinpiano.github.io/vim-fps/ を開いて「練習する」を選びます (bot と対戦。ブラウザ内で動くのでサーバーは不要です)。
 
+### インストール
+**Linux / macOS / FreeBSD / NetBSD / illumos / Android (Termux)**
+
+```bash
+curl -fsSL https://igarinpiano.github.io/vim-fps/install.sh | sh
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://igarinpiano.github.io/vim-fps/install.ps1 | iex
+```
+
+OS と CPU を判定して [Releases](https://github.com/igarinpiano/vim-fps/releases) から合うファイルをダウンロードし、`SHA256SUMS` で確かめてからインストールします。
+
+- インストール先: `~/.local/bin` (Termux では `$PREFIX/bin`、Windows では `%LOCALAPPDATA%\Programs\vimfps`。Windows ではユーザーの PATH にも追加します)
+- Linux では、どのディストリビューションでも動く静的リンク版 (musl) を選びます
+- 環境変数 `VIMFPS_VERSION=1.1.1` で版を指定、`VIMFPS_INSTALL_DIR` で置き場所を指定できます
+- スクリプトは [`scripts/install.sh`](scripts/install.sh) と [`scripts/install.ps1`](scripts/install.ps1) にあります。手動で入れる場合は Releases から `vimfps-<版>-<ターゲット>` を展開してください
+
 ### 友だちと遊ぶ (ホスト)
-[Releases](https://github.com/igarinpiano/vim-fps/releases) から自分の OS のファイルを入れて:
 
 ```bash
 vimfps host
@@ -79,7 +98,7 @@ GitHub Releases の最新版をダウンロードし、SHA-256 を確かめて�
 | `*` | 照準の近くに見えている敵をマーク (6 秒間、壁越しでも ▼ が見える) |
 | `s` | インベントリ |
 | `m` | マップ |
-| `i` | チャット (全員に届きます。スマホでは「取り消し」ボタンかパッドの Esc で閉じる) |
+| `i` | チャット (全員に届きます。スマホでは「取り消し」ボタン、ウィンドウの ×、パッドの Esc で閉じる) |
 | `:` | コマンド |
 
 割り当てのないキーは何もしません。
