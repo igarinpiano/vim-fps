@@ -26,7 +26,7 @@ curl -fsSL https://igarinpiano.github.io/vim-fps/install.sh | sh
 **Windows (PowerShell)**
 
 ```powershell
-irm https://igarinpiano.github.io/vim-fps/install.ps1 | iex
+irm https://raw.githubusercontent.com/igarinpiano/vim-fps/main/scripts/install.ps1 | iex
 ```
 
 OS と CPU を判定して [Releases](https://github.com/igarinpiano/vim-fps/releases) から合うファイルをダウンロードし、`SHA256SUMS` で確かめてからインストールします。
