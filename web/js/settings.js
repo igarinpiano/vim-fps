@@ -12,7 +12,7 @@ export const OPTIONS = {
   step: { type: 'number', def: 0.2, min: 0.01, max: 90, desc: '短押し・回数指定 1 回で回る角度 (度)' },
   aimdelay: { type: 'number', def: 160, min: 0, max: 2000, desc: '押しっぱなしが連続移動になるまで (ミリ秒)' },
   fastlook: { type: 'number', def: 4, min: 1, max: 40, desc: 'Shift+hjkl (VIEW) の速度倍率' },
-  zoomsens: { type: 'number', def: 0.4, min: 0.05, max: 4, desc: 'スコープ中の視点速度の倍率' },
+  zoomsens: { type: 'number', def: 1, min: 0.05, max: 4, desc: '構え・スコープ中の視点速度と 1 目盛りの倍率 (ズーム率に比例した値に掛ける)' },
   invert: { type: 'bool', def: false, desc: '視点の上下を反転' },
   turnangle: { type: 'number', def: 45, min: 1, max: 180, alias: ['ta'], desc: ', と . で回る角度 (度)' },
   fov: { type: 'number', def: 80, min: 40, max: 120, desc: '視野角 (度)' },

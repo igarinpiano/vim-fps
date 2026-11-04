@@ -211,6 +211,7 @@ const HELP = [
   '  :set                 変更した設定     :set all       すべての設定',
   '  :set sens=8          長押しの初速      :set accel=inf 加速の後は即最高速',
   '  :set step=0.1        1 目盛りの角度    :set accelafter=800 ゆっくりの時間を長く',
+  '  :set zoomsens=0.5    構え・スコープ中をさらに細かく (ズーム率に比例した上に掛かる)',
   '  :set nosmooth        アニメーション・補間・加速をすべてオフ (瞬時に切り替わる)',
   '  :set noadsanim       ADS だけ瞬時     :set nomoveaccel 移動の加速度を無限大に',
   '  :set forward=j       j を前進に       :set invert    視点の上下反転',
@@ -316,12 +317,7 @@ $('cmdinput').addEventListener('keydown', (e) => {
   if (e.isComposing) return;
   if (e.key === 'Enter') {
     e.preventDefault();
-    const line = input.value.trim();
-    closeCommand();
-    if (line) {
-      history.push(line);
-      runCommand(line);
-    }
+    submitCommand();
   } else if (e.key === 'Escape' || (e.ctrlKey && e.key === '[')) {
     e.preventDefault();
     closeCommand();
@@ -343,6 +339,15 @@ $('cmdinput').addEventListener('keydown', (e) => {
   }
   e.stopPropagation();
 });
+
+function submitCommand() {
+  const line = $('cmdinput').value.trim();
+  closeCommand();
+  if (line) {
+    history.push(line);
+    runCommand(line);
+  }
+}
 
 function runCommand(line) {
   const m = line.match(/^(\S+)\s*(.*)$/);
@@ -437,6 +442,12 @@ function openChat() {
   input.focus();
 }
 
+function submitChat() {
+  const text = $('chatinput').value.trim();
+  if (text && game.conn) game.conn.send({ t: 'chat', text });
+  closeChat();
+}
+
 function closeChat() {
   show('chatwin', false);
   $('chatinput').blur();
@@ -447,9 +458,7 @@ $('chatinput').addEventListener('keydown', (e) => {
   if (e.isComposing) return;
   if (e.key === 'Enter') {
     e.preventDefault();
-    const text = e.target.value.trim();
-    if (text && game.conn) game.conn.send({ t: 'chat', text });
-    closeChat();
+    submitChat();
   } else if (e.key === 'Escape' || (e.ctrlKey && e.key === '[')) {
     e.preventDefault();
     closeChat();
@@ -750,12 +759,18 @@ function onMessage(m) {
     case 'kill': {
       const how = m.cause === 'grenade' ? 'グレネード' : gunName(m.cause.gun);
       const self = m.killer === m.victim;
-      balloon(self ? `${nameOf(m.victim)} は自爆しました` : `${nameOf(m.killer)} ▶ ${nameOf(m.victim)}`, `${how}${m.head ? ' · ヘッドショット' : ''}`, 'kill');
+      const dist = !self && m.dist ? ` · ${m.dist >= 10 ? Math.round(m.dist) : m.dist.toFixed(1)} m` : '';
+      const mine = m.killer === game.myId && !self;
+      balloon(
+        self ? `${nameOf(m.victim)} は自爆しました` : mine ? `キル: ${nameOf(m.victim)}` : `${nameOf(m.killer)} ▶ ${nameOf(m.victim)}`,
+        `${how}${m.head ? ' · ヘッドショット' : ''}${dist}`,
+        'kill',
+      );
       if (m.victim === game.myId) {
         game.alive = false;
         $('death-text').textContent = self
           ? 'E492: Not an editor command: alive — 自分のグレネードで倒れました'
-          : `E492: Not an editor command: alive — ${nameOf(m.killer)} に倒されました (${how}${m.head ? '、ヘッドショット' : ''})`;
+          : `E492: Not an editor command: alive — ${nameOf(m.killer)} に倒されました (${how}${m.head ? '、ヘッドショット' : ''}${dist ? `、${dist.slice(3)}` : ''})`;
         show('deathwin');
         if (vim.mode === 'view' || vim.mode === 'inventory' || vim.mode === 'map') vim.setMode('normal');
       }
@@ -879,8 +894,13 @@ function onSnap(m) {
 
 // ---------------------------------------------------------------- input → actions
 
+/// Look speed and step while aiming: in proportion to the zoom (so one step
+/// moves the same distance on screen), times :set zoomsens. A scoped SR
+/// (14° of view) turns about 0.18× as fast as the hip, 0.04° per step.
 function zoomFactor() {
-  return game.zoom === 2 ? settings.get('zoomsens') : 1;
+  if (!game.ads) return 1;
+  const ratio = Math.min(1, targetFov() / settings.get('fov'));
+  return ratio * settings.get('zoomsens');
 }
 
 function applyLook(d) {
@@ -1369,9 +1389,32 @@ function updateHud() {
 
 const touch = new TouchPad($('touchpad'), settings, (ev) => {
   sound.wake();
-  if (vim.mode === 'insert' || vim.mode === 'command') return;
+  // While typing, the pad's Esc still cancels (phone keyboards have none).
+  if (vim.mode === 'insert' || vim.mode === 'command') {
+    if (ev.type === 'down' && ev.key === 'Escape') {
+      if (vim.mode === 'insert') closeChat();
+      else closeCommand();
+    }
+    return;
+  }
   vim.key(ev);
 });
+
+// Buttons in the chat and command windows (touch screens: no Esc/Enter keys).
+for (const [btn, fn] of [
+  ['chat-send', () => submitChat()],
+  ['chat-cancel', () => closeChat()],
+  ['cmd-run', () => submitCommand()],
+  ['cmd-cancel', () => closeCommand()],
+]) {
+  const el = $(btn);
+  el.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    fn();
+  });
+  el.addEventListener('click', (e) => e.preventDefault());
+}
 
 async function boot() {
   showTitle();
