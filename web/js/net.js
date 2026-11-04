@@ -1,0 +1,114 @@
+// Connections. Both kinds look the same to the game: send(obj), and
+// onmessage(msg) / onclose(reason) callbacks.
+
+export const PROTOCOL = 1;
+
+/// WebSocket to a CLI host. The page's own host when url is omitted.
+export class WsConnection {
+  constructor(url) {
+    this.onmessage = () => {};
+    this.onclose = () => {};
+    this.onopen = () => {};
+    this.closed = false;
+    this.ws = new WebSocket(url);
+    this.ws.onopen = () => this.onopen();
+    this.ws.onmessage = (e) => {
+      try {
+        this.onmessage(JSON.parse(e.data));
+      } catch (err) {
+        console.error(err);
+      }
+    };
+    this.ws.onclose = () => {
+      if (!this.closed) {
+        this.closed = true;
+        this.onclose('サーバーとの接続が切れました');
+      }
+    };
+    this.ws.onerror = () => {};
+  }
+
+  send(obj) {
+    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(obj));
+  }
+
+  close() {
+    this.closed = true;
+    this.ws.close();
+  }
+}
+
+let wasmModule = null;
+
+async function loadWasm() {
+  if (!wasmModule) {
+    const url = new URL('../pkg/vimfps.wasm', import.meta.url);
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`練習モードのデータ (pkg/vimfps.wasm) を読めません: ${res.status}`);
+    const bytes = await res.arrayBuffer();
+    wasmModule = await WebAssembly.compile(bytes);
+  }
+  const { exports } = await WebAssembly.instantiate(wasmModule, {});
+  return exports;
+}
+
+/// Practice mode: the server's simulation running in the page (wasm).
+export class LocalConnection {
+  static async create(seed, bots) {
+    const ex = await loadWasm();
+    return new LocalConnection(ex, seed, bots);
+  }
+
+  constructor(ex, seed, bots) {
+    this.ex = ex;
+    this.onmessage = () => {};
+    this.onclose = () => {};
+    this.onopen = () => {};
+    this.closed = false;
+    this.enc = new TextEncoder();
+    this.dec = new TextDecoder();
+    ex.vf_new(seed >>> 0, bots >>> 0);
+    this.last = performance.now();
+    this.timer = setInterval(() => this.tick(), 1000 / 60);
+    setTimeout(() => this.onopen(), 0);
+  }
+
+  send(obj) {
+    if (this.closed) return;
+    const bytes = this.enc.encode(JSON.stringify(obj));
+    const ptr = this.ex.vf_in(bytes.length);
+    new Uint8Array(this.ex.memory.buffer, ptr, bytes.length).set(bytes);
+    this.ex.vf_send(bytes.length);
+  }
+
+  tick() {
+    if (this.closed) return;
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - this.last) / 1000);
+    this.last = now;
+    const n = this.ex.vf_tick(dt);
+    if (!n) return;
+    const ptr = this.ex.vf_out();
+    const text = this.dec.decode(new Uint8Array(this.ex.memory.buffer, ptr, n));
+    for (const m of JSON.parse(text)) this.onmessage(m);
+  }
+
+  close() {
+    this.closed = true;
+    clearInterval(this.timer);
+  }
+}
+
+/// "https://x.trycloudflare.com/#pw=abc", "192.168.1.5:7777", "" (this page)
+/// → { ws: "wss://.../ws", password }.
+export function parseServerUrl(input, here) {
+  let s = (input || '').trim();
+  let password = null;
+  if (!s) s = here.href;
+  if (!/^[a-z]+:\/\//i.test(s)) s = (here.protocol === 'https:' ? 'https://' : 'http://') + s;
+  const u = new URL(s);
+  const m = u.hash.match(/pw=([^&]*)/);
+  if (m) password = decodeURIComponent(m[1]);
+  const secure = u.protocol === 'https:' || u.protocol === 'wss:';
+  return { ws: `${secure ? 'wss' : 'ws'}://${u.host}/ws`, password, secure };
+}
