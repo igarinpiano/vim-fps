@@ -124,6 +124,10 @@ body.uianim .balloon.out { opacity: 0; transition: opacity 0.4s; }
 #cmdwin .body { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 #cmdwin label { font: 700 16px var(--mono); }
 #cmdinput { flex: 1; width: auto; }
+#cmdform { display: flex; align-items: center; gap: 4px; flex: 1; }
+#chatform { margin: 0; }
+/* The × of a window closes it (touch screens have no Esc key). */
+body.touch .titlebar .x { width: 30px; height: 24px; font-size: 15px; }
 #cmdwin .hint { flex-basis: 100%; }
 .btnrow { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; flex-basis: 100%; }
 .xpbtn { font: 13px var(--font); min-width: 96px; padding: 4px 12px; border: 1px solid #003c74; border-radius: 3px; color: #000; cursor: default;

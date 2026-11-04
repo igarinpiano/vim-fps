@@ -38,6 +38,7 @@ jobs:
       - name: Scripts
         run: |
           for f in scripts/*.sh; do bash -n "$f"; done
+          shellcheck -s sh scripts/install.sh
       - name: Versions agree (Cargo.toml, web client)
         run: bash scripts/check-version.sh
 
@@ -65,6 +66,35 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build the practice-mode wasm
         run: bash scripts/build-wasm.sh
+
+  # The installers, run for real against the latest release.
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: install.sh
+        if: runner.os != 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VIMFPS_INSTALL_DIR: ${{ runner.temp }}/vimfps-bin
+        run: |
+          sh scripts/install.sh
+          "$VIMFPS_INSTALL_DIR/vimfps" --version
+      - name: install.ps1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VIMFPS_INSTALL_DIR: ${{ runner.temp }}\vimfps-bin
+        run: |
+          ./scripts/install.ps1
+          & "$env:VIMFPS_INSTALL_DIR\vimfps.exe" --version
 
   test:
     strategy:
