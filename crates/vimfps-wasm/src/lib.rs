@@ -106,6 +106,32 @@ pub extern "C" fn vf_tick(dt: f32) -> usize {
     })
 }
 
+/// The game's numbers (`:spec` before joining). Returns the length of the
+/// JSON written to the output buffer (`vf_out`).
+#[unsafe(no_mangle)]
+pub extern "C" fn vf_specs() -> usize {
+    let json = serde_json::to_vec(&vimfps_core::protocol::Specs::current()).unwrap_or_default();
+    STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.is_none() {
+            *s = Some(State {
+                room: Room::new(Config {
+                    practice: true,
+                    max_players: 1,
+                    ..Default::default()
+                }),
+                me: None,
+                pending: Vec::new(),
+                inbuf: Vec::new(),
+                outbuf: Vec::new(),
+            });
+        }
+        let st = s.as_mut().unwrap();
+        st.outbuf = json;
+        st.outbuf.len()
+    })
+}
+
 /// The output of the last `vf_tick`.
 #[unsafe(no_mangle)]
 pub extern "C" fn vf_out() -> *const u8 {

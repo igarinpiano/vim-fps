@@ -3,7 +3,8 @@
 //
 //   NORMAL     hjkl walk (Shift held = sneak), {n}hjkl walk n metres,
 //              f fire/use, {n}dd grenade, r reload, y pick up, gt swap gun,
-//              << >> ~ turn, v VIEW, s inventory, m map, i/I chat, : command
+//              {n}, {n}. turn, ~ about-face, * spot, v VIEW, s inventory,
+//              m map, i/I chat, : command (any other key does nothing)
 //   VIEW       hjkl look (Shift = fast), {n}hjkl n steps, f fire, {n}dd
 //              throw, r reload, v scope, Esc back
 //   INVENTORY  j/k select, gg/G, {n}, Enter/Esc/s close
@@ -179,10 +180,6 @@ export class Vim {
     } else if (p === 'g' && (key === 't' || key === 'T') && allowed.includes('g')) {
       this.takeCount();
       this.call('swapGun');
-    } else if (p === '<' && key === '<' && allowed.includes('<')) {
-      this.call('turn', this.s.get('turnangle') * this.takeCount(1));
-    } else if (p === '>' && key === '>' && allowed.includes('>')) {
-      this.call('turn', -this.s.get('turnangle') * this.takeCount(1));
     } else {
       this.count = '';
     }
@@ -195,7 +192,7 @@ export class Vim {
       this.clear();
       return true;
     }
-    if (this.twoKey(key, ['g', '<', '>'])) return true;
+    if (this.twoKey(key, ['g'])) return true;
     if (this.digit(key)) return true;
     const lower = key.length === 1 ? key.toLowerCase() : key;
     if (MOVE_KEYS.includes(lower)) {
@@ -217,13 +214,21 @@ export class Vim {
         break;
       case 'd':
       case 'g':
-      case '<':
-      case '>':
         this.pend(key);
         return true;
+      case ',':
+        this.call('turn', this.s.get('turnangle') * this.takeCount(1));
+        break;
+      case '.':
+        this.call('turn', -this.s.get('turnangle') * this.takeCount(1));
+        break;
       case '~':
         this.count = '';
         this.call('turn', 180);
+        break;
+      case '*':
+        this.count = '';
+        this.call('spot');
         break;
       case 'r':
         this.count = '';
@@ -244,8 +249,6 @@ export class Vim {
         break;
       case 'i':
       case 'I':
-      case 'a':
-      case 'A':
         this.call('insert');
         break;
       case ':':
@@ -295,6 +298,10 @@ export class Vim {
       case 'v':
         this.count = '';
         this.call('zoom');
+        break;
+      case '*':
+        this.count = '';
+        this.call('spot');
         break;
       case 's':
         this.setMode('inventory');
@@ -429,10 +436,16 @@ export class Aim {
       h.t += dt;
       if (h.t <= delay) continue;
       const active = h.t - Math.max(before, delay);
+      // Slow (sensitivity) for fine adjustment first; after accelafter the
+      // speed grows by accel up to maxspeed.
       const accel = this.s.get('accel');
-      const t = h.t - delay;
+      const t = Math.max(0, h.t - delay - this.s.get('accelafter') / 1000);
       const v =
-        accel === Infinity ? this.s.get('maxspeed') : Math.min(this.s.get('maxspeed'), this.s.get('sensitivity') + accel * t);
+        accel === Infinity && h.t - delay > this.s.get('accelafter') / 1000
+          ? this.s.get('maxspeed')
+          : accel === Infinity
+            ? this.s.get('sensitivity')
+            : Math.min(this.s.get('maxspeed'), this.s.get('sensitivity') + accel * t);
       const deg = v * active * (h.fast ? this.s.get('fastlook') : 1) * zoom;
       const [sy, sp] = this.sign(dir);
       yaw += sy * deg;

@@ -8,7 +8,7 @@ use crate::weapons::{Gun, Inventory, Slot};
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a message changes shape. Client and server must agree.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 pub type ClientId = u32;
 
@@ -119,6 +119,54 @@ pub struct PickupState {
     pub z: f32,
 }
 
+/// One gun's numbers, as shown by `:spec`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GunSpec {
+    pub id: Gun,
+    pub name: String,
+    pub damage: f32,
+    pub head_mult: f32,
+    pub pellets: u32,
+    /// Rounds per minute.
+    pub rpm: f32,
+    pub auto: bool,
+    pub mag: u32,
+    pub reserve_max: u32,
+    pub reload: f32,
+    pub spread_hip: f32,
+    pub spread_ads: f32,
+    pub spread_scope: f32,
+    pub falloff_start: f32,
+    pub falloff_end: f32,
+    pub min_factor: f32,
+    pub range: f32,
+}
+
+/// Every number a player may want to know, sent with the welcome so the
+/// client always shows the rules of the server it plays on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Specs {
+    pub guns: Vec<GunSpec>,
+    pub hp: f32,
+    pub run_speed: f32,
+    pub sneak_speed: f32,
+    pub accel: f32,
+    pub respawn: f32,
+    pub protect: f32,
+    pub medkit_heal: f32,
+    pub medkit_time: f32,
+    pub max_medkits: u32,
+    pub grenade_fuse: f32,
+    pub grenade_radius: f32,
+    pub grenade_damage: f32,
+    pub max_grenades: u32,
+    /// Throw speed (m/s) for power 1..=5.
+    pub throw_speeds: Vec<f32>,
+    pub head_radius: f32,
+    pub tick_rate: f32,
+    pub snap_rate: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Cause {
@@ -137,6 +185,8 @@ pub enum ServerMsg {
         time_limit: f32,
         frag_limit: u32,
         practice: bool,
+        /// Numbers behind the game, for `:spec`.
+        specs: Box<Specs>,
     },
     Error {
         text: String,

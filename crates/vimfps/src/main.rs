@@ -6,6 +6,7 @@
 mod server;
 mod tunnel;
 mod update;
+mod webclient;
 
 use clap::{Parser, Subcommand};
 

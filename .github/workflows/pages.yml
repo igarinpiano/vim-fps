@@ -35,15 +35,13 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build the practice-mode wasm
         run: bash scripts/build-wasm.sh
-      - name: Assemble the site
+      - name: Assemble the site (with manifest.json for `vimfps host`)
         run: |
-          mkdir -p site
-          cp -r web/. site/
-          touch site/.nojekyll
-          find site -type f | sort
+          bash scripts/build-site.sh
+          find dist/site -type f | sort
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: site
+          path: dist/site
 
   deploy:
     needs: build

@@ -23,6 +23,67 @@ pub const WEAPON_RESPAWN: f32 = 30.0;
 pub const ITEM_RESPAWN: f32 = 20.0;
 pub const DROP_TTL: f32 = 30.0;
 pub const MAX_BOTS: u32 = 15;
+/// Bots see enemies this far (with a clear line of sight).
+pub const BOT_SIGHT: f32 = 150.0;
+/// Bots hear gunshots this far, and running footsteps within BOT_FOOTSTEPS.
+pub const BOT_HEARING: f32 = 120.0;
+pub const BOT_FOOTSTEPS: f32 = 22.0;
+
+pub const HEAD_RADIUS: f32 = 0.25;
+
+/// Grenade speed (m/s) for `{power}dd`.
+pub fn throw_speed(power: u32) -> f32 {
+    6.0 + 3.5 * power as f32
+}
+
+impl Specs {
+    pub fn current() -> Specs {
+        Specs {
+            guns: Gun::ALL
+                .iter()
+                .map(|&g| {
+                    let s = g.stats();
+                    GunSpec {
+                        id: g,
+                        name: s.name.into(),
+                        damage: s.damage,
+                        head_mult: s.head_mult,
+                        pellets: s.pellets,
+                        rpm: (60.0 / s.interval).round(),
+                        auto: s.auto,
+                        mag: s.mag,
+                        reserve_max: s.reserve_max,
+                        reload: s.reload,
+                        spread_hip: s.spread_hip,
+                        spread_ads: s.spread_ads,
+                        spread_scope: s.spread_scope,
+                        falloff_start: s.falloff.0,
+                        falloff_end: s.falloff.1,
+                        min_factor: s.min_factor,
+                        range: s.range,
+                    }
+                })
+                .collect(),
+            hp: MAX_HP,
+            run_speed: RUN_SPEED,
+            sneak_speed: SNEAK_SPEED,
+            accel: ACCEL,
+            respawn: RESPAWN_TIME,
+            protect: PROTECT_TIME,
+            medkit_heal: MEDKIT_HEAL,
+            medkit_time: MEDKIT_TIME,
+            max_medkits: MAX_MEDKITS,
+            grenade_fuse: GRENADE_FUSE,
+            grenade_radius: GRENADE_RADIUS,
+            grenade_damage: GRENADE_DAMAGE,
+            max_grenades: MAX_GRENADES,
+            throw_speeds: (1..=MAX_THROW).map(throw_speed).collect(),
+            head_radius: HEAD_RADIUS,
+            tick_rate: TICK_RATE,
+            snap_rate: SNAP_RATE,
+        }
+    }
+}
 
 pub fn eye_height(sneak: bool) -> f32 {
     if sneak { 1.15 } else { 1.6 }
@@ -83,6 +144,8 @@ struct Bot {
     err_timer: f32,
     last_pos: Vec3,
     stuck_timer: f32,
+    /// Where a shot was heard, and for how much longer it is interesting.
+    heard: Option<(Vec3, f32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -275,6 +338,7 @@ impl Room {
                 time_limit: self.cfg.time_limit,
                 frag_limit: self.cfg.frag_limit,
                 practice: self.cfg.practice,
+                specs: Box::new(Specs::current()),
             },
         );
         self.spawn(id);
@@ -357,6 +421,7 @@ impl Room {
                 err_timer: 0.0,
                 last_pos: Vec3::ZERO,
                 stuck_timer: 0.0,
+                heard: None,
             };
             self.add_player(id, format!("bot-{n}"), Some(bot));
             self.spawn(id);
@@ -518,7 +583,7 @@ impl Room {
         p.inv.grenades -= 1;
         p.inv.fix_selection();
         let dir = Vec3::from_angles(p.yaw, (p.pitch + 0.25).min(1.5));
-        let speed = 6.0 + 3.5 * power as f32;
+        let speed = throw_speed(power);
         let eye = p.pos + Vec3::new(0.0, eye_height(p.input.sneak), 0.0);
         let g = Grenade {
             id: self.next_obj,
@@ -889,6 +954,18 @@ impl Room {
         for (victim, (d, head)) in dmg {
             self.damage(victim, id, d, head, Cause::Gun(gun), eye);
         }
+        // Bots within earshot turn toward the shot.
+        for p in self.players.values_mut() {
+            if p.id == id || !p.alive {
+                continue;
+            }
+            if let Some(b) = &mut p.bot
+                && b.target.is_none()
+                && p.pos.distance(eye) < BOT_HEARING
+            {
+                b.heard = Some((eye, 5.0));
+            }
+        }
     }
 
     /// Nearest hit along a ray: distance, and the player hit (with headshot).
@@ -908,7 +985,7 @@ impl Room {
             }
             let sneak = p.input.sneak;
             let head_c = p.pos + Vec3::new(0.0, if sneak { 1.22 } else { 1.67 }, 0.0);
-            if let Some(t) = ray_sphere(origin, dir, head_c, 0.25, best)
+            if let Some(t) = ray_sphere(origin, dir, head_c, HEAD_RADIUS, best)
                 && t < best
             {
                 best = t;
@@ -1008,8 +1085,9 @@ impl Room {
             }
             g.vel.y -= 9.8 * dt;
             let mut n = g.pos + g.vel * dt;
-            if n.y < 0.08 {
-                n.y = 0.08;
+            let ground = self.map.height(n.x, n.z) + 0.08;
+            if n.y < ground {
+                n.y = ground;
                 g.vel.y = -g.vel.y * 0.35;
                 g.vel.x *= 0.7;
                 g.vel.z *= 0.7;
@@ -1148,15 +1226,24 @@ impl Room {
     fn think_bot(&mut self, id: ClientId, dt: f32) {
         let me = &self.players[&id];
         let eye = me.pos + Vec3::new(0.0, 1.6, 0.0);
-        // Nearest visible enemy within 70 m.
+        // Nearest visible enemy within BOT_SIGHT; the nearest running one
+        // close by is heard even without a line of sight.
         let mut seen: Option<(ClientId, Vec3, f32)> = None;
+        let mut steps: Option<(Vec3, f32)> = None;
         for o in self.players.values() {
             if o.id == id || !o.alive {
                 continue;
             }
             let chest = o.pos + Vec3::new(0.0, if o.input.sneak { 0.8 } else { 1.2 }, 0.0);
             let d = chest.distance(eye);
-            if d > 70.0 || seen.is_some_and(|s| s.2 < d) {
+            if d < BOT_FOOTSTEPS
+                && !o.input.sneak
+                && o.vel.length_xz() > 3.0
+                && steps.is_none_or(|s| s.1 > d)
+            {
+                steps = Some((chest, d));
+            }
+            if d > BOT_SIGHT || seen.is_some_and(|s| s.2 < d) {
                 continue;
             }
             if self.map.line_of_sight(eye, chest) {
@@ -1193,13 +1280,26 @@ impl Room {
         b.err_timer -= dt;
         if b.err_timer <= 0.0 {
             b.err_timer = 0.6;
-            b.aim_err = (err.0 * 0.05, err.1 * 0.035);
+            b.aim_err = (err.0 * 0.03, err.1 * 0.02);
+        }
+        if let Some((pos, _)) = steps
+            && b.heard.is_none()
+        {
+            b.heard = Some((pos, 3.0));
+        }
+        if let Some((_, t)) = &mut b.heard {
+            *t -= dt;
+            if *t <= 0.0 {
+                b.heard = None;
+            }
         }
         match seen {
             Some((tid, chest, dist)) => {
+                b.heard = None;
                 if b.target != Some(tid) {
                     b.target = Some(tid);
-                    b.reaction = 0.45;
+                    // Farther targets take longer to react to.
+                    b.reaction = 0.35 + dist / 250.0;
                 }
                 b.reaction -= dt;
                 let d = chest - eye;
@@ -1211,7 +1311,7 @@ impl Room {
                 p.yaw = wrap_angle(p.yaw + dy.clamp(-step, step));
                 p.pitch += (want_pitch - p.pitch).clamp(-step, step);
                 let aimed = dy.abs() < 0.06;
-                if dist > 45.0 && !aimed {
+                if dist > 90.0 && !aimed {
                     p.input = InputState {
                         mz: 1,
                         ..Default::default()
@@ -1230,7 +1330,9 @@ impl Room {
             }
             None => {
                 b.target = None;
-                let d = b.waypoint - pos;
+                // Investigate what was heard, otherwise wander.
+                let goal = b.heard.map(|(p, _)| p).unwrap_or(b.waypoint);
+                let d = goal - pos;
                 let want_yaw = (-d.x).atan2(-d.z);
                 let dy = wrap_angle(want_yaw - p.yaw);
                 let step = 2.5 * dt;
@@ -1267,8 +1369,9 @@ impl Room {
     }
 
     pub fn teleport(&mut self, id: ClientId, pos: Vec3, yaw: f32) {
+        let ground = self.map.height(pos.x, pos.z);
         if let Some(p) = self.players.get_mut(&id) {
-            p.pos = pos;
+            p.pos = Vec3::new(pos.x, ground, pos.z);
             p.yaw = yaw;
             p.pitch = 0.0;
             p.protect = 0.0;
@@ -1305,6 +1408,9 @@ mod tests {
                 if r.map.blocked(Vec3::new(s.x, 0.0, s.z - i as f32), 0.6) {
                     continue 'search;
                 }
+            }
+            if (r.map.height(s.x, s.z) - r.map.height(s.x, s.z - 10.0)).abs() > 0.01 {
+                continue 'search;
             }
             if r.map
                 .line_of_sight(s + Vec3::new(0.0, 1.6, 0.0), s + Vec3::new(0.0, 1.6, -10.0))

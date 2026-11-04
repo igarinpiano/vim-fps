@@ -54,7 +54,7 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     }
 }
 
-fn agent(timeout: u64) -> ureq::Agent {
+pub fn agent(timeout: u64) -> ureq::Agent {
     use ureq::tls::{PemItem, RootCerts, TlsConfig};
     // Built-in (webpki) roots, or the PEM bundle in SSL_CERT_FILE (for
     // networks behind an inspecting proxy).

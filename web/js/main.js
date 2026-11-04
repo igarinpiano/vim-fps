@@ -3,7 +3,8 @@
 import { Settings, OPTIONS, SMOOTH_GROUP } from './settings.js';
 import { Vim, Aim, MODES } from './vim.js';
 import { WsConnection, LocalConnection, parseServerUrl, PROTOCOL } from './net.js';
-import { World, wantVelocity, eyeHeight, GUNS, ACCEL, RUN_SPEED, SNEAK_SPEED, wrapAngle } from './world.js';
+import { World, wantVelocity, eyeHeight, GUNS, ACCEL, RUN_SPEED, SNEAK_SPEED, wrapAngle, bearing } from './world.js';
+import { TouchPad } from './touch.js';
 import { Sound } from './audio.js';
 import { VERSION } from './version.js';
 
@@ -60,6 +61,11 @@ const game = {
   pingSeq: 0,
   ping: null,
   steps: new Map(),
+  specs: null,
+  // Recent gunfire of others: {x, z, t, id}; spotted (*): id -> until.
+  shots: [],
+  spotted: new Map(),
+  seen: new Map(),
   myStep: 0,
   bob: 0,
   kick: 0,
@@ -163,40 +169,52 @@ function showMsg(title, lines, isError = false) {
   show('msgwin');
   msgReturn = vim.mode === 'command' ? cmdReturn : vim.mode;
   if (msgReturn === 'msg') msgReturn = game.map ? 'normal' : 'menu';
+  // The title window would cover it.
+  show('title', false);
   vim.setMode('msg');
 }
 let msgReturn = 'menu';
 
 function closeMsg() {
   show('msgwin', false);
-  vim.setMode(msgReturn || (game.map ? 'normal' : 'menu'));
+  const back = msgReturn || (game.map ? 'normal' : 'menu');
+  if (back === 'menu') show('title');
+  vim.setMode(back);
 }
 
 const HELP = [
   'vim-fps — マウス禁止。モードごとにキーの意味が変わります (同時には使えません)',
+  '割り当てのないキーは何もしません。',
   '',
-  'NORMAL (移動)                         VIEW (v: 構えて視点移動)',
+  'NORMAL (移動)                         VIEW (v: 構えて視点移動。歩けない)',
   '  h j k l   左 前 後 右 (前は :set forward)   h j k l   視点 (カーソルと同じ向き)',
   '  Shift     押している間スニーク          H J K L   速く回す (:set fastlook)',
   '  {n}k      n メートル歩く               {n}l      n 目盛り回す (:set step)',
-  '  << >>     左右に 45° 旋回 ({n}<< 可)     v         スコープ切り替え',
-  '  ~         180° 振り返る                 f         撃つ',
-  '  f         撃つ / 選んだアイテムを使う     {n}dd     狙って投げる',
-  '  {n}dd     グレネード (n=1〜5 で強さ)      r         リロード',
+  '  , .       左 / 右に 45° 旋回 ({n}, 可)   短押し    1 目盛り (0.2°)',
+  '  ~         180° 振り返る                 長押し    ゆっくり→加速 (:set accelafter)',
+  '  f         撃つ / 選んだアイテムを使う     v         スコープ切り替え',
+  '  {n}dd     グレネード (n=1〜5 で強さ)      f / {n}dd / r / *',
   '  r         リロード                       Esc       NORMAL へ',
   '  y         足元の銃を拾う (最大 2 丁)',
   '  gt        銃を持ち替え                  INVENTORY (s)',
-  '  s         インベントリ                     j / k     選ぶ (gg 先頭, G 末尾, 数字)',
-  '  m         マップ                           Enter/Esc 閉じる → f で使う',
+  '  *         照準の近くの敵をマーク (6 秒)     j / k     選ぶ (gg 先頭, G 末尾, 数字)',
+  '  s         インベントリ                     Enter/Esc 閉じる → f で使う',
+  '  m         マップ',
   '  i         チャット (全員に届きます)',
   '  :         コマンド                      Esc の代わりに Ctrl-[ も使えます',
   '',
+  '索敵: 画面上のコンパスに、銃声 (赤 ●)・近くの足音 (橙 ●)・マークした敵 (黄 ▼) の方向が出ます。',
+  '      見えている敵の頭上には ▼ が付きます。スニーク中の足音はコンパスに出ません。',
+  '',
   'コマンド',
+  '  :spec                武器・移動などの数値 (弾速・ダメージ・連射速度…)',
   '  :set                 変更した設定     :set all       すべての設定',
-  '  :set sens=120        視点の初速        :set accel=inf 加速なし (即最高速)',
+  '  :set sens=8          長押しの初速      :set accel=inf 加速の後は即最高速',
+  '  :set step=0.1        1 目盛りの角度    :set accelafter=800 ゆっくりの時間を長く',
   '  :set nosmooth        アニメーション・補間・加速をすべてオフ (瞬時に切り替わる)',
   '  :set noadsanim       ADS だけ瞬時     :set nomoveaccel 移動の加速度を無限大に',
   '  :set forward=j       j を前進に       :set invert    視点の上下反転',
+  '  :set touch=on        タッチパッド     :set nocompass  コンパスを消す',
   '  :set name=名前       名前             :set {opt}&     初期値に戻す',
   '  :ls                  スコア           :bots 5        bot の数 (練習のみ)',
   '  :connect URL         サーバーに接続    :practice      練習',
@@ -204,6 +222,44 @@ const HELP = [
   '',
   '設定の一覧と説明は :options',
 ];
+
+/// :spec — every number of the rules, from the server (or the practice wasm).
+function specLines(sp) {
+  const L = [];
+  const f = (v, d = 1) => (Number.isInteger(v) ? String(v) : v.toFixed(d));
+  L.push('弾: すべてヒットスキャン (弾速は無限大 = 撃った瞬間に着弾。落下・偏差撃ちは不要)');
+  L.push(`HP ${sp.hp}   頭の当たり判定 半径 ${sp.head_radius} m   サーバー ${sp.tick_rate} Hz / 送信 ${sp.snap_rate} Hz`);
+  L.push('');
+  L.push('武器   ダメージ(胴/頭)  連射    装弾/予備  リロード  拡散 腰/構え/スコープ  減衰 (距離→倍率)     射程');
+  for (const g of sp.guns) {
+    const dmg = `${f(g.damage)}${g.pellets > 1 ? `×${g.pellets}` : ''}/${f(g.damage * g.head_mult)}${g.pellets > 1 ? `×${g.pellets}` : ''}`;
+    const rof = `${g.rpm}rpm${g.auto ? ' 連' : ' 単'}`;
+    const spread = `${f(g.spread_hip)}°/${f(g.spread_ads)}°/${f(g.spread_scope)}°`;
+    const fall = g.min_factor >= 1 ? 'なし' : `${g.falloff_start}m→${g.falloff_end}m ×${g.min_factor}`;
+    L.push(`${g.name.padEnd(5)}  ${dmg.padEnd(15)}  ${rof.padEnd(9)} ${`${g.mag}/${g.reserve_max}`.padEnd(9)}  ${`${g.reload}s`.padEnd(7)}  ${spread.padEnd(19)}  ${fall.padEnd(20)}  ${g.range}m`);
+  }
+  L.push('  (頭 = 胴 × 倍率。腰撃ちで歩いていると拡散 ×1.3。SG は 1 発で 9 粒)');
+  L.push('');
+  L.push(`移動: 走り ${sp.run_speed} m/s · スニーク ${sp.sneak_speed} m/s · 加速度 ${sp.accel} m/s² (:set nomoveaccel で無限大) · 構え中は歩けない`);
+  L.push(`回復キット: +${sp.medkit_heal} HP、${sp.medkit_time} 秒 (最大 ${sp.max_medkits} 個)`);
+  L.push(`グレネード: 信管 ${sp.grenade_fuse} 秒、半径 ${sp.grenade_radius} m、最大 ${sp.grenade_damage} ダメージ (距離で減少・壁で遮断、最大 ${sp.max_grenades} 個)`);
+  L.push(`  {n}dd の初速: ${sp.throw_speeds.map((v, i) => `${i + 1}dd=${v}m/s`).join(' ')}`);
+  L.push(`復活: ${sp.respawn} 秒後 · 復活直後 ${sp.protect} 秒は無敵 (撃つと解除)`);
+  return L;
+}
+
+async function showSpec() {
+  let sp = game.specs;
+  if (!sp) {
+    try {
+      sp = await LocalConnection.specs();
+    } catch (e) {
+      showMsg('エラー', [String(e.message || e)], true);
+      return;
+    }
+  }
+  showMsg(':spec — 仕様', specLines(sp));
+}
 
 function optionsHelp() {
   const lines = [];
@@ -301,6 +357,10 @@ function runCommand(line) {
       else if (r.changed.length) balloon('設定しました', r.changed.map((k) => settings.format(k).trim()).join(' '));
       break;
     }
+    case 'spec':
+    case 'specs':
+      showSpec();
+      break;
     case 'options':
     case 'opt':
       showMsg(':options — :set で変更できます', optionsHelp());
@@ -469,6 +529,16 @@ function drawMap() {
     ctx.arc(tx(p.x), tx(p.z), 3.5, 0, Math.PI * 2);
     ctx.fill();
   }
+  // Gunfire heard in the last seconds.
+  const now = performance.now();
+  for (const sh of game.shots) {
+    if (now - sh.t > 3500) continue;
+    ctx.strokeStyle = '#ff2020';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(tx(sh.x), tx(sh.z), 7, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   // You: a triangle pointing where you look.
   ctx.save();
   ctx.translate(tx(game.pos.x), tx(game.pos.z));
@@ -615,6 +685,7 @@ async function onWelcome(m) {
   game.myId = m.id;
   game.map = m.map;
   game.world = new World(m.map);
+  game.specs = m.specs;
   const conn = game.conn;
   const ok = await ensureRenderer();
   if (!ok) return leave();
@@ -653,6 +724,7 @@ function onMessage(m) {
       break;
     case 'shot': {
       const mine = m.id === game.myId;
+      if (!mine) game.shots.push({ x: m.from.x, z: m.from.z, id: m.id, t: performance.now() });
       if (renderer) renderer.tracer(m.from, m.to, mine);
       sound.shot(m.gun, mine ? null : m.from);
       if (mine) {
@@ -789,6 +861,7 @@ function onSnap(m) {
         game.pos.x += ex * 0.15;
         game.pos.z += ez * 0.15;
       }
+      if (game.world) game.pos.y = game.world.height(game.pos.x, game.pos.z);
     }
   }
   // Footsteps of others (positional).
@@ -893,6 +966,33 @@ const vim = new Vim(settings, {
   lookStep(dir, n, fast) {
     applyLook(aim.stepDelta(dir, n, fast, zoomFactor()));
   },
+  spot() {
+    // The enemy closest to the crosshair (within 6°) that you can see.
+    if (!game.world) return;
+    const eye = { x: game.pos.x, y: game.pos.y + eyeHeight(game.sneak), z: game.pos.z };
+    const snap = game.snaps[game.snaps.length - 1];
+    if (!snap) return;
+    let best = null;
+    for (const [id, p] of snap.players) {
+      if (id === game.myId || !p.alive) continue;
+      const head = { x: p.x, y: p.y + (p.sneak ? 1.2 : 1.6), z: p.z };
+      const dx = head.x - eye.x;
+      const dy = head.y - eye.y;
+      const dz = head.z - eye.z;
+      const dist = Math.hypot(dx, dy, dz);
+      const yawErr = Math.abs(bearing(dx, dz, game.yaw));
+      const pitchErr = Math.abs(Math.atan2(dy, Math.hypot(dx, dz)) - game.pitch);
+      const err = Math.hypot(yawErr, pitchErr);
+      if (err > 6 * DEG || dist > 250) continue;
+      if (!game.world.lineOfSight(eye, head)) continue;
+      if (!best || err < best.err) best = { id, err };
+    }
+    if (best) {
+      game.spotted.set(best.id, performance.now() + 6000);
+      balloon(`${nameOf(best.id)} をマークしました`, '6 秒間、壁越しでも ▼ が見えます');
+      sound.click();
+    } else balloon('E486: Pattern not found', '照準の近くに見えている敵がいません');
+  },
   zoom() {
     game.zoom = game.zoom === 2 ? 1 : 2;
   },
@@ -945,7 +1045,9 @@ for (const ev of ['mousedown', 'wheel', 'contextmenu']) {
     ev,
     (e) => {
       if (vim.mode === 'insert' || vim.mode === 'command') return;
+      if (e.target && e.target.closest && e.target.closest('#touchpad')) return;
       e.preventDefault();
+      if (touch.active) return;
       const now = performance.now();
       if (now - mouseNote > 5000) {
         mouseNote = now;
@@ -1114,8 +1216,12 @@ function frame(now) {
       game.adsK = game.ads ? 1 : 0;
     }
     const gun = heldGun();
+    const sel = game.me && game.me.inv.sel;
+    renderer.setHeld(sel === 'medkit' || sel === 'grenade' ? sel : gun ? gun.gun : null);
     const scoped = game.ads && game.zoom === 2 && gun && gun.gun === 'sr';
     show('scope', scoped);
+    const style = game.ads && game.adsK > 0.6 && !scoped ? renderer.adsStyle() : null;
+    $('crosshair').dataset.mode = style ? `ads-${style}` : vim.mode === 'view' ? 'view' : vim.mode === 'normal' ? 'normal' : 'other';
     const bobOn = settings.get('bob');
     if (bobOn) game.kick = Math.max(0, game.kick - dt * 0.6);
     else game.kick = 0;
@@ -1125,7 +1231,7 @@ function frame(now) {
     const view = interpolated(now);
     for (const [id, p] of view) {
       if (id === game.myId) continue;
-      renderer.setPlayer(id, p, nameOf(id));
+      renderer.setPlayer(id, p, nameOf(id), markOf(id, p, now));
     }
     renderer.updateEffects(dt);
     const eye = eyeHeight(game.sneak);
@@ -1149,6 +1255,7 @@ function frame(now) {
       game.conn.send({ t: 'ping', id: game.pingSeq });
     }
     updateHud(dt);
+    updateCompass(now);
   }
   if (settings.get('showfps')) {
     fpsAcc += dt;
@@ -1160,6 +1267,65 @@ function frame(now) {
     }
   }
   requestAnimationFrame(frame);
+}
+
+/// Marker over an enemy: 'spotted' (marked with *), 'seen' (in view), or null.
+function markOf(id, p, now) {
+  if (!p.alive) return null;
+  const until = game.spotted.get(id);
+  if (until && until > now) return 'spotted';
+  if (until) game.spotted.delete(id);
+  if (!settings.get('markers') || !game.world) return null;
+  const dx = p.x - game.pos.x;
+  const dz = p.z - game.pos.z;
+  const dist = Math.hypot(dx, dz);
+  if (dist > 150 || Math.abs(bearing(dx, dz, game.yaw)) > (game.fov * DEG) * 0.75) return null;
+  // Line of sight, checked a few times a second per enemy.
+  const c = game.seen.get(id);
+  if (c && now - c.t < 150) return c.v ? 'seen' : null;
+  const eye = { x: game.pos.x, y: game.pos.y + eyeHeight(game.sneak), z: game.pos.z };
+  const v = game.world.lineOfSight(eye, { x: p.x, y: p.y + (p.sneak ? 1.2 : 1.6), z: p.z });
+  game.seen.set(id, { t: now, v });
+  return v ? 'seen' : null;
+}
+
+let compassAt = 0;
+/// The compass strip: headings, gunfire (red), footsteps (orange), marked (yellow).
+function updateCompass(now) {
+  const el = $('compass');
+  const on = settings.get('compass') && !!game.map;
+  el.classList.toggle('hidden', !on);
+  if (!on || now - compassAt < 33) return;
+  compassAt = now;
+  const span = 100 * DEG; // half width in radians
+  const pct = (a) => 50 - (a / span) * 50;
+  let html = '';
+  const heading = ((((-game.yaw / DEG) % 360) + 360) % 360);
+  for (let d = 0; d < 360; d += 15) {
+    const a = wrapAngle(-(d - heading) * DEG);
+    if (Math.abs(a) > span) continue;
+    const name = { 0: 'N', 90: 'E', 180: 'S', 270: 'W' }[d];
+    html += `<i class="tick${name ? ' big' : ''}" style="left:${pct(a)}%">${name || (d % 45 === 0 ? d : '')}</i>`;
+  }
+  game.shots = game.shots.filter((s) => now - s.t < 3500);
+  const dot = (dx, dz, cls, label = '') => {
+    const a = bearing(dx, dz, game.yaw);
+    const edge = Math.abs(a) > span;
+    const left = edge ? (a > 0 ? 0 : 100) : pct(a);
+    html += `<b class="${cls}${edge ? ' edge' : ''}" style="left:${left}%">${label}</b>`;
+  };
+  for (const sh of game.shots) dot(sh.x - game.pos.x, sh.z - game.pos.z, 'shot');
+  const snap = game.snaps[game.snaps.length - 1];
+  if (snap) {
+    for (const [id, p] of snap.players) {
+      if (id === game.myId || !p.alive) continue;
+      const dx = p.x - game.pos.x;
+      const dz = p.z - game.pos.z;
+      if (game.spotted.has(id)) dot(dx, dz, 'spot', '▼');
+      else if (p.mv && !p.sneak && Math.hypot(dx, dz) < 35) dot(dx, dz, 'step');
+    }
+  }
+  el.innerHTML = `<div class="strip">${html}</div><span class="hdg">${Math.round(heading)}°</span>`;
 }
 
 function updateHud() {
@@ -1200,6 +1366,12 @@ function updateHud() {
 }
 
 // ---------------------------------------------------------------- boot
+
+const touch = new TouchPad($('touchpad'), settings, (ev) => {
+  sound.wake();
+  if (vim.mode === 'insert' || vim.mode === 'command') return;
+  vim.key(ev);
+});
 
 async function boot() {
   showTitle();
