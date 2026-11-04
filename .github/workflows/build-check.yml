@@ -30,4 +30,5 @@ jobs:
           merge-multiple: true
           path: binaries
       - name: Built targets
-        run: ls binaries | sed 's/^/built: /'
+        run: |
+          ls binaries | sed 's/^/built: /'
