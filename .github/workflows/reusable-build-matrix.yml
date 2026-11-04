@@ -46,7 +46,10 @@ jobs:
           # ── main platforms ───────────────────────────────────────
           # (`features: ""` here only declares the field, so that the
           # matrix stays valid while no target sets one.)
-          - { target: aarch64-apple-darwin, os: macos-latest, features: "" }
+          # (Both Apple targets build on the Intel runner: GitHub's arm64
+          # macOS runners are short of capacity. The arm64 binary is
+          # cross-compiled there and cannot run, so it skips the smoke test.)
+          - { target: aarch64-apple-darwin, os: macos-26-intel, features: "", nosmoke: true }
           - { target: x86_64-apple-darwin, os: macos-26-intel }
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
           - { target: aarch64-pc-windows-msvc, os: windows-11-arm }
@@ -57,7 +60,7 @@ jobs:
           # ── more Windows / macOS flavors ─────────────────────────
           - { target: i686-pc-windows-msvc, os: windows-latest }
           - { target: x86_64-pc-windows-gnu, os: windows-latest }
-          - { target: universal-apple-darwin, os: macos-latest, universal: true }
+          - { target: universal-apple-darwin, os: macos-26-intel, universal: true }
           # ── more Linux ───────────────────────────────────────────
           - { target: i686-unknown-linux-gnu, os: ubuntu-latest, cross: true }
           - { target: i686-unknown-linux-musl, os: ubuntu-latest, cross: true }
@@ -147,7 +150,7 @@ jobs:
             exit 1
           fi
       - name: Smoke test
-        if: ${{ !matrix.cross }}
+        if: ${{ !matrix.cross && !matrix.nosmoke }}
         run: |
           exe="$BIN"; [[ "$TARGET" == *windows* ]] && exe="$BIN.exe"
           "target/$TARGET/release/$exe" --version
