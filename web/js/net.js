@@ -1,7 +1,7 @@
 // Connections. Both kinds look the same to the game: send(obj), and
 // onmessage(msg) / onclose(reason) callbacks.
 
-export const PROTOCOL = 1;
+export const PROTOCOL = 2;
 
 /// WebSocket to a CLI host. The page's own host when url is omitted.
 export class WsConnection {
@@ -54,6 +54,14 @@ async function loadWasm() {
 
 /// Practice mode: the server's simulation running in the page (wasm).
 export class LocalConnection {
+  /// The game's numbers without joining (for :spec on the title screen).
+  static async specs() {
+    const ex = await loadWasm();
+    const n = ex.vf_specs();
+    const ptr = ex.vf_out();
+    return JSON.parse(new TextDecoder().decode(new Uint8Array(ex.memory.buffer, ptr, n)));
+  }
+
   static async create(seed, bots) {
     const ex = await loadWasm();
     return new LocalConnection(ex, seed, bots);

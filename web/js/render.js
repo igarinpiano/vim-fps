@@ -50,6 +50,28 @@ function labelSprite(text, color = '#ffffff', bg = 'rgba(0,0,0,0.45)', scale = 1
   return s;
 }
 
+function makeMarker() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 32;
+  const g = c.getContext('2d');
+  g.fillStyle = '#ffffff';
+  g.strokeStyle = '#000000';
+  g.lineWidth = 3;
+  g.beginPath();
+  g.moveTo(4, 6);
+  g.lineTo(28, 6);
+  g.lineTo(16, 26);
+  g.closePath();
+  g.stroke();
+  g.fill();
+  const tex = new THREE.CanvasTexture(c);
+  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true, sizeAttenuation: false });
+  const s = new THREE.Sprite(mat);
+  s.scale.set(0.035, 0.035, 1);
+  s.renderOrder = 10;
+  return s;
+}
+
 export class Renderer {
   constructor(canvas, settings) {
     this.s = settings;
@@ -98,30 +120,45 @@ export class Renderer {
 
   buildMap(map) {
     this.clear();
-    // Ground with a grid so movement is easy to see.
-    const c = document.createElement('canvas');
-    c.width = c.height = 128;
-    const g = c.getContext('2d');
-    g.fillStyle = '#6fae4a';
-    g.fillRect(0, 0, 128, 128);
-    g.strokeStyle = '#64a043';
-    g.lineWidth = 2;
-    g.strokeRect(0, 0, 128, 128);
-    for (let i = 0; i < 60; i++) {
-      g.fillStyle = Math.random() < 0.5 ? '#79b852' : '#65a344';
-      g.fillRect(Math.random() * 128, Math.random() * 128, 3, 3);
-    }
-    const tex = new THREE.CanvasTexture(c);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(map.half / 2, map.half / 2);
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(map.half * 2 + 200, map.half * 2 + 200),
-      new THREE.MeshLambertMaterial({ map: tex }),
+    // Outside the fence: flat ground.
+    const outer = new THREE.Mesh(
+      new THREE.PlaneGeometry(map.half * 2 + 400, map.half * 2 + 400),
+      new THREE.MeshLambertMaterial({ color: 0x5f9a40 }),
     );
-    tex.repeat.set((map.half * 2 + 200) / 4, (map.half * 2 + 200) / 4);
-    ground.rotation.x = -Math.PI / 2;
-    this.mapGroup.add(ground);
+    outer.rotation.x = -Math.PI / 2;
+    outer.position.y = -0.05;
+    this.mapGroup.add(outer);
+
+    // The terrain: one vertex per height sample, coloured by height, with a
+    // faint grid so slopes and movement are easy to read.
+    const n = map.grid;
+    const geo = new THREE.PlaneGeometry(map.half * 2, map.half * 2, n - 1, n - 1);
+    geo.rotateX(-Math.PI / 2);
+    const pos = geo.attributes.position;
+    const colors = new Float32Array(pos.count * 3);
+    const low = new THREE.Color(0x5e9b3e);
+    const mid = new THREE.Color(0x7fb24f);
+    const high = new THREE.Color(0xb6b27a);
+    const c = new THREE.Color();
+    for (let k = 0; k < pos.count; k++) {
+      // PlaneGeometry rows run from -z to +z after the rotation, matching
+      // the row-major (z, then x) height grid.
+      const i = k % n;
+      const j = Math.floor(k / n);
+      const y = map.heights[j * n + i];
+      pos.setY(k, y);
+      const t = Math.max(0, Math.min(1, y / 9));
+      if (t < 0.5) c.copy(low).lerp(mid, t * 2);
+      else c.copy(mid).lerp(high, (t - 0.5) * 2);
+      const checker = (i + j) % 2 ? 1 : 0.95;
+      colors[k * 3] = c.r * checker;
+      colors[k * 3 + 1] = c.g * checker;
+      colors[k * 3 + 2] = c.b * checker;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.computeVertexNormals();
+    const terrain = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+    this.mapGroup.add(terrain);
 
     const mats = {};
     for (const [k, col] of Object.entries(COLORS)) mats[k] = new THREE.MeshLambertMaterial({ color: col });
@@ -142,28 +179,117 @@ export class Renderer {
     }
   }
 
+  /// One model per gun (and items), each with its own sight picture when
+  /// aiming down sights.
   buildViewmodel() {
+    const dark = new THREE.MeshLambertMaterial({ color: 0x2b2f36 });
+    const black = new THREE.MeshLambertMaterial({ color: 0x111316 });
+    const wood = new THREE.MeshLambertMaterial({ color: 0x7a4f2a });
+    const glass = new THREE.MeshBasicMaterial({ color: 0x9fd0ff, transparent: true, opacity: 0.18, depthWrite: false });
+    const red = new THREE.MeshBasicMaterial({ color: 0xff2a2a });
+    const B = (w, h, d, mat, x = 0, y = 0, z = 0) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+      m.position.set(x, y, z);
+      return m;
+    };
+    const Cyl = (r, len, mat, x = 0, y = 0, z = 0) => {
+      const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 14), mat);
+      m.rotation.x = Math.PI / 2;
+      m.position.set(x, y, z);
+      return m;
+    };
+    const ring = (r, tube, mat, y, z) => {
+      const m = new THREE.Mesh(new THREE.TorusGeometry(r, tube, 6, 24), mat);
+      m.position.set(0, y, z);
+      return m;
+    };
+    const models = {};
+    // AR: long body, angled magazine, holographic sight (rectangular frame).
+    {
+      const g = new THREE.Group();
+      g.add(B(0.07, 0.09, 0.56, dark), B(0.035, 0.035, 0.3, black, 0, 0.015, -0.42));
+      const mag = B(0.05, 0.16, 0.07, black, 0, -0.11, -0.06);
+      mag.rotation.x = 0.25;
+      g.add(mag, B(0.055, 0.13, 0.06, dark, 0, -0.1, 0.12), B(0.06, 0.09, 0.18, dark, 0, -0.01, 0.34));
+      // Holo frame: two posts and a hood around a window.
+      g.add(B(0.006, 0.05, 0.05, black, -0.026, 0.075, -0.05), B(0.006, 0.05, 0.05, black, 0.026, 0.075, -0.05));
+      g.add(B(0.058, 0.006, 0.05, black, 0, 0.1, -0.05), B(0.058, 0.012, 0.07, black, 0, 0.048, -0.05));
+      g.add(B(0.046, 0.04, 0.002, glass, 0, 0.075, -0.05));
+      models.ar = { group: g, sight: 0.075, ads: 'holo' };
+    }
+    // SMG: short, straight magazine, ring sight.
+    {
+      const g = new THREE.Group();
+      g.add(B(0.065, 0.085, 0.36, dark), B(0.03, 0.03, 0.12, black, 0, 0.01, -0.24));
+      g.add(B(0.04, 0.2, 0.05, black, 0, -0.14, -0.05), B(0.05, 0.12, 0.06, dark, 0, -0.09, 0.1));
+      g.add(ring(0.018, 0.004, black, 0.075, -0.02), B(0.01, 0.03, 0.01, black, 0, 0.055, -0.02));
+      g.add(B(0.008, 0.02, 0.008, black, 0, 0.06, -0.19));
+      models.smg = { group: g, sight: 0.075, ads: 'ring' };
+    }
+    // SG: long tube, wooden pump and stock, bead sight.
+    {
+      const g = new THREE.Group();
+      g.add(Cyl(0.022, 0.62, black, 0, 0.02, -0.18), Cyl(0.016, 0.5, black, 0, -0.02, -0.15));
+      g.add(B(0.06, 0.07, 0.16, wood, 0, -0.02, -0.18), B(0.07, 0.09, 0.22, dark, 0, 0, 0.1));
+      g.add(B(0.06, 0.1, 0.22, wood, 0, -0.03, 0.3));
+      const bead = new THREE.Mesh(new THREE.SphereGeometry(0.008, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffe9a0 }));
+      bead.position.set(0, 0.048, -0.48);
+      g.add(bead);
+      models.sg = { group: g, sight: 0.048, ads: 'bead' };
+    }
+    // SR: long barrel, big scope, bolt.
+    {
+      const g = new THREE.Group();
+      g.add(B(0.07, 0.08, 0.62, wood), Cyl(0.017, 0.5, black, 0, 0.02, -0.52));
+      g.add(Cyl(0.03, 0.34, black, 0, 0.09, -0.02), Cyl(0.038, 0.06, black, 0, 0.09, -0.19), Cyl(0.036, 0.05, black, 0, 0.09, 0.15));
+      g.add(B(0.02, 0.04, 0.02, black, 0, 0.05, -0.1), B(0.02, 0.04, 0.02, black, 0, 0.05, 0.08));
+      g.add(B(0.05, 0.015, 0.015, black, 0.05, 0.03, 0.1));
+      models.sr = { group: g, sight: 0.09, ads: 'scope' };
+    }
+    // Items.
+    {
+      const g = new THREE.Group();
+      g.add(B(0.16, 0.11, 0.06, new THREE.MeshLambertMaterial({ color: 0xd83a3a })));
+      g.add(B(0.07, 0.02, 0.062, new THREE.MeshBasicMaterial({ color: 0xffffff })), B(0.02, 0.07, 0.062, new THREE.MeshBasicMaterial({ color: 0xffffff })));
+      models.medkit = { group: g, sight: 0, ads: null };
+    }
+    {
+      const g = new THREE.Group();
+      const ball = new THREE.Mesh(new THREE.SphereGeometry(0.045, 12, 8), new THREE.MeshLambertMaterial({ color: 0x3a5a26 }));
+      g.add(ball, B(0.02, 0.03, 0.02, black, 0, 0.05, 0), B(0.06, 0.008, 0.012, black, 0.025, 0.06, 0));
+      models.grenade = { group: g, sight: 0, ads: null };
+    }
     const vm = new THREE.Group();
-    const mat = new THREE.MeshLambertMaterial({ color: 0x2b2f36 });
-    const body = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.5), mat);
-    const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.3), mat);
-    barrel.position.set(0, 0.02, -0.38);
-    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.14, 0.07), mat);
-    grip.position.set(0, -0.1, 0.1);
-    const sight = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.04, 0.12), new THREE.MeshLambertMaterial({ color: 0x111111 }));
-    sight.position.set(0, 0.07, 0);
-    vm.add(body, barrel, grip, sight);
-    const flash = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 4), new THREE.MeshBasicMaterial({ color: 0xffd36b }));
-    flash.position.set(0, 0.02, -0.56);
+    for (const m of Object.values(models)) {
+      m.group.visible = false;
+      vm.add(m.group);
+    }
+    const flash = new THREE.Mesh(new THREE.SphereGeometry(0.05, 6, 4), new THREE.MeshBasicMaterial({ color: 0xffd36b }));
     flash.visible = false;
     vm.add(flash);
-    this.flash = flash;
     vm.scale.setScalar(0.6);
+    this.flash = flash;
+    this.models = models;
     this.viewmodel = vm;
     this.camera.add(vm);
     this.vmHip = new THREE.Vector3(0.16, -0.14, -0.34);
-    this.vmAds = new THREE.Vector3(0, -0.064, -0.26);
-    vm.position.copy(this.vmHip);
+    this.vmTarget = new THREE.Vector3();
+    void red;
+  }
+
+  /// Which model is in your hands ('ar', 'sr', 'medkit', ...).
+  setHeld(kind) {
+    if (this.held === kind) return;
+    this.held = kind;
+    for (const [k, m] of Object.entries(this.models)) m.group.visible = k === kind;
+    const len = { ar: -0.72, smg: -0.42, sg: -0.66, sr: -1.0 }[kind];
+    this.flash.position.set(0, 0.02, len ?? -0.5);
+  }
+
+  /// Sight style of what is held while aiming (for the HUD reticle).
+  adsStyle() {
+    const m = this.models[this.held];
+    return m ? m.ads : null;
   }
 
   ensurePlayer(id, name) {
@@ -190,8 +316,12 @@ export class Renderer {
     const label = labelSprite(name || `#${id}`);
     label.position.y = 2.15;
     group.add(label);
+    const marker = makeMarker();
+    marker.position.y = 2.6;
+    marker.visible = false;
+    group.add(marker);
     this.scene.add(group);
-    p = { group, body, head, gun, label, name };
+    p = { group, body, head, gun, label, name, marker };
     this.players.set(id, p);
     return p;
   }
@@ -204,8 +334,13 @@ export class Renderer {
     }
   }
 
-  setPlayer(id, st, name) {
+  /// mark: null, 'seen' (in view) or 'spotted' (marked with *, shows through walls).
+  setPlayer(id, st, name, mark = null) {
     const p = this.ensurePlayer(id, name);
+    p.marker.visible = !!mark && st.alive;
+    if (mark) p.marker.material.color.setHex(mark === 'spotted' ? 0xffd400 : 0xff3030);
+    const len = { ar: 0.6, smg: 0.4, sg: 0.65, sr: 0.9 }[st.gun] || 0.5;
+    p.gun.scale.z = len / 0.6;
     p.group.visible = st.alive;
     p.group.position.set(st.x, st.y, st.z);
     p.group.rotation.y = st.yaw;
@@ -321,9 +456,15 @@ export class Renderer {
       this.camera.updateProjectionMatrix();
     }
     this.viewmodel.visible = !vm.hide;
-    this.viewmodel.position.lerpVectors(this.vmHip, this.vmAds, vm.ads);
+    const m = this.models[this.held];
+    // Aiming: the sight's centre sits exactly on the screen centre.
+    const sight = m ? m.sight * this.viewmodel.scale.y : 0;
+    const ads = m && m.ads ? vm.ads : 0;
+    this.vmTarget.set(0, -sight, m && m.ads === 'scope' ? -0.22 : -0.32);
+    this.viewmodel.position.lerpVectors(this.vmHip, this.vmTarget, ads);
     this.viewmodel.position.y += vm.bob;
     this.viewmodel.position.z += vm.kick;
+    this.viewmodel.rotation.z = (1 - ads) * 0.04;
     this.renderer.render(this.scene, this.camera);
   }
 }

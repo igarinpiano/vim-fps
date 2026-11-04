@@ -7,17 +7,12 @@ use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use rust_embed::RustEmbed;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use vimfps_core::{ClientId, ClientMsg, Config, Room, ServerMsg, Target, sim::TICK_RATE};
-
-#[derive(RustEmbed)]
-#[folder = "../../web/"]
-struct Web;
 
 #[derive(clap::Args, Clone)]
 pub struct HostArgs {
@@ -54,6 +49,10 @@ pub struct HostArgs {
     /// 起動時に新しいバージョンを確認しない
     #[arg(long)]
     pub no_update_check: bool,
+    /// 配信する Web クライアント: 公開版の URL (起動時と 10 分ごとに最新を取得)
+    /// か、`embedded` (この CLI に埋め込まれた版)
+    #[arg(long, env = "VIMFPS_WEB", default_value = crate::webclient::DEFAULT_WEB)]
+    pub web: String,
 }
 
 impl Default for HostArgs {
@@ -70,6 +69,7 @@ impl Default for HostArgs {
             seed: None,
             name: "vim-fps".into(),
             no_update_check: false,
+            web: crate::webclient::DEFAULT_WEB.into(),
         }
     }
 }
@@ -91,6 +91,7 @@ struct AppState {
     events: mpsc::Sender<Event>,
     info: Arc<serde_json::Value>,
     tunnel: bool,
+    web: crate::webclient::Shared,
 }
 
 pub fn run(args: HostArgs) -> i32 {
@@ -137,7 +138,15 @@ async fn host(args: HostArgs) -> i32 {
         "protocol": vimfps_core::PROTOCOL,
         "password": cfg.password.is_some(),
     });
+    let source = args.web.clone();
+    let files = tokio::task::spawn_blocking(move || crate::webclient::initial(&source))
+        .await
+        .unwrap_or_else(|_| crate::webclient::Files::embedded());
+    let web_label = files.label.clone();
+    let web: crate::webclient::Shared = Arc::new(std::sync::RwLock::new(Arc::new(files)));
+    crate::webclient::spawn_refresh(args.web.clone(), web.clone());
     let state = AppState {
+        web,
         events: ev_tx,
         info: Arc::new(info),
         tunnel: args.tunnel,
@@ -170,6 +179,7 @@ async fn host(args: HostArgs) -> i32 {
     if !args.no_update_check && std::env::var_os("VIMFPS_NO_UPDATE_CHECK").is_none() {
         tokio::task::spawn_blocking(crate::update::notify_if_newer);
     }
+    println!("  Web クライアント: {web_label}");
     println!("Ctrl+C で終了します");
 
     let server = axum::serve(
@@ -216,13 +226,14 @@ async fn server_info(State(st): State<AppState>) -> Response {
         .into_response()
 }
 
-async fn static_file(uri: Uri) -> Response {
+async fn static_file(State(st): State<AppState>, uri: Uri) -> Response {
     let mut path = uri.path().trim_start_matches('/').to_string();
     if path.is_empty() || path.ends_with('/') {
         path.push_str("index.html");
     }
-    match Web::get(&path) {
-        Some(f) => {
+    let files = st.web.read().map(|f| f.clone()).ok();
+    match files.and_then(|f| f.get(&path)) {
+        Some(data) => {
             let mime = if path.ends_with(".wasm") {
                 "application/wasm".to_string()
             } else {
@@ -235,7 +246,7 @@ async fn static_file(uri: Uri) -> Response {
                     (header::CONTENT_TYPE, mime),
                     (header::CACHE_CONTROL, "no-cache".into()),
                 ],
-                f.data.into_owned(),
+                data,
             )
                 .into_response()
         }
@@ -418,12 +429,6 @@ async fn game_loop(cfg: Config, mut events: mpsc::Receiver<Event>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn embedded_client_present() {
-        assert!(Web::get("index.html").is_some());
-        assert!(Web::get("js/main.js").is_some());
-    }
 
     #[test]
     fn encodes() {

@@ -126,7 +126,7 @@ body.uianim .balloon.out { opacity: 0; transition: opacity 0.4s; }
 #cmdinput { flex: 1; width: auto; }
 #cmdwin .hint { flex-basis: 100%; }
 #msgwin { left: 50%; top: 45%; transform: translate(-50%, -50%); max-width: calc(100vw - 32px); }
-#msg-body { margin: 0; font: 13px/1.5 var(--mono); background: #fff; border: 1px solid #7f9db9; padding: 8px 10px; max-height: calc(100vh - 200px); overflow: auto; white-space: pre-wrap; min-width: min(560px, calc(100vw - 60px)); }
+#msg-body { margin: 0; font: 13px/1.5 var(--mono); background: #fff; border: 1px solid #7f9db9; padding: 8px 10px; max-height: calc(100vh - 200px); max-width: calc(100vw - 60px); overflow: auto; white-space: pre; min-width: min(560px, calc(100vw - 60px)); }
 #msg-body .err { color: #c00000; }
 #deathwin { left: 50%; top: 38%; transform: translate(-50%, -50%); width: min(400px, calc(100vw - 32px)); }
 #deathwin .body { display: flex; gap: 14px; align-items: flex-start; }
@@ -165,6 +165,55 @@ body.uianim .balloon.out { opacity: 0; transition: opacity 0.4s; }
   background: linear-gradient(180deg, #19a0f2, var(--tray) 15%, #0b72cc 100%); border-left: 1px solid #0a4ea8; box-shadow: inset 1px 0 0 #4fc0ff; }
 #clock { font-variant-numeric: tabular-nums; }
 #imewarn { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 60; background: #ffffe1; border: 1px solid #000; padding: 6px 12px; border-radius: 6px; }
+
+/* ---------- sight pictures while aiming (crosshair replaced) ---------- */
+#crosshair[data-mode^="ads-"]::before, #crosshair[data-mode^="ads-"]::after { box-shadow: none; }
+#crosshair[data-mode="ads-holo"]::before { width: 5px; height: 5px; left: -2.5px; top: -2.5px; border-radius: 50%; background: #ff2a2a; box-shadow: 0 0 4px #ff4040; }
+#crosshair[data-mode="ads-holo"]::after { width: 34px; height: 34px; left: -17px; top: -17px; border-radius: 50%; background: transparent; border: 1.5px solid rgba(255,60,60,0.75); }
+#crosshair[data-mode="ads-ring"]::before { width: 3px; height: 3px; left: -1.5px; top: -1.5px; border-radius: 50%; background: #fff; }
+#crosshair[data-mode="ads-ring"]::after { width: 26px; height: 26px; left: -13px; top: -13px; border-radius: 50%; background: transparent; border: 3px solid rgba(20,20,20,0.85); }
+#crosshair[data-mode="ads-bead"]::before { width: 7px; height: 7px; left: -3.5px; top: -3.5px; border-radius: 50%; background: #ffe9a0; border: 1px solid #000; }
+#crosshair[data-mode="ads-bead"]::after { display: none; }
+#crosshair[data-mode="ads-scope"]::before { width: 2px; height: 14px; left: -1px; top: -1px; background: #111; }
+#crosshair[data-mode="ads-scope"]::after { width: 30px; height: 2px; left: -15px; top: -1px; background: #111; }
+
+/* ---------- compass (spotting) ---------- */
+#compass { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); width: min(520px, calc(100vw - 230px)); height: 34px; z-index: 3;
+  background: linear-gradient(180deg, rgba(16,40,110,0.7), rgba(10,30,90,0.55)); border: 1px solid rgba(255,255,255,0.5); border-radius: 4px; overflow: hidden; color: #fff; font-size: 11px; }
+#compass .strip { position: absolute; inset: 0; }
+#compass .tick { position: absolute; top: 2px; transform: translateX(-50%); font-style: normal; color: #cfe0ff; }
+#compass .tick::after { content: ""; position: absolute; left: 50%; top: 14px; width: 1px; height: 6px; background: rgba(255,255,255,0.6); }
+#compass .tick.big { color: #fff; font-weight: 700; font-size: 12px; }
+#compass b { position: absolute; bottom: 2px; width: 9px; height: 9px; margin-left: -4.5px; border-radius: 50%; font-size: 10px; line-height: 9px; text-align: center; }
+#compass b.shot { background: #ff3030; box-shadow: 0 0 4px #ff3030; }
+#compass b.step { background: #ff9a2a; }
+#compass b.spot { background: transparent; color: #ffd400; font-size: 13px; text-shadow: 0 0 2px #000; }
+#compass b.edge { opacity: 0.55; }
+#compass .hdg { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); font: 700 10px var(--mono); background: rgba(0,0,0,0.4); padding: 0 3px; }
+#compass::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #ffd400; }
+
+/* ---------- touch pad (phones, tablets) ---------- */
+#touchpad { position: absolute; left: 0; right: 0; bottom: 40px; z-index: 35; pointer-events: none; display: flex; justify-content: space-between; align-items: flex-end; padding: 0 10px; }
+#touchpad .pad { display: grid; gap: 6px; pointer-events: auto; }
+#touchpad .pad.left { grid-template-columns: repeat(3, 56px); }
+#touchpad .pad.right { grid-template-columns: repeat(3, 50px); }
+#touchpad button { height: 46px; border-radius: 8px; border: 1px solid #0b45b8; color: #fff; font: 700 16px var(--mono); touch-action: none; user-select: none; -webkit-user-select: none;
+  background: linear-gradient(180deg, rgba(74,140,247,0.75), rgba(29,95,214,0.75)); }
+#touchpad .pad.left button { height: 56px; font-size: 20px; }
+#touchpad button.fire { background: linear-gradient(180deg, rgba(232,121,93,0.85), rgba(194,64,31,0.85)); }
+#touchpad button.down, #touchpad button.on { background: linear-gradient(180deg, #ffd36b, #e0a020); color: #000; }
+#touchpad button.blank { visibility: hidden; }
+#touchpad button[data-key="Shift"], #touchpad button[data-key="Escape"] { font-size: 12px; }
+body.touch #chatlog { bottom: 220px; }
+body.touch #balloons { bottom: 380px; }
+@media (max-width: 640px) {
+  #compass { width: calc(100vw - 24px); top: 44px; }
+  #rank { font-size: 11px; top: 6px; }
+  #touchpad .pad.left { grid-template-columns: repeat(3, 48px); }
+  #touchpad .pad.right { grid-template-columns: repeat(3, 42px); }
+  #touchpad button { height: 40px; font-size: 14px; }
+  #touchpad .pad.left button { height: 48px; }
+}
 
 @keyframes pop { from { transform: scale(0.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 @keyframes fade { from { opacity: 1; } to { opacity: 0; } }

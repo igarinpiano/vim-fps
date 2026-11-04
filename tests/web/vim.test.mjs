@@ -40,7 +40,7 @@ test('count walks n metres; Shift-key release still stops walking', () => {
   assert.deepEqual(only(log, 'move').at(-1), ['move', 'fwd', false]);
 });
 
-test('dd, {count}dd, gt, << >> ~', () => {
+test('dd, {count}dd, gt, {n}, . ~ *', () => {
   const { log, down } = setup('turnangle=30');
   down('d');
   down('d');
@@ -55,12 +55,21 @@ test('dd, {count}dd, gt, << >> ~', () => {
   down('t');
   assert.equal(only(log, 'swapGun').length, 1);
   down('2');
-  down('<');
-  down('<');
-  down('>');
-  down('>');
+  down(',');
+  down('.');
   down('~');
+  down('*');
   assert.deepEqual(only(log, 'turn'), [['turn', 60], ['turn', -30], ['turn', 180]]);
+  assert.equal(only(log, 'spot').length, 1);
+});
+
+test('keys without a mapping do nothing (no chat)', () => {
+  const { log, down, vim } = setup();
+  for (const k of ['a', 'A', 'b', 'q', 'z', 'x', 'Tab', ' ', 'Enter', 'o', 'p', 'u']) down(k);
+  assert.equal(only(log, 'insert').length, 0);
+  assert.equal(vim.mode, 'normal');
+  down('i');
+  assert.equal(only(log, 'insert').length, 1);
 });
 
 test('pending keys time out', () => {
@@ -121,7 +130,7 @@ test('inventory: j/k, gg, G, close; Ctrl-[ is Esc', () => {
 
 test('aim: a tap steps, holding accelerates up to maxspeed, accel=inf is instant', () => {
   const s = new Settings(null);
-  s.command('step=2 aimdelay=100 sens=100 accel=1000 maxspeed=300');
+  s.command('step=2 aimdelay=100 accelafter=0 sens=100 accel=1000 maxspeed=300');
   const aim = new Aim(s);
   assert.deepEqual(aim.press('left', false), { yaw: 2, pitch: 0 });
   assert.equal(aim.update(0.05).yaw, 0);
@@ -135,4 +144,17 @@ test('aim: a tap steps, holding accelerates up to maxspeed, accel=inf is instant
   b.press('up', false);
   const d = b.update(0.2).pitch;
   assert.ok(Math.abs(d - 30) < 1e-6, `instant max speed: ${d}`);
+});
+
+test('aim: long press stays slow (fine) before accelafter', () => {
+  const s = new Settings(null);
+  s.command('step=0.2 aimdelay=100 accelafter=400 sens=10 accel=200 maxspeed=200');
+  const aim = new Aim(s);
+  aim.press('right', false);
+  let total = 0;
+  for (let i = 0; i < 50; i++) total += aim.update(0.01).yaw; // 0.5 s held
+  // 0.4 s of turning at 10 deg/s, no acceleration yet.
+  assert.ok(Math.abs(total + 4) < 0.01, `turned ${total}`);
+  for (let i = 0; i < 100; i++) total += aim.update(0.01).yaw;
+  assert.ok(total < -10, 'speeds up later');
 });

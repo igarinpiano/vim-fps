@@ -10,3 +10,12 @@ if [ -z "$cargo_v" ] || [ "$cargo_v" != "$web_v" ]; then
   echo "::error::web/js/version.js ($web_v) must match the workspace version ($cargo_v)"
   exit 1
 fi
+
+# The protocol number: crates/vimfps-core (server, wasm) and web/js/net.js.
+core_p="$(sed -n 's/^pub const PROTOCOL: u32 = \([0-9]*\);/\1/p' crates/vimfps-core/src/protocol.rs)"
+web_p="$(sed -n 's/^export const PROTOCOL = \([0-9]*\);/\1/p' web/js/net.js)"
+echo "protocol: core $core_p / web/js/net.js $web_p"
+if [ -z "$core_p" ] || [ "$core_p" != "$web_p" ]; then
+  echo "::error::web/js/net.js PROTOCOL ($web_p) must match crates/vimfps-core ($core_p)"
+  exit 1
+fi
