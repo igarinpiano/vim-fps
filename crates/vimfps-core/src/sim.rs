@@ -1,0 +1,1519 @@
+//! The authoritative game: a free-for-all deathmatch room. Transport-free:
+//! feed it messages and time, collect what it wants to send.
+
+use crate::map::{Map, PickupKind};
+use crate::math::{Aabb, Vec3, ray_sphere, wrap_angle};
+use crate::protocol::*;
+use crate::rng::Rng;
+use crate::weapons::*;
+use std::collections::BTreeMap;
+
+pub const TICK_RATE: f32 = 60.0;
+pub const SNAP_RATE: f32 = 20.0;
+pub const RUN_SPEED: f32 = 6.0;
+pub const SNEAK_SPEED: f32 = 2.6;
+pub const ACCEL: f32 = 40.0;
+pub const RESPAWN_TIME: f32 = 3.0;
+pub const PROTECT_TIME: f32 = 1.5;
+pub const INTERMISSION: f32 = 10.0;
+pub const MAX_HP: f32 = 100.0;
+pub const NAME_MAX: usize = 16;
+pub const CHAT_MAX: usize = 120;
+pub const WEAPON_RESPAWN: f32 = 30.0;
+pub const ITEM_RESPAWN: f32 = 20.0;
+pub const DROP_TTL: f32 = 30.0;
+pub const MAX_BOTS: u32 = 15;
+
+pub fn eye_height(sneak: bool) -> f32 {
+    if sneak { 1.15 } else { 1.6 }
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub seed: u64,
+    /// Seconds per match.
+    pub time_limit: f32,
+    pub frag_limit: u32,
+    /// Humans (bots do not count).
+    pub max_players: usize,
+    pub password: Option<String>,
+    /// Practice mode (browser): bots may be changed with `:bots`.
+    pub practice: bool,
+    pub bots: u32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            seed: 1,
+            time_limit: 600.0,
+            frag_limit: 25,
+            max_players: 12,
+            password: None,
+            practice: false,
+            bots: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    All,
+    One(ClientId),
+}
+
+#[derive(Debug, Clone, Default)]
+struct InputState {
+    mx: i8,
+    mz: i8,
+    sneak: bool,
+    ads: bool,
+    zoom: u8,
+    fire: bool,
+    instant: bool,
+}
+
+#[derive(Debug, Clone)]
+struct Bot {
+    waypoint: Vec3,
+    wander_timer: f32,
+    target: Option<ClientId>,
+    reaction: f32,
+    aim_err: (f32, f32),
+    err_timer: f32,
+    last_pos: Vec3,
+    stuck_timer: f32,
+}
+
+#[derive(Debug, Clone)]
+struct Player {
+    id: ClientId,
+    name: String,
+    bot: Option<Bot>,
+    pos: Vec3,
+    vel: Vec3,
+    yaw: f32,
+    pitch: f32,
+    input: InputState,
+    hp: f32,
+    alive: bool,
+    respawn: f32,
+    protect: f32,
+    inv: Inventory,
+    cooldown: f32,
+    reload: Option<f32>,
+    heal: Option<f32>,
+    trigger: f32,
+    kills: u32,
+    deaths: u32,
+    chat_budget: f32,
+}
+
+#[derive(Debug, Clone)]
+struct Pickup {
+    id: u32,
+    kind: PickupKind,
+    pos: Vec3,
+    active: bool,
+    timer: f32,
+    /// Dropped guns keep their ammunition and disappear after a while.
+    dropped: Option<GunSlot>,
+}
+
+#[derive(Debug, Clone)]
+struct Grenade {
+    id: u32,
+    owner: ClientId,
+    pos: Vec3,
+    vel: Vec3,
+    fuse: f32,
+}
+
+pub struct Room {
+    pub cfg: Config,
+    pub map: Map,
+    rng: Rng,
+    players: BTreeMap<ClientId, Player>,
+    next_id: ClientId,
+    next_obj: u32,
+    pickups: Vec<Pickup>,
+    pickups_dirty: bool,
+    roster_dirty: bool,
+    grenades: Vec<Grenade>,
+    left: f32,
+    intermission: Option<f32>,
+    snap_acc: f32,
+    out: Vec<(Target, ServerMsg)>,
+    bots_wanted: u32,
+}
+
+fn gun_of(kind: PickupKind) -> Option<Gun> {
+    match kind {
+        PickupKind::Ar => Some(Gun::Ar),
+        PickupKind::Smg => Some(Gun::Smg),
+        PickupKind::Sg => Some(Gun::Sg),
+        PickupKind::Sr => Some(Gun::Sr),
+        _ => None,
+    }
+}
+
+fn pickup_of(gun: Gun) -> PickupKind {
+    match gun {
+        Gun::Ar => PickupKind::Ar,
+        Gun::Smg => PickupKind::Smg,
+        Gun::Sg => PickupKind::Sg,
+        Gun::Sr => PickupKind::Sr,
+    }
+}
+
+/// Removes control characters and trims to `max` characters.
+pub fn sanitize(text: &str, max: usize) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(max)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn r2(v: f32) -> f32 {
+    (v * 100.0).round() / 100.0
+}
+
+impl Room {
+    pub fn new(cfg: Config) -> Room {
+        let map = Map::generate(cfg.seed);
+        let pickups = map
+            .pickups
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Pickup {
+                id: i as u32,
+                kind: p.kind,
+                pos: p.pos,
+                active: true,
+                timer: 0.0,
+                dropped: None,
+            })
+            .collect::<Vec<_>>();
+        let next_obj = pickups.len() as u32;
+        let mut room = Room {
+            rng: Rng::new(cfg.seed.wrapping_mul(31).wrapping_add(17)),
+            left: cfg.time_limit,
+            bots_wanted: cfg.bots.min(MAX_BOTS),
+            cfg,
+            map,
+            players: BTreeMap::new(),
+            next_id: 1,
+            next_obj,
+            pickups,
+            pickups_dirty: true,
+            roster_dirty: true,
+            grenades: Vec::new(),
+            intermission: None,
+            snap_acc: 0.0,
+            out: Vec::new(),
+        };
+        room.sync_bots();
+        room
+    }
+
+    /// Messages produced since the last call.
+    pub fn drain(&mut self) -> Vec<(Target, ServerMsg)> {
+        std::mem::take(&mut self.out)
+    }
+
+    pub fn humans(&self) -> usize {
+        self.players.values().filter(|p| p.bot.is_none()).count()
+    }
+
+    fn send(&mut self, to: Target, msg: ServerMsg) {
+        self.out.push((to, msg));
+    }
+
+    fn sys(&mut self, text: String) {
+        self.send(Target::All, ServerMsg::Sys { text });
+    }
+
+    /// A new connection's first message. On success returns its id; the
+    /// welcome message is queued.
+    pub fn join(
+        &mut self,
+        name: &str,
+        password: Option<&str>,
+        protocol: u32,
+    ) -> Result<ClientId, String> {
+        if protocol != PROTOCOL {
+            return Err(format!(
+                "プロトコルが違います (サーバー {PROTOCOL} / クライアント {protocol})。同じバージョンを使ってください"
+            ));
+        }
+        if let Some(pw) = &self.cfg.password
+            && password != Some(pw.as_str())
+        {
+            return Err("合言葉が違います".into());
+        }
+        if self.humans() >= self.cfg.max_players {
+            return Err("満員です".into());
+        }
+        let id = self.alloc_id();
+        let mut name = sanitize(name, NAME_MAX);
+        if name.is_empty() {
+            name = format!("player{id}");
+        }
+        if self.players.values().any(|p| p.name == name) {
+            name = format!("{}#{id}", sanitize(&name, NAME_MAX - 4));
+        }
+        self.add_player(id, name.clone(), None);
+        self.send(
+            Target::One(id),
+            ServerMsg::Welcome {
+                id,
+                version: crate::VERSION.into(),
+                protocol: PROTOCOL,
+                map: Box::new(self.map.clone()),
+                time_limit: self.cfg.time_limit,
+                frag_limit: self.cfg.frag_limit,
+                practice: self.cfg.practice,
+            },
+        );
+        self.spawn(id);
+        self.pickups_dirty = true;
+        self.sys(format!("{name} が参加しました"));
+        Ok(id)
+    }
+
+    pub fn leave(&mut self, id: ClientId) {
+        if let Some(p) = self.players.remove(&id) {
+            self.roster_dirty = true;
+            self.sys(format!("{} が退出しました", p.name));
+        }
+    }
+
+    fn alloc_id(&mut self) -> ClientId {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn add_player(&mut self, id: ClientId, name: String, bot: Option<Bot>) {
+        self.players.insert(
+            id,
+            Player {
+                id,
+                name,
+                bot,
+                pos: Vec3::ZERO,
+                vel: Vec3::ZERO,
+                yaw: 0.0,
+                pitch: 0.0,
+                input: InputState::default(),
+                hp: MAX_HP,
+                alive: false,
+                respawn: 0.0,
+                protect: 0.0,
+                inv: Inventory::spawn(),
+                cooldown: 0.0,
+                reload: None,
+                heal: None,
+                trigger: 0.0,
+                kills: 0,
+                deaths: 0,
+                chat_budget: 3.0,
+            },
+        );
+        self.roster_dirty = true;
+    }
+
+    pub fn set_bots(&mut self, n: u32) {
+        self.bots_wanted = n.min(MAX_BOTS);
+        self.sync_bots();
+    }
+
+    fn sync_bots(&mut self) {
+        let mut bots: Vec<ClientId> = self
+            .players
+            .values()
+            .filter(|p| p.bot.is_some())
+            .map(|p| p.id)
+            .collect();
+        while bots.len() > self.bots_wanted as usize {
+            let id = bots.pop().unwrap();
+            self.players.remove(&id);
+            self.roster_dirty = true;
+        }
+        while bots.len() < self.bots_wanted as usize {
+            let id = self.alloc_id();
+            let mut n = bots.len() + 1;
+            while self.players.values().any(|p| p.name == format!("bot-{n}")) {
+                n += 1;
+            }
+            let bot = Bot {
+                waypoint: Vec3::ZERO,
+                wander_timer: 0.0,
+                target: None,
+                reaction: 0.0,
+                aim_err: (0.0, 0.0),
+                err_timer: 0.0,
+                last_pos: Vec3::ZERO,
+                stuck_timer: 0.0,
+            };
+            self.add_player(id, format!("bot-{n}"), Some(bot));
+            self.spawn(id);
+            bots.push(id);
+        }
+    }
+
+    fn spawn(&mut self, id: ClientId) {
+        let others: Vec<Vec3> = self
+            .players
+            .values()
+            .filter(|p| p.alive && p.id != id)
+            .map(|p| p.pos)
+            .collect();
+        // The spawn point farthest from everybody, with a little randomness.
+        let mut best = self.map.spawns[0];
+        let mut best_score = f32::MIN;
+        for s in &self.map.spawns {
+            let d = others
+                .iter()
+                .map(|o| o.distance(*s))
+                .fold(1000.0f32, f32::min);
+            let score = d + self.rng.range(0.0, 20.0);
+            if score > best_score {
+                best_score = score;
+                best = *s;
+            }
+        }
+        let yaw = best.x.atan2(best.z);
+        if let Some(p) = self.players.get_mut(&id) {
+            p.pos = best;
+            p.vel = Vec3::ZERO;
+            p.yaw = yaw;
+            p.pitch = 0.0;
+            p.hp = MAX_HP;
+            p.alive = true;
+            p.protect = PROTECT_TIME;
+            p.inv = Inventory::spawn();
+            p.cooldown = 0.0;
+            p.reload = None;
+            p.heal = None;
+            p.trigger = 0.0;
+            if let Some(b) = &mut p.bot {
+                b.target = None;
+                b.wander_timer = 0.0;
+                b.last_pos = best;
+            }
+            let bot = p.bot.is_some();
+            if !bot {
+                self.send(Target::One(id), ServerMsg::Respawn { pos: best, yaw });
+            }
+        }
+    }
+
+    pub fn handle(&mut self, id: ClientId, msg: ClientMsg) {
+        if !self.players.contains_key(&id) {
+            return;
+        }
+        match msg {
+            ClientMsg::Join { .. } => {}
+            ClientMsg::Input {
+                mx,
+                mz,
+                sneak,
+                yaw,
+                pitch,
+                ads,
+                zoom,
+                fire,
+                instant,
+            } => {
+                if !yaw.is_finite() || !pitch.is_finite() {
+                    return;
+                }
+                let p = self.players.get_mut(&id).unwrap();
+                p.input = InputState {
+                    mx: mx.clamp(-1, 1),
+                    mz: mz.clamp(-1, 1),
+                    sneak,
+                    ads,
+                    zoom: zoom.min(2),
+                    fire,
+                    instant,
+                };
+                if p.alive {
+                    p.yaw = wrap_angle(yaw);
+                    p.pitch = pitch.clamp(-1.45, 1.45);
+                }
+            }
+            ClientMsg::Trigger => {
+                let p = self.players.get_mut(&id).unwrap();
+                p.trigger = 0.2;
+            }
+            ClientMsg::Reload => self.start_reload(id),
+            ClientMsg::Throw { power } => self.throw(id, power.clamp(1, MAX_THROW)),
+            ClientMsg::Select { slot } => {
+                let p = self.players.get_mut(&id).unwrap();
+                if p.inv.select(slot) {
+                    p.reload = None;
+                    p.heal = None;
+                }
+            }
+            ClientMsg::Pickup => self.pickup_gun(id),
+            ClientMsg::Chat { text } => {
+                let text = sanitize(&text, CHAT_MAX);
+                let p = self.players.get_mut(&id).unwrap();
+                if text.is_empty() || p.chat_budget < 1.0 {
+                    return;
+                }
+                p.chat_budget -= 1.0;
+                let name = p.name.clone();
+                self.send(
+                    Target::All,
+                    ServerMsg::Chat {
+                        from: id,
+                        name,
+                        text,
+                    },
+                );
+            }
+            ClientMsg::Ping { id: n } => self.send(Target::One(id), ServerMsg::Pong { id: n }),
+            ClientMsg::Bots { n } => {
+                if self.cfg.practice {
+                    self.set_bots(n);
+                    self.sys(format!("bot の数: {}", self.bots_wanted));
+                }
+            }
+        }
+    }
+
+    fn start_reload(&mut self, id: ClientId) {
+        let p = self.players.get_mut(&id).unwrap();
+        if !p.alive || p.reload.is_some() {
+            return;
+        }
+        let Some(i) = p
+            .inv
+            .gun_index()
+            .or(if p.inv.guns.is_empty() { None } else { Some(0) })
+        else {
+            return;
+        };
+        let g = p.inv.guns[i];
+        if g.reserve == 0 || g.ammo >= g.gun.stats().mag {
+            return;
+        }
+        if p.inv.gun_index().is_none() {
+            p.inv.sel = if i == 0 { Slot::Gun0 } else { Slot::Gun1 };
+        }
+        p.heal = None;
+        p.reload = Some(g.gun.stats().reload);
+    }
+
+    fn throw(&mut self, id: ClientId, power: u32) {
+        let p = self.players.get_mut(&id).unwrap();
+        if !p.alive || p.inv.grenades == 0 || self.intermission.is_some() {
+            return;
+        }
+        p.inv.grenades -= 1;
+        p.inv.fix_selection();
+        let dir = Vec3::from_angles(p.yaw, (p.pitch + 0.25).min(1.5));
+        let speed = 6.0 + 3.5 * power as f32;
+        let eye = p.pos + Vec3::new(0.0, eye_height(p.input.sneak), 0.0);
+        let g = Grenade {
+            id: self.next_obj,
+            owner: id,
+            pos: eye + dir * 0.5,
+            vel: dir * speed + Vec3::new(p.vel.x, 0.0, p.vel.z),
+            fuse: GRENADE_FUSE,
+        };
+        self.next_obj += 1;
+        self.grenades.push(g);
+    }
+
+    fn pickup_gun(&mut self, id: ClientId) {
+        let p = &self.players[&id];
+        if !p.alive {
+            return;
+        }
+        let pos = p.pos;
+        let Some(idx) = self
+            .pickups
+            .iter()
+            .enumerate()
+            .filter(|(_, k)| k.active && gun_of(k.kind).is_some() && k.pos.distance(pos) < 2.4)
+            .min_by(|a, b| a.1.pos.distance(pos).total_cmp(&b.1.pos.distance(pos)))
+            .map(|(i, _)| i)
+        else {
+            return;
+        };
+        let pk = self.pickups[idx].clone();
+        let gun = gun_of(pk.kind).unwrap();
+        let slot = pk.dropped.unwrap_or_else(|| GunSlot::full(gun));
+        let p = self.players.get_mut(&id).unwrap();
+        p.reload = None;
+        let dropped = p.inv.take_gun(slot);
+        if pk.dropped.is_some() {
+            self.pickups.remove(idx);
+        } else {
+            self.pickups[idx].active = false;
+            self.pickups[idx].timer = WEAPON_RESPAWN;
+        }
+        if let Some(old) = dropped {
+            self.drop_gun(old, pos);
+        }
+        self.pickups_dirty = true;
+        self.send(
+            Target::One(id),
+            ServerMsg::Item {
+                text: format!("{} を拾いました", gun.stats().name),
+            },
+        );
+    }
+
+    fn drop_gun(&mut self, slot: GunSlot, pos: Vec3) {
+        self.pickups.push(Pickup {
+            id: self.next_obj,
+            kind: pickup_of(slot.gun),
+            pos,
+            active: true,
+            timer: DROP_TTL,
+            dropped: Some(slot),
+        });
+        self.next_obj += 1;
+        self.pickups_dirty = true;
+    }
+
+    pub fn tick(&mut self, dt: f32) {
+        let dt = dt.clamp(0.0, 0.1);
+        if let Some(t) = &mut self.intermission {
+            *t -= dt;
+            if *t <= 0.0 {
+                self.start_match();
+            }
+        } else {
+            self.left -= dt;
+            let top = self.players.values().map(|p| p.kills).max().unwrap_or(0);
+            if self.left <= 0.0 || top >= self.cfg.frag_limit {
+                self.end_match();
+            }
+        }
+
+        if self.intermission.is_none() {
+            self.think_bots(dt);
+            let ids: Vec<ClientId> = self.players.keys().copied().collect();
+            for id in ids {
+                self.update_player(id, dt);
+            }
+            self.update_grenades(dt);
+        }
+        self.update_pickups(dt);
+
+        self.snap_acc += dt;
+        if self.snap_acc >= 1.0 / SNAP_RATE {
+            self.snap_acc = 0.0;
+            self.snapshot();
+        }
+        if self.roster_dirty {
+            self.roster_dirty = false;
+            let players = self.roster();
+            self.send(Target::All, ServerMsg::Roster { players });
+        }
+        if self.pickups_dirty {
+            self.pickups_dirty = false;
+            let list = self
+                .pickups
+                .iter()
+                .filter(|p| p.active)
+                .map(|p| PickupState {
+                    id: p.id,
+                    kind: p.kind,
+                    x: r2(p.pos.x),
+                    z: r2(p.pos.z),
+                })
+                .collect();
+            self.send(Target::All, ServerMsg::Pickups { list });
+        }
+    }
+
+    fn roster(&self) -> Vec<RosterEntry> {
+        let mut v: Vec<RosterEntry> = self
+            .players
+            .values()
+            .map(|p| RosterEntry {
+                id: p.id,
+                name: p.name.clone(),
+                kills: p.kills,
+                deaths: p.deaths,
+                bot: p.bot.is_some(),
+            })
+            .collect();
+        v.sort_by(|a, b| {
+            b.kills
+                .cmp(&a.kills)
+                .then(a.deaths.cmp(&b.deaths))
+                .then(a.id.cmp(&b.id))
+        });
+        v
+    }
+
+    fn end_match(&mut self) {
+        self.intermission = Some(INTERMISSION);
+        self.grenades.clear();
+        let ranking = self.roster();
+        self.send(
+            Target::All,
+            ServerMsg::MatchEnd {
+                ranking,
+                next_in: INTERMISSION,
+            },
+        );
+    }
+
+    fn start_match(&mut self) {
+        self.intermission = None;
+        self.left = self.cfg.time_limit;
+        let ids: Vec<ClientId> = self.players.keys().copied().collect();
+        for id in &ids {
+            let p = self.players.get_mut(id).unwrap();
+            p.kills = 0;
+            p.deaths = 0;
+            p.alive = false;
+        }
+        for id in ids {
+            self.spawn(id);
+        }
+        for p in &mut self.pickups {
+            if p.dropped.is_none() {
+                p.active = true;
+            }
+        }
+        self.pickups.retain(|p| p.dropped.is_none());
+        self.pickups_dirty = true;
+        self.roster_dirty = true;
+        self.send(Target::All, ServerMsg::MatchStart);
+    }
+
+    fn update_player(&mut self, id: ClientId, dt: f32) {
+        let map = &self.map;
+        let p = self.players.get_mut(&id).unwrap();
+        p.chat_budget = (p.chat_budget + dt * 0.5).min(3.0);
+        if !p.alive {
+            p.respawn -= dt;
+            if p.respawn <= 0.0 {
+                self.spawn(id);
+            }
+            return;
+        }
+        p.protect = (p.protect - dt).max(0.0);
+        p.cooldown = (p.cooldown - dt).max(0.0);
+        p.trigger = (p.trigger - dt).max(0.0);
+
+        // Movement. VIEW mode (ads) cannot walk.
+        let speed = if p.input.sneak {
+            SNEAK_SPEED
+        } else {
+            RUN_SPEED
+        };
+        let (mx, mz) = if p.input.ads {
+            (0.0, 0.0)
+        } else {
+            (p.input.mx as f32, p.input.mz as f32)
+        };
+        let fwd = Vec3::new(-p.yaw.sin(), 0.0, -p.yaw.cos());
+        let right = Vec3::new(p.yaw.cos(), 0.0, -p.yaw.sin());
+        let want = (fwd * mz + right * mx).normalize() * speed;
+        if p.input.instant {
+            p.vel = want;
+        } else {
+            let dv = want - p.vel;
+            let l = dv.length();
+            let max = ACCEL * dt;
+            p.vel = if l <= max {
+                want
+            } else {
+                p.vel + dv * (max / l)
+            };
+        }
+        let before = p.pos;
+        p.pos = map.slide(p.pos, p.vel * dt);
+        if dt > 0.0 {
+            let real = (p.pos - before) * (1.0 / dt);
+            p.vel = Vec3::new(real.x, 0.0, real.z);
+        }
+
+        // Reload / heal progress.
+        if let Some(t) = &mut p.reload {
+            *t -= dt;
+            if *t <= 0.0 {
+                p.reload = None;
+                if let Some(i) = p.inv.gun_index() {
+                    let g = &mut p.inv.guns[i];
+                    let need = g.gun.stats().mag - g.ammo;
+                    let take = need.min(g.reserve);
+                    g.ammo += take;
+                    g.reserve -= take;
+                }
+            }
+        }
+        if let Some(t) = &mut p.heal {
+            *t -= dt;
+            if *t <= 0.0 {
+                p.heal = None;
+                if p.inv.medkits > 0 {
+                    p.inv.medkits -= 1;
+                    p.hp = (p.hp + MEDKIT_HEAL).min(MAX_HP);
+                    p.inv.fix_selection();
+                }
+            }
+        }
+
+        // Trigger / held fire.
+        let wants_fire = p.trigger > 0.0
+            || (p.input.fire
+                && p.inv
+                    .gun_index()
+                    .is_some_and(|i| p.inv.guns[i].gun.stats().auto));
+        if wants_fire {
+            self.try_fire(id);
+        }
+
+        // Items at your feet are taken automatically.
+        let p = self.players.get_mut(&id).unwrap();
+        let pos = p.pos;
+        let mut taken = Vec::new();
+        for (i, k) in self.pickups.iter().enumerate() {
+            if !k.active || k.pos.distance(Vec3::new(pos.x, 0.0, pos.z)) > 1.6 {
+                continue;
+            }
+            let ok = match k.kind {
+                PickupKind::Medkit if p.inv.medkits < MAX_MEDKITS => {
+                    p.inv.medkits += 1;
+                    true
+                }
+                PickupKind::Grenade if p.inv.grenades < MAX_GRENADES => {
+                    p.inv.grenades += 1;
+                    true
+                }
+                PickupKind::Ammo => p.inv.refill_ammo(),
+                _ => false,
+            };
+            if ok {
+                taken.push((i, k.kind));
+            }
+        }
+        for (i, kind) in taken {
+            self.pickups[i].active = false;
+            self.pickups[i].timer = ITEM_RESPAWN;
+            self.pickups_dirty = true;
+            let text = match kind {
+                PickupKind::Medkit => "回復キットを拾いました",
+                PickupKind::Grenade => "グレネードを拾いました",
+                _ => "弾薬を補充しました",
+            };
+            if self.players[&id].bot.is_none() {
+                self.send(Target::One(id), ServerMsg::Item { text: text.into() });
+            }
+        }
+    }
+
+    fn try_fire(&mut self, id: ClientId) {
+        let p = self.players.get_mut(&id).unwrap();
+        if p.reload.is_some() || p.heal.is_some() || p.cooldown > 0.0 {
+            return;
+        }
+        match p.inv.sel {
+            Slot::Medkit => {
+                p.trigger = 0.0;
+                if p.inv.medkits > 0 && p.hp < MAX_HP {
+                    p.heal = Some(MEDKIT_TIME);
+                }
+                return;
+            }
+            Slot::Grenade => {
+                p.trigger = 0.0;
+                p.cooldown = 0.5;
+                self.throw(id, DEFAULT_THROW);
+                return;
+            }
+            _ => {}
+        }
+        let Some(i) = p.inv.gun_index() else { return };
+        let slot = p.inv.guns[i];
+        let st = slot.gun.stats();
+        p.trigger = 0.0;
+        if slot.ammo == 0 {
+            self.start_reload(id);
+            return;
+        }
+        p.inv.guns[i].ammo -= 1;
+        p.cooldown = st.interval;
+        p.protect = 0.0;
+        let eye = p.pos + Vec3::new(0.0, eye_height(p.input.sneak), 0.0);
+        let moving = p.vel.length_xz() > 0.5;
+        let spread = match (p.input.ads, p.input.zoom) {
+            (true, 2) => st.spread_scope,
+            (true, _) => st.spread_ads,
+            _ => st.spread_hip * if moving { 1.3 } else { 1.0 },
+        };
+        let (yaw, pitch) = (p.yaw, p.pitch);
+        let gun = slot.gun;
+
+        let mut dmg: BTreeMap<ClientId, (f32, bool)> = BTreeMap::new();
+        let mut tracer_end = None;
+        for _ in 0..st.pellets {
+            let dy = self.rng.range(-1.0, 1.0);
+            let dp = self.rng.range(-1.0, 1.0);
+            let k = spread.to_radians() * (dy * dy + dp * dp).sqrt().min(1.0);
+            let ang = dy.atan2(dp);
+            let dir = Vec3::from_angles(yaw + k * ang.sin(), pitch + k * ang.cos());
+            let (t, hit) = self.trace(id, eye, dir, st.range);
+            if tracer_end.is_none() {
+                tracer_end = Some(eye + dir * t);
+            }
+            if let Some((victim, head)) = hit {
+                let e = dmg.entry(victim).or_insert((0.0, false));
+                e.0 += gun.damage_at(t, head);
+                e.1 |= head;
+            }
+        }
+        self.send(
+            Target::All,
+            ServerMsg::Shot {
+                id,
+                from: eye,
+                to: tracer_end.unwrap_or(eye),
+                gun,
+            },
+        );
+        for (victim, (d, head)) in dmg {
+            self.damage(victim, id, d, head, Cause::Gun(gun), eye);
+        }
+    }
+
+    /// Nearest hit along a ray: distance, and the player hit (with headshot).
+    fn trace(
+        &self,
+        shooter: ClientId,
+        origin: Vec3,
+        dir: Vec3,
+        range: f32,
+    ) -> (f32, Option<(ClientId, bool)>) {
+        let wall = self.map.raycast(origin, dir, range).unwrap_or(range);
+        let mut best = wall;
+        let mut hit = None;
+        for p in self.players.values() {
+            if p.id == shooter || !p.alive {
+                continue;
+            }
+            let sneak = p.input.sneak;
+            let head_c = p.pos + Vec3::new(0.0, if sneak { 1.22 } else { 1.67 }, 0.0);
+            if let Some(t) = ray_sphere(origin, dir, head_c, 0.25, best)
+                && t < best
+            {
+                best = t;
+                hit = Some((p.id, true));
+            }
+            let body = Aabb::new(
+                p.pos + Vec3::new(-0.33, 0.0, -0.33),
+                p.pos + Vec3::new(0.33, if sneak { 1.0 } else { 1.45 }, 0.33),
+            );
+            if let Some(t) = body.ray(origin, dir, best)
+                && t < best
+            {
+                best = t;
+                hit = Some((p.id, false));
+            }
+        }
+        (best, hit)
+    }
+
+    fn damage(
+        &mut self,
+        victim: ClientId,
+        attacker: ClientId,
+        dmg: f32,
+        head: bool,
+        cause: Cause,
+        from: Vec3,
+    ) {
+        let Some(v) = self.players.get_mut(&victim) else {
+            return;
+        };
+        if !v.alive || v.protect > 0.0 {
+            return;
+        }
+        v.hp -= dmg;
+        v.heal = None;
+        let dead = v.hp <= 0.0;
+        let dmg = r2(dmg);
+        let hit = ServerMsg::Hit {
+            attacker,
+            victim,
+            head,
+            dmg,
+            from,
+        };
+        self.send(Target::One(attacker), hit.clone());
+        if attacker != victim {
+            self.send(Target::One(victim), hit);
+        }
+        if let Some(b) = &mut self.players.get_mut(&victim).unwrap().bot {
+            // Bots turn toward whoever shoots them.
+            if attacker != victim && b.target.is_none() {
+                b.target = Some(attacker);
+                b.reaction = 0.35;
+            }
+        }
+        if dead {
+            let v = self.players.get_mut(&victim).unwrap();
+            v.alive = false;
+            v.hp = 0.0;
+            v.respawn = RESPAWN_TIME;
+            v.deaths += 1;
+            v.reload = None;
+            v.heal = None;
+            let pos = v.pos;
+            let held = v.inv.gun_index().map(|i| v.inv.guns[i]);
+            if attacker != victim
+                && let Some(a) = self.players.get_mut(&attacker)
+            {
+                a.kills += 1;
+            }
+            if let Some(g) = held
+                && g.ammo + g.reserve > 0
+            {
+                self.drop_gun(g, pos);
+            }
+            self.roster_dirty = true;
+            self.send(
+                Target::All,
+                ServerMsg::Kill {
+                    killer: attacker,
+                    victim,
+                    cause,
+                    head,
+                },
+            );
+        }
+    }
+
+    fn update_grenades(&mut self, dt: f32) {
+        let mut boom = Vec::new();
+        for g in &mut self.grenades {
+            g.fuse -= dt;
+            if g.fuse <= 0.0 {
+                boom.push((g.owner, g.pos));
+                continue;
+            }
+            g.vel.y -= 9.8 * dt;
+            let mut n = g.pos + g.vel * dt;
+            if n.y < 0.08 {
+                n.y = 0.08;
+                g.vel.y = -g.vel.y * 0.35;
+                g.vel.x *= 0.7;
+                g.vel.z *= 0.7;
+            }
+            let inside = |p: Vec3| self.map.solids.iter().any(|s| s.aabb.contains(p));
+            if inside(n) {
+                if inside(Vec3::new(n.x, g.pos.y, g.pos.z)) {
+                    n.x = g.pos.x;
+                    g.vel.x = -g.vel.x * 0.4;
+                }
+                if inside(Vec3::new(n.x, g.pos.y, n.z)) {
+                    n.z = g.pos.z;
+                    g.vel.z = -g.vel.z * 0.4;
+                }
+                if inside(Vec3::new(n.x, n.y, n.z)) {
+                    n.y = g.pos.y;
+                    g.vel.y = -g.vel.y * 0.3;
+                }
+            }
+            g.pos = n;
+        }
+        self.grenades.retain(|g| g.fuse > 0.0);
+        for (owner, pos) in boom {
+            self.send(Target::All, ServerMsg::Explode { pos });
+            let c = pos + Vec3::new(0.0, 0.3, 0.0);
+            let victims: Vec<(ClientId, f32)> = self
+                .players
+                .values()
+                .filter(|p| p.alive)
+                .filter_map(|p| {
+                    let chest = p.pos + Vec3::new(0.0, 1.0, 0.0);
+                    let d = chest.distance(c);
+                    (d < GRENADE_RADIUS && self.map.line_of_sight(c, chest))
+                        .then(|| (p.id, GRENADE_DAMAGE * (1.0 - d / GRENADE_RADIUS)))
+                })
+                .collect();
+            for (v, d) in victims {
+                self.damage(v, owner, d, false, Cause::Grenade, pos);
+            }
+        }
+    }
+
+    fn update_pickups(&mut self, dt: f32) {
+        let before = self.pickups.len();
+        for p in &mut self.pickups {
+            if p.dropped.is_some() {
+                p.timer -= dt;
+            } else if !p.active {
+                p.timer -= dt;
+                if p.timer <= 0.0 {
+                    p.active = true;
+                    self.pickups_dirty = true;
+                }
+            }
+        }
+        self.pickups
+            .retain(|p| p.dropped.is_none() || p.timer > 0.0);
+        if self.pickups.len() != before {
+            self.pickups_dirty = true;
+        }
+    }
+
+    fn snapshot(&mut self) {
+        let players: Vec<PlayerState> = self
+            .players
+            .values()
+            .map(|p| PlayerState {
+                id: p.id,
+                x: r2(p.pos.x),
+                y: r2(p.pos.y),
+                z: r2(p.pos.z),
+                yaw: r2(p.yaw),
+                pitch: r2(p.pitch),
+                alive: p.alive,
+                sneak: p.input.sneak,
+                ads: p.input.ads,
+                mv: p.vel.length_xz() > 0.5,
+                gun: p.inv.held_gun(),
+            })
+            .collect();
+        let grenades: Vec<GrenadeState> = self
+            .grenades
+            .iter()
+            .map(|g| GrenadeState {
+                id: g.id,
+                x: r2(g.pos.x),
+                y: r2(g.pos.y),
+                z: r2(g.pos.z),
+            })
+            .collect();
+        let humans: Vec<ClientId> = self
+            .players
+            .values()
+            .filter(|p| p.bot.is_none())
+            .map(|p| p.id)
+            .collect();
+        for id in humans {
+            let p = &self.players[&id];
+            let reload = match (p.reload, p.inv.gun_index()) {
+                (Some(t), Some(i)) => 1.0 - t / p.inv.guns[i].gun.stats().reload,
+                _ => -1.0,
+            };
+            let me = MeState {
+                hp: p.hp.max(0.0).ceil(),
+                inv: p.inv.clone(),
+                reload: r2(reload),
+                heal: p.heal.map(|t| r2(1.0 - t / MEDKIT_TIME)).unwrap_or(-1.0),
+                protect: p.protect > 0.0,
+                respawn: if p.alive { 0.0 } else { r2(p.respawn.max(0.0)) },
+            };
+            self.out.push((
+                Target::One(id),
+                ServerMsg::Snap {
+                    left: self.left.max(0.0).ceil(),
+                    intermission: self.intermission.map(|t| t.max(0.0).ceil()),
+                    players: players.clone(),
+                    grenades: grenades.clone(),
+                    me: Some(me),
+                },
+            ));
+        }
+    }
+
+    fn think_bots(&mut self, dt: f32) {
+        let ids: Vec<ClientId> = self
+            .players
+            .values()
+            .filter(|p| p.bot.is_some() && p.alive)
+            .map(|p| p.id)
+            .collect();
+        for id in ids {
+            self.think_bot(id, dt);
+        }
+    }
+
+    fn think_bot(&mut self, id: ClientId, dt: f32) {
+        let me = &self.players[&id];
+        let eye = me.pos + Vec3::new(0.0, 1.6, 0.0);
+        // Nearest visible enemy within 70 m.
+        let mut seen: Option<(ClientId, Vec3, f32)> = None;
+        for o in self.players.values() {
+            if o.id == id || !o.alive {
+                continue;
+            }
+            let chest = o.pos + Vec3::new(0.0, if o.input.sneak { 0.8 } else { 1.2 }, 0.0);
+            let d = chest.distance(eye);
+            if d > 70.0 || seen.is_some_and(|s| s.2 < d) {
+                continue;
+            }
+            if self.map.line_of_sight(eye, chest) {
+                seen = Some((o.id, chest, d));
+            }
+        }
+        let wp = me.bot.as_ref().unwrap().waypoint;
+        let need_wp = me.bot.as_ref().unwrap().wander_timer <= 0.0 || me.pos.distance(wp) < 3.0;
+        let new_wp = if need_wp {
+            let mut p = self.map.spawns[self.rng.below(self.map.spawns.len())];
+            p.x += self.rng.range(-8.0, 8.0);
+            p.z += self.rng.range(-8.0, 8.0);
+            Some(p)
+        } else {
+            None
+        };
+        let err = (self.rng.range(-1.0, 1.0), self.rng.range(-1.0, 1.0));
+        let p = self.players.get_mut(&id).unwrap();
+        let pos = p.pos;
+        let b = p.bot.as_mut().unwrap();
+        if let Some(w) = new_wp {
+            b.waypoint = w;
+            b.wander_timer = 20.0;
+        }
+        b.wander_timer -= dt;
+        b.stuck_timer += dt;
+        if b.stuck_timer > 2.0 {
+            if pos.distance(b.last_pos) < 1.0 {
+                b.wander_timer = 0.0;
+            }
+            b.stuck_timer = 0.0;
+            b.last_pos = pos;
+        }
+        b.err_timer -= dt;
+        if b.err_timer <= 0.0 {
+            b.err_timer = 0.6;
+            b.aim_err = (err.0 * 0.05, err.1 * 0.035);
+        }
+        match seen {
+            Some((tid, chest, dist)) => {
+                if b.target != Some(tid) {
+                    b.target = Some(tid);
+                    b.reaction = 0.45;
+                }
+                b.reaction -= dt;
+                let d = chest - eye;
+                let want_yaw = (-d.x).atan2(-d.z) + b.aim_err.0;
+                let want_pitch = d.y.atan2(d.length_xz()) + b.aim_err.1;
+                let ready = b.reaction <= 0.0;
+                let dy = wrap_angle(want_yaw - p.yaw);
+                let step = 2.8 * dt;
+                p.yaw = wrap_angle(p.yaw + dy.clamp(-step, step));
+                p.pitch += (want_pitch - p.pitch).clamp(-step, step);
+                let aimed = dy.abs() < 0.06;
+                if dist > 45.0 && !aimed {
+                    p.input = InputState {
+                        mz: 1,
+                        ..Default::default()
+                    };
+                } else {
+                    p.input = InputState {
+                        ads: true,
+                        zoom: 1,
+                        fire: ready && aimed,
+                        ..Default::default()
+                    };
+                    if ready && aimed && p.cooldown <= 0.0 {
+                        p.trigger = 0.1;
+                    }
+                }
+            }
+            None => {
+                b.target = None;
+                let d = b.waypoint - pos;
+                let want_yaw = (-d.x).atan2(-d.z);
+                let dy = wrap_angle(want_yaw - p.yaw);
+                let step = 2.5 * dt;
+                p.yaw = wrap_angle(p.yaw + dy.clamp(-step, step));
+                p.pitch *= 0.9;
+                p.input = InputState {
+                    mz: if dy.abs() < 0.6 { 1 } else { 0 },
+                    ..Default::default()
+                };
+                // Reload when idle.
+                let empty = p
+                    .inv
+                    .gun_index()
+                    .is_some_and(|i| p.inv.guns[i].ammo < p.inv.guns[i].gun.stats().mag / 2);
+                if empty && p.reload.is_none() {
+                    self.start_reload(id);
+                }
+            }
+        }
+    }
+
+    // ---- inspection helpers (tests, server console) ----
+
+    pub fn player_pos(&self, id: ClientId) -> Option<Vec3> {
+        self.players.get(&id).map(|p| p.pos)
+    }
+
+    pub fn player_hp(&self, id: ClientId) -> Option<f32> {
+        self.players.get(&id).map(|p| p.hp)
+    }
+
+    pub fn player_kills(&self, id: ClientId) -> Option<u32> {
+        self.players.get(&id).map(|p| p.kills)
+    }
+
+    pub fn teleport(&mut self, id: ClientId, pos: Vec3, yaw: f32) {
+        if let Some(p) = self.players.get_mut(&id) {
+            p.pos = pos;
+            p.yaw = yaw;
+            p.pitch = 0.0;
+            p.protect = 0.0;
+        }
+    }
+
+    pub fn give(&mut self, id: ClientId, gun: Gun) {
+        if let Some(p) = self.players.get_mut(&id) {
+            p.inv.guns = vec![GunSlot::full(gun)];
+            p.inv.sel = Slot::Gun0;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn room() -> Room {
+        Room::new(Config {
+            seed: 3,
+            ..Default::default()
+        })
+    }
+
+    /// Two players face to face in the open, 10 m apart.
+    fn duel(r: &mut Room) -> (ClientId, ClientId) {
+        let a = r.join("alice", None, PROTOCOL).unwrap();
+        let b = r.join("bob", None, PROTOCOL).unwrap();
+        // Find an open spot: 12 m of free line along -Z.
+        let mut spot = None;
+        'search: for s in r.map.spawns.clone() {
+            for i in 0..=12 {
+                if r.map.blocked(Vec3::new(s.x, 0.0, s.z - i as f32), 0.6) {
+                    continue 'search;
+                }
+            }
+            if r.map
+                .line_of_sight(s + Vec3::new(0.0, 1.6, 0.0), s + Vec3::new(0.0, 1.6, -10.0))
+            {
+                spot = Some(s);
+                break;
+            }
+        }
+        let s = spot.expect("open spot");
+        r.teleport(a, s, 0.0);
+        r.teleport(b, s + Vec3::new(0.0, 0.0, -10.0), std::f32::consts::PI);
+        (a, b)
+    }
+
+    fn input(ads: bool, pitch: f32) -> ClientMsg {
+        ClientMsg::Input {
+            mx: 0,
+            mz: 0,
+            sneak: false,
+            yaw: 0.0,
+            pitch,
+            ads,
+            zoom: 2,
+            fire: false,
+            instant: false,
+        }
+    }
+
+    #[test]
+    fn join_rules() {
+        let mut r = Room::new(Config {
+            password: Some("pw".into()),
+            max_players: 1,
+            ..Default::default()
+        });
+        assert!(r.join("x", Some("bad"), PROTOCOL).is_err());
+        assert!(r.join("x", Some("pw"), PROTOCOL + 1).is_err());
+        let id = r.join("x", Some("pw"), PROTOCOL).unwrap();
+        assert!(r.join("y", Some("pw"), PROTOCOL).is_err());
+        let out = r.drain();
+        assert!(
+            out.iter()
+                .any(|(t, m)| *t == Target::One(id) && matches!(m, ServerMsg::Welcome { .. }))
+        );
+    }
+
+    #[test]
+    fn walking_moves_and_ads_does_not() {
+        let mut r = room();
+        let (a, _) = duel(&mut r);
+        let start = r.player_pos(a).unwrap();
+        r.handle(
+            a,
+            ClientMsg::Input {
+                mx: 0,
+                mz: 1,
+                sneak: false,
+                yaw: 0.0,
+                pitch: 0.0,
+                ads: true,
+                zoom: 1,
+                fire: false,
+                instant: true,
+            },
+        );
+        for _ in 0..30 {
+            r.tick(1.0 / 60.0);
+        }
+        assert!(r.player_pos(a).unwrap().distance(start) < 1e-3);
+        r.handle(
+            a,
+            ClientMsg::Input {
+                mx: 0,
+                mz: 1,
+                sneak: false,
+                yaw: 0.0,
+                pitch: 0.0,
+                ads: false,
+                zoom: 0,
+                fire: false,
+                instant: true,
+            },
+        );
+        r.tick(1.0 / 60.0);
+        // Instant: full speed on the first tick.
+        let moved = r.player_pos(a).unwrap().distance(start);
+        assert!((moved - RUN_SPEED / 60.0).abs() < 0.01, "moved {moved}");
+    }
+
+    #[test]
+    fn acceleration_when_smooth() {
+        let mut r = room();
+        let (a, _) = duel(&mut r);
+        let start = r.player_pos(a).unwrap();
+        r.handle(
+            a,
+            ClientMsg::Input {
+                mx: 0,
+                mz: 1,
+                sneak: false,
+                yaw: 0.0,
+                pitch: 0.0,
+                ads: false,
+                zoom: 0,
+                fire: false,
+                instant: false,
+            },
+        );
+        r.tick(1.0 / 60.0);
+        let moved = r.player_pos(a).unwrap().distance(start);
+        assert!(moved < RUN_SPEED / 60.0 * 0.9);
+    }
+
+    #[test]
+    fn headshot_with_sr_kills() {
+        let mut r = room();
+        let (a, b) = duel(&mut r);
+        r.give(a, Gun::Sr);
+        // Aim at bob's head: 10 m away, head 0.07 m above the eye.
+        let pitch = (0.07f32).atan2(10.0);
+        r.handle(a, input(true, pitch));
+        r.handle(a, ClientMsg::Trigger);
+        r.tick(1.0 / 60.0);
+        assert_eq!(r.player_kills(a), Some(1));
+        let out = r.drain();
+        assert!(
+            out.iter()
+                .any(|(_, m)| matches!(m, ServerMsg::Kill { head: true, .. }))
+        );
+        assert!(r.player_hp(b).unwrap() <= 0.0);
+    }
+
+    #[test]
+    fn body_shot_with_sr_does_not_kill() {
+        let mut r = room();
+        let (a, b) = duel(&mut r);
+        r.give(a, Gun::Sr);
+        let pitch = (-0.6f32).atan2(10.0);
+        r.handle(a, input(true, pitch));
+        r.handle(a, ClientMsg::Trigger);
+        r.tick(1.0 / 60.0);
+        let hp = r.player_hp(b).unwrap();
+        assert!(hp > 0.0 && hp < MAX_HP, "hp {hp}");
+    }
+
+    #[test]
+    fn grenade_explodes_after_fuse() {
+        let mut r = room();
+        let (a, _) = duel(&mut r);
+        r.handle(a, ClientMsg::Throw { power: 1 });
+        r.drain();
+        let mut exploded = false;
+        for _ in 0..(GRENADE_FUSE * 60.0) as usize + 5 {
+            r.tick(1.0 / 60.0);
+            exploded |= r
+                .drain()
+                .iter()
+                .any(|(_, m)| matches!(m, ServerMsg::Explode { .. }));
+        }
+        assert!(exploded);
+    }
+
+    #[test]
+    fn bots_play_a_match() {
+        let mut r = Room::new(Config {
+            seed: 5,
+            bots: 6,
+            time_limit: 60.0,
+            ..Default::default()
+        });
+        let me = r.join("me", None, PROTOCOL).unwrap();
+        let mut kills = 0;
+        for _ in 0..(60 * 60) {
+            r.tick(1.0 / 60.0);
+            kills += r
+                .drain()
+                .iter()
+                .filter(|(_, m)| matches!(m, ServerMsg::Kill { .. }))
+                .count();
+        }
+        assert!(r.player_pos(me).is_some());
+        assert!(kills > 0, "bots never fought");
+    }
+
+    #[test]
+    fn chat_is_rate_limited_and_sanitized() {
+        let mut r = room();
+        let a = r.join("a", None, PROTOCOL).unwrap();
+        r.drain();
+        for _ in 0..10 {
+            r.handle(
+                a,
+                ClientMsg::Chat {
+                    text: "hi\u{0007} there".into(),
+                },
+            );
+        }
+        let chats: Vec<_> = r
+            .drain()
+            .into_iter()
+            .filter_map(|(_, m)| {
+                if let ServerMsg::Chat { text, .. } = m {
+                    Some(text)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(chats.len(), 3);
+        assert_eq!(chats[0], "hi there");
+    }
+}

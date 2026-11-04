@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Reading the code is all CI needs; a job that needs more says so.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Load release settings
+        run: grep -E '^[A-Z_]+=' .github/release.env | tr -d '\r' >> "$GITHUB_ENV"
+      # rustup itself (on every runner) rather than an action that wraps it:
+      # one third-party action fewer.
+      - name: Install Rust (stable)
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --component rustfmt,clippy
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Scripts
+        run: |
+          for f in scripts/*.sh; do bash -n "$f"; done
+      - name: Versions agree (Cargo.toml, web client)
+        run: bash scripts/check-version.sh
+
+  # The browser client: unit tests of the key machine and :set, a syntax
+  # check of every module, and the practice-mode wasm build.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Syntax check
+        run: for f in web/js/*.js; do node --check "$f"; done
+      - name: Unit tests
+        run: node --test tests/web/*.test.mjs
+      - name: Install Rust (stable + wasm32)
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --target wasm32-unknown-unknown
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build the practice-mode wasm
+        run: bash scripts/build-wasm.sh
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (stable)
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --workspace --release
+
+  # The oldest Rust the workspace says it supports (`rust-version` in
+  # Cargo.toml; the highest one when crates differ). Skipped without one.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Find the MSRV
+        id: msrv
+        run: |
+          v="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].rust_version // empty' | sort -V | tail -1)"
+          echo "rust-version: ${v:-none (skipped)}"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Install Rust (MSRV)
+        if: steps.msrv.outputs.version != ''
+        shell: bash
+        env:
+          MSRV: ${{ steps.msrv.outputs.version }}
+        run: |
+          rustup toolchain install "$MSRV" --profile minimal --no-self-update
+          rustup default "$MSRV"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.msrv.outputs.version != ''
+      - if: steps.msrv.outputs.version != ''
+        run: cargo check --workspace --all-targets
