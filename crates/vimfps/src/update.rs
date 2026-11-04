@@ -251,13 +251,10 @@ fn extract_zip(data: &[u8]) -> Result<Vec<u8>, String> {
     let mut z = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| e.to_string())?;
     for i in 0..z.len() {
         let mut f = z.by_index(i).map_err(|e| e.to_string())?;
-        let name = f
-            .name()
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or("")
-            .to_string();
-        if name == BIN {
+        // Only a regular file named like the binary (any folder) is taken.
+        let full = f.name().map_err(|e| e.to_string())?.into_owned();
+        let name = full.rsplit(['/', '\\']).next().unwrap_or("");
+        if f.is_file() && name == BIN {
             let mut v = Vec::new();
             f.read_to_end(&mut v).map_err(|e| e.to_string())?;
             return Ok(v);
@@ -288,6 +285,27 @@ mod tests {
             Some("def456")
         );
         assert_eq!(expected_sum(s, "nope"), None);
+    }
+
+    #[test]
+    fn zip_round_trip() {
+        use zip::write::SimpleFileOptions;
+        let body = b"MZ fake exe";
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        w.add_directory("vimfps-1.0.0-x/", SimpleFileOptions::default())
+            .unwrap();
+        w.start_file(
+            format!("vimfps-1.0.0-x/{BIN}"),
+            SimpleFileOptions::default(),
+        )
+        .unwrap();
+        w.write_all(body).unwrap();
+        w.start_file("vimfps-1.0.0-x/README.md", SimpleFileOptions::default())
+            .unwrap();
+        w.write_all(b"readme").unwrap();
+        let data = w.finish().unwrap().into_inner();
+        assert_eq!(extract_zip(&data).unwrap(), body);
+        assert!(extract_zip(b"not a zip").is_err());
     }
 
     #[test]
