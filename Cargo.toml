@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/vimfps-core", "crates/vimfps-wasm", "crates/vimfps"]
 
 [workspace.package]
-version = "1.5.4"
+version = "1.5.5"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -11,7 +11,7 @@ repository = "https://github.com/igarinpiano/vim-fps"
 authors = ["igarinpiano"]
 
 [workspace.dependencies]
-vimfps-core = { path = "crates/vimfps-core", version = "1.5.4" }
+vimfps-core = { path = "crates/vimfps-core", version = "1.5.5" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
