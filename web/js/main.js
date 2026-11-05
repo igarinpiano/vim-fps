@@ -111,7 +111,7 @@ function resetGame() {
   netStats.rtts = [];
   netStats.snaps = [];
   netStats.last = null;
-  game.held = { fwd: false, back: false, left: false, right: false, up: false, down: false };
+  game.held = { fwd: false, back: false, left: false, right: false, up: false, down: false, tiltUp: false, tiltDown: false };
 }
 
 // ---------------------------------------------------------------- helpers
@@ -246,8 +246,8 @@ const HELP = [
   '  :net                 通信統計 (ping など)  :set netstat  常に右上に表示',
   '  :set nonameplates    頭上の名前を消す :set nohpbars  頭上の体力ゲージを消す',
   '',
-  'SPECTATE (観戦中)      n / N  次 / 前の選手    o  自由視点 (k/j 前後, h/l 旋回, K/J 上下, Shift で速く)',
-  '                       O  空から (hjkl 移動, K/J 高さ, , . 回転)    m  全員が載ったマップ',
+  'SPECTATE (観戦中)      n / N  次 / 前の選手    o  自由視点 (k/j 前後, h/l 旋回, K/J 上下, u/d 見上げる・見下ろす, Shift で速く)',
+  '                       O  空から (hjkl 移動, K/J 高さ, u/d 見下ろす角度, , . 回転)    m  全員が載ったマップ',
   '  復活なしの試合で倒されると、倒した相手の視点で観戦します (:set nokillcam で自由視点)',
   '',
   '設定の一覧と説明は :options',
@@ -1717,7 +1717,7 @@ function startWatching(who) {
   game.ads = false;
   game.zoom = 0;
   game.fire = false;
-  game.held = { fwd: false, back: false, left: false, right: false, up: false, down: false };
+  game.held = { fwd: false, back: false, left: false, right: false, up: false, down: false, tiltUp: false, tiltDown: false };
   if (who === 'free') {
     game.follow = null;
     startFree();
@@ -1753,13 +1753,25 @@ function followNext(n) {
   game.follow = list[k].id;
 }
 
-/// The view from the sky: straight down over the field.
+/// Looking straight down (the sky view's start), and how far up u/d tilt
+/// the sky view and the free camera (radians).
+const SKY_DOWN = -Math.PI / 2 + 0.001;
+const SKY_TILT_MAX = -0.25;
+const FREE_PITCH = [-Math.PI / 2 + 0.01, 0.6];
+
+/// u/d held: how far to tilt this frame.
+function tiltStep(dt) {
+  const h = game.held;
+  return ((h.tiltUp ? 1 : 0) - (h.tiltDown ? 1 : 0)) * 0.9 * (game.shiftDown ? 2.5 : 1) * dt;
+}
+
+/// The view from the sky: straight down over the field (u/d tilt it).
 function startSky() {
   const c = game.free || game.pos;
   game.follow = null;
   game.free = null;
   game.autoFree = false;
-  game.sky = { x: c.x, z: c.z, h: 120, yaw: 0 };
+  game.sky = { x: c.x, z: c.z, h: 120, yaw: 0, pitch: SKY_DOWN };
 }
 
 function startFree() {
@@ -1812,10 +1824,18 @@ function watchFrame(now, dt) {
     k.x += (-Math.sin(k.yaw) * up + Math.cos(k.yaw) * right) * speed;
     k.z += (-Math.cos(k.yaw) * up - Math.sin(k.yaw) * right) * speed;
     k.h = Math.max(20, Math.min(400, k.h * (1 + ((h.up ? 1 : 0) - (h.down ? 1 : 0)) * 1.2 * dt)));
+    k.pitch = Math.max(SKY_DOWN, Math.min(SKY_TILT_MAX, k.pitch + tiltStep(dt)));
     const half = game.map.half;
     k.x = Math.max(-half, Math.min(half, k.x));
     k.z = Math.max(-half, Math.min(half, k.z));
-    cam = { x: k.x, y: game.world.height(k.x, k.z) + k.h, z: k.z, yaw: k.yaw, pitch: -Math.PI / 2 + 0.001, fov: settings.get('fov'), lift: k.h };
+    // The camera looks at (k.x, k.z) from k.h away: tilting (u/d) swings it
+    // back along the view, so the spot stays in the middle of the screen.
+    const ground = game.world.height(k.x, k.z);
+    const back = k.h * Math.cos(k.pitch);
+    const cx = k.x + Math.sin(k.yaw) * back;
+    const cz = k.z + Math.cos(k.yaw) * back;
+    const cy = Math.max(ground - k.h * Math.sin(k.pitch), game.world.height(cx, cz) + 2);
+    cam = { x: cx, y: cy, z: cz, yaw: k.yaw, pitch: k.pitch, fov: settings.get('fov'), lift: cy - ground };
     renderer.setHeld(null);
   } else if (game.free || !target) {
     const f = game.free;
@@ -1834,6 +1854,7 @@ function watchFrame(now, dt) {
     f.x += -Math.sin(f.yaw) * fz * speed;
     f.z += -Math.cos(f.yaw) * fz * speed;
     f.y = Math.max(game.world.height(f.x, f.z) + 1.5, f.y + ((h.up ? 1 : 0) - (h.down ? 1 : 0)) * speed);
+    f.pitch = Math.max(FREE_PITCH[0], Math.min(FREE_PITCH[1], f.pitch + tiltStep(dt)));
     const half = game.map.half;
     f.x = Math.max(-half, Math.min(half, f.x));
     f.z = Math.max(-half, Math.min(half, f.z));
@@ -1873,8 +1894,8 @@ function updateWatchHud() {
   const r = game.roster.get(game.myId);
   const voluntary = r && r.spectator;
   let line;
-  if (game.sky) line = '空からの視点 — hjkl 移動 · K/J 高さ · Shift で速く · , . 回転 · m マップ · n で選手を追う';
-  else if (game.free || !t) line = '自由視点 — k/j 前後 · h/l 旋回 · K/J 上下 · Shift で速く · O 空から · n で選手を追う';
+  if (game.sky) line = '空からの視点 — hjkl 移動 · K/J 高さ · u/d 角度 · Shift で速く · , . 回転 · m マップ · n で選手を追う';
+  else if (game.free || !t) line = '自由視点 — k/j 前後 · h/l 旋回 · K/J 上下 · u/d 見上げる・見下ろす · Shift で速く · O 空から · n で選手を追う';
   else line = `${nameOf(t.id)} を観戦中 — n / N 切り替え · o 自由視点 · O 空から · m マップ`;
   const tail = voluntary ? ' · :play で参加' : !game.respawnMode ? ' · 次のラウンドまで観戦' : '';
   setText($('watchbar'), line + tail);
