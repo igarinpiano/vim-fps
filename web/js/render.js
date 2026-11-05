@@ -50,6 +50,55 @@ function labelSprite(text, color = '#ffffff', bg = 'rgba(0,0,0,0.45)', scale = 1
   return s;
 }
 
+/// A name plate over a player: the name, and a health bar when the health
+/// is known (watching, offline practice). Redrawn only when it changes.
+function makePlate() {
+  const c = document.createElement('canvas');
+  c.width = 256;
+  c.height = 76;
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: true, transparent: true, fog: false });
+  const s = new THREE.Sprite(mat);
+  s.userData = { canvas: c, tex, key: null };
+  s.scale.set(2.5, (2.5 * 76) / 256, 1);
+  return s;
+}
+
+function drawPlate(s, name, hp, showName, showHp) {
+  const bar = showHp && hp != null;
+  const key = `${showName ? name : ''}|${bar ? Math.round(hp) : ''}`;
+  if (s.userData.key === key) return;
+  s.userData.key = key;
+  const c = s.userData.canvas;
+  const g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+  if (showName) {
+    g.font = '600 26px system-ui, sans-serif';
+    const w = Math.min(c.width - 4, Math.ceil(g.measureText(name).width) + 16);
+    g.fillStyle = 'rgba(0,0,0,0.5)';
+    g.fillRect((c.width - w) / 2, 2, w, 34);
+    g.fillStyle = '#fff';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(name, c.width / 2, 20, c.width - 12);
+  }
+  if (bar) {
+    const v = Math.max(0, Math.min(100, hp)) / 100;
+    const x = 28;
+    const y = 46;
+    const w = c.width - 56;
+    g.fillStyle = 'rgba(0,0,0,0.65)';
+    g.fillRect(x - 3, y - 3, w + 6, 22);
+    g.fillStyle = '#3a3a3a';
+    g.fillRect(x, y, w, 16);
+    g.fillStyle = v > 0.6 ? '#45d14a' : v > 0.3 ? '#f2c230' : '#f04030';
+    g.fillRect(x, y, w * v, 16);
+  }
+  s.visible = showName || bar;
+  s.userData.tex.needsUpdate = true;
+}
+
 function makeMarker() {
   const c = document.createElement('canvas');
   c.width = c.height = 32;
@@ -327,13 +376,7 @@ export class Renderer {
   ensurePlayer(id, name) {
     let p = this.players.get(id);
     if (p) {
-      if (name && p.name !== name) {
-        p.group.remove(p.label);
-        p.label = labelSprite(name);
-        p.label.position.y = 2.15;
-        p.group.add(p.label);
-        p.name = name;
-      }
+      if (name && p.name !== name) p.name = name;
       return p;
     }
     const group = new THREE.Group();
@@ -345,15 +388,15 @@ export class Renderer {
     const gun = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.6), new THREE.MeshLambertMaterial({ color: 0x222222 }));
     gun.position.set(0.25, 1.25, -0.35);
     group.add(body, head, gun);
-    const label = labelSprite(name || `#${id}`);
+    const label = makePlate();
     label.position.y = 2.15;
     group.add(label);
     const marker = makeMarker();
-    marker.position.y = 2.6;
+    marker.position.y = 3.0;
     marker.visible = false;
     group.add(marker);
     this.scene.add(group);
-    p = { group, body, head, gun, label, name, marker };
+    p = { group, body, head, gun, label, name: name || `#${id}`, marker };
     this.players.set(id, p);
     return p;
   }
@@ -370,6 +413,7 @@ export class Renderer {
   setPlayer(id, st, name, mark = null) {
     const p = this.ensurePlayer(id, name);
     p.marker.visible = !!mark && st.alive;
+    drawPlate(p.label, p.name, st.hp, this.s.get('nameplates'), this.s.get('hpbars'));
     const ls = this.labelScale || 1;
     if (!p.label.userData.base) p.label.userData.base = p.label.scale.clone();
     p.label.scale.copy(p.label.userData.base).multiplyScalar(ls);
@@ -385,7 +429,8 @@ export class Renderer {
     p.head.position.y = sneak ? 1.22 : 1.67;
     p.gun.position.y = sneak ? 0.85 : 1.25;
     p.gun.position.x = st.ads ? 0.12 : 0.25;
-    p.label.position.y = sneak ? 1.7 : 2.15;
+    p.label.position.y = sneak ? 1.85 : 2.3;
+    p.marker.position.y = sneak ? 2.5 : 2.95;
   }
 
   setPickups(list) {

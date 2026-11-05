@@ -25,6 +25,9 @@ export const OPTIONS = {
   touch: { type: 'enum', values: ['auto', 'on', 'off'], def: 'auto', desc: 'タッチ操作パッド (auto: タッチ端末で表示)' },
   killcam: { type: 'bool', def: true, desc: '復活なしで倒されたら、倒した相手の視点で観戦 (off: 自由視点)' },
   dmgnum: { type: 'bool', def: true, desc: '当てたダメージを数字で表示' },
+  nameplates: { type: 'bool', def: true, desc: '頭上に名前を表示' },
+  hpbars: { type: 'bool', def: true, desc: '頭上に体力ゲージ (観戦中・オフライン練習で表示)' },
+  netstat: { type: 'bool', def: false, desc: '通信統計 (ping・受信間隔・通信量) を表示' },
   // ---- smoothing: `:set nosmooth` turns all of these off ----
   adsanim: { type: 'bool', def: true, smooth: true, desc: 'ADS・スコープの切り替えを滑らかに (off: 瞬時)' },
   moveaccel: { type: 'bool', def: true, smooth: true, desc: '移動の加速・減速 (off: 加速度無限大)' },

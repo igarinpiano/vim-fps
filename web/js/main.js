@@ -108,6 +108,9 @@ function resetGame() {
   });
   game.roster = new Map();
   game.steps = new Map();
+  netStats.rtts = [];
+  netStats.snaps = [];
+  netStats.last = null;
   game.held = { fwd: false, back: false, left: false, right: false, up: false, down: false };
 }
 
@@ -240,6 +243,8 @@ const HELP = [
   '  :watch               観戦に回る       :play          観戦から試合へ',
   '  :follow 名前         その人を観戦     :range         射撃訓練場',
   '  :custom              カスタムマッチ   :botskill 1〜5 bot の強さ (練習のみ)',
+  '  :net                 通信統計 (ping など)  :set netstat  常に右上に表示',
+  '  :set nonameplates    頭上の名前を消す :set nohpbars  頭上の体力ゲージを消す',
   '',
   'SPECTATE (観戦中)      n / N  次 / 前の選手    o  自由視点 (k/j 前後, h/l 旋回, K/J 上下, Shift で速く)',
   '                       O  空から (hjkl 移動, K/J 高さ, , . 回転)    m  全員が載ったマップ',
@@ -438,6 +443,10 @@ function runCommand(line) {
     case 'e':
     case 'connect':
       connect(args);
+      break;
+    case 'net':
+    case 'netstat':
+      showMsg(':net — 通信統計', netLines(performance.now()));
       break;
     case 'watch':
       if (game.conn) game.conn.send({ t: 'watch' });
@@ -887,7 +896,7 @@ function onMessage(m) {
         `${how}${m.head ? ' · ヘッドショット' : ''}${dist}`,
         'kill',
       );
-      if (m.victim === game.myId) {
+      if (m.victim === game.myId && !game.watching) {
         game.alive = false;
         showBsod(self ? null : nameOf(m.killer), `${how}${m.head ? ' · ヘッドショット' : ''}${dist}`);
         if (vim.mode === 'view' || vim.mode === 'inventory' || vim.mode === 'map') vim.setMode('normal');
@@ -950,6 +959,8 @@ function onMessage(m) {
       if (t) {
         game.ping = performance.now() - t;
         game.pings.delete(m.id);
+        netStats.rtts.push(game.ping);
+        if (netStats.rtts.length > 30) netStats.rtts.shift();
       }
       break;
     }
@@ -1063,6 +1074,8 @@ function onSnap(m) {
   const now = performance.now();
   const players = new Map(m.players.map((p) => [p.id, p]));
   game.snaps.push({ t: now, players });
+  netStats.snaps.push(now);
+  if (netStats.snaps.length > 60) netStats.snaps.shift();
   if (game.snaps.length > 12) game.snaps.shift();
   const mine = players.get(game.myId);
   if (mine) {
@@ -1511,7 +1524,7 @@ function frame(now) {
   if (game.conn && game.map && renderer) {
 
     pingTimer += dt;
-    if (pingTimer > 2 && !game.practice) {
+    if (pingTimer > 1) {
       pingTimer = 0;
       game.pingSeq += 1;
       game.pings.set(game.pingSeq, now);
@@ -1519,6 +1532,7 @@ function frame(now) {
     }
     updateHud(dt);
     updateCompass(now);
+    updateNetStats(now);
   }
   if (settings.get('showfps')) {
     fpsAcc += dt;
@@ -1530,6 +1544,78 @@ function frame(now) {
     }
   }
   requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------- network statistics
+
+const netStats = { rtts: [], snaps: [], last: null, rateIn: 0, rateOut: 0, msgRate: 0, at: 0 };
+
+function fmtBytes(n) {
+  if (n >= 1048576) return `${(n / 1048576).toFixed(2)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
+/// Round-trip times: last, average, minimum, maximum, jitter (mean change).
+function rttSummary() {
+  const r = netStats.rtts;
+  if (!r.length) return null;
+  const avg = r.reduce((a, b) => a + b, 0) / r.length;
+  let jitter = 0;
+  for (let i = 1; i < r.length; i++) jitter += Math.abs(r[i] - r[i - 1]);
+  jitter = r.length > 1 ? jitter / (r.length - 1) : 0;
+  return { last: r[r.length - 1], avg, min: Math.min(...r), max: Math.max(...r), jitter };
+}
+
+/// Snapshots per second over the last ones, and how uneven their spacing is.
+function snapSummary(now) {
+  const t = netStats.snaps.filter((x) => now - x < 3000);
+  if (t.length < 2) return null;
+  const gaps = [];
+  for (let i = 1; i < t.length; i++) gaps.push(t[i] - t[i - 1]);
+  const mean = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+  const sd = Math.sqrt(gaps.reduce((a, g) => a + (g - mean) ** 2, 0) / gaps.length);
+  return { rate: 1000 / mean, mean, sd, maxGap: Math.max(...gaps), age: now - t[t.length - 1] };
+}
+
+function netLines(now) {
+  const c = game.conn;
+  if (!c || !c.stats) return ['(接続していません)'];
+  const st = c.stats;
+  const r = rttSummary();
+  const sn = snapSummary(now);
+  const sp = game.specs;
+  const f = (v) => (v < 10 ? v.toFixed(1) : String(Math.round(v)));
+  return [
+    `接続     ${st.kind}${st.url ? `  ${st.url}` : ''}`,
+    r ? `Ping     ${f(r.last)} ms  (平均 ${f(r.avg)} · 最小 ${f(r.min)} · 最大 ${f(r.max)} · ゆれ ${f(r.jitter)} ms)` : 'Ping     (測定中)',
+    sn
+      ? `受信     ${sn.rate.toFixed(1)} 回/秒 (サーバーの送信 ${sp ? sp.snap_rate : 20} Hz) · 間隔 ${f(sn.mean)} ± ${f(sn.sd)} ms · 最大の空き ${f(sn.maxGap)} ms`
+      : '受信     (測定中)',
+    `通信量   下り ${fmtBytes(Math.round(netStats.rateIn))}/s · 上り ${fmtBytes(Math.round(netStats.rateOut))}/s · ${netStats.msgRate.toFixed(0)} メッセージ/秒`,
+    `合計     下り ${fmtBytes(st.bytesIn)} (${st.msgsIn}) · 上り ${fmtBytes(st.bytesOut)} (${st.msgsOut})`,
+    sp ? `サーバー ${sp.tick_rate} Hz で計算 · ${sp.snap_rate} Hz で送信 · 補間の遅れ ${settings.get('interp') ? '100 ms' : 'なし'}` : '',
+  ].filter(Boolean);
+}
+
+function updateNetStats(now) {
+  const c = game.conn;
+  const el = $('netstat');
+  const on = settings.get('netstat') && !!c;
+  el.classList.toggle('hidden', !on);
+  if (!c || !c.stats) return;
+  // Per-second rates.
+  if (!netStats.last || now - netStats.at >= 1000) {
+    if (netStats.last) {
+      const secs = (now - netStats.at) / 1000;
+      netStats.rateIn = (c.stats.bytesIn - netStats.last.bytesIn) / secs;
+      netStats.rateOut = (c.stats.bytesOut - netStats.last.bytesOut) / secs;
+      netStats.msgRate = (c.stats.msgsIn - netStats.last.msgsIn) / secs;
+    }
+    netStats.last = { ...c.stats };
+    netStats.at = now;
+    if (on) el.textContent = netLines(now).slice(1, 4).join('\n');
+  }
 }
 
 // ---------------------------------------------------------------- custom match
@@ -1624,6 +1710,9 @@ function alivePlayers() {
 /// Start watching: follow `who` (a player id), 'free' for a free camera,
 /// or null for whoever is around.
 function startWatching(who) {
+  // Watching always ends the stop screen, whichever path started it.
+  game.bsodPending = false;
+  hideDeath();
   game.watching = true;
   game.ads = false;
   game.zoom = 0;
@@ -1641,6 +1730,7 @@ function startWatching(who) {
 }
 
 function stopWatching() {
+  show('followcard', false);
   game.watching = false;
   game.follow = null;
   game.free = null;
@@ -1788,6 +1878,22 @@ function updateWatchHud() {
   else line = `${nameOf(t.id)} を観戦中 — n / N 切り替え · o 自由視点 · O 空から · m マップ`;
   const tail = voluntary ? ' · :play で参加' : !game.respawnMode ? ' · 次のラウンドまで観戦' : '';
   setText($('watchbar'), line + tail);
+  // The followed player's card.
+  const card = $('followcard');
+  show('followcard', !!t && !game.free && !game.sky);
+  if (t && !game.free && !game.sky) {
+    const rr = game.roster.get(t.id);
+    const hpv = t.hp != null ? Math.max(0, Math.round(t.hp)) : null;
+    const key = `${t.id}|${hpv}|${t.gun}|${rr ? `${rr.kills}/${rr.deaths}` : ''}|${t.ads}`;
+    if (card.dataset.key !== key) {
+      card.dataset.key = key;
+      card.innerHTML =
+        `<div class="titlebar"><span>${esc(nameOf(t.id))}</span></div><div class="body">` +
+        `<div class="hpbar big"><div style="width:${hpv ?? 0}%" class="${hpv != null && hpv <= 30 ? 'low' : ''}"></div></div>` +
+        `<div class="row"><span>HP ${hpv ?? '?'}</span><span>${esc(gunName(t.gun))}${t.ads ? ' · 構え' : ''}</span>` +
+        `<span>${rr ? `${rr.kills} キル / ${rr.deaths} デス` : ''}</span></div></div>`;
+    }
+  }
   setText($('tb-weapon'), t && t.gun ? gunName(t.gun) : '観戦中');
   setText($('tb-items'), t ? nameOf(t.id) : '—');
   const hp = t && t.hp != null ? Math.max(0, t.hp) : 0;
@@ -1795,7 +1901,7 @@ function updateWatchHud() {
   $('hp-fill').classList.toggle('low', hp <= 30);
   setText($('hp-text'), t ? String(hp) : '—');
   setText($('tb-kd'), r ? `${r.kills} / ${r.deaths}` : '');
-  setText($('tb-ping'), game.practice ? '練習' : game.ping != null ? `${Math.round(game.ping)} ms` : '');
+  setText($('tb-ping'), game.ping != null ? `${game.practice ? '練習 ' : ''}${game.ping < 10 ? game.ping.toFixed(1) : Math.round(game.ping)} ms` : game.practice ? '練習' : '');
   setText($('clock'), game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left));
   if (game.intermission != null) setText($('result-next'), `${Math.ceil(game.intermission)} 秒後に次の試合`);
   show('progress', false);
@@ -1912,7 +2018,7 @@ function updateHud() {
   setText($('hp-text'), String(hp));
   const r = game.roster.get(game.myId);
   setText($('tb-kd'), r ? `${r.kills} / ${r.deaths}` : '');
-  setText($('tb-ping'), game.practice ? '練習' : game.ping != null ? `${Math.round(game.ping)} ms` : '');
+  setText($('tb-ping'), game.ping != null ? `${game.practice ? '練習 ' : ''}${game.ping < 10 ? game.ping.toFixed(1) : Math.round(game.ping)} ms` : game.practice ? '練習' : '');
   setText($('clock'), game.range ? '∞' : game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left));
   if (game.intermission != null) setText($('result-next'), `${Math.ceil(game.intermission)} 秒後に次の試合`);
 

@@ -212,6 +212,17 @@ body.uianim #boot .boot-bar i { animation: bootbar 1.2s linear infinite; }
 #start[data-mode="SPECTATE"] { background: linear-gradient(180deg, #6fc6d8 0%, #2b8aa8 15%, #1d6f8a 85%, #134e63 100%); }
 @media (max-width: 640px) { #watchbar { top: 84px; font-size: 11px; white-space: normal; } }
 
+#followcard { left: 12px; top: 10px; width: 260px; z-index: 3; }
+#followcard .body { padding: 6px 8px; }
+#followcard .row { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; margin-top: 4px; }
+.hpbar.big { width: 100%; height: 14px; background: #20305a; border: 1px solid #0a1838; }
+.hpbar.big > div { height: 100%; background: linear-gradient(180deg, #7de07d, #2fa52f); }
+.hpbar.big > div.low { background: linear-gradient(180deg, #ff9a7a, #d1301a); }
+#netstat { position: absolute; right: 12px; top: 44px; z-index: 4; margin: 0; padding: 4px 8px; font: 11px/1.4 var(--mono);
+  color: #fff; background: rgba(0,0,0,0.55); border-radius: 4px; pointer-events: none; white-space: pre; }
+@media (max-width: 640px) { #netstat { top: 128px; font-size: 10px; } }
+@media (max-width: 640px) { #followcard { top: 120px; width: 200px; } }
+
 /* ---------- compass (spotting) ---------- */
 #compass { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); width: min(520px, calc(100vw - 230px)); height: 34px; z-index: 3;
   background: linear-gradient(180deg, rgba(16,40,110,0.7), rgba(10,30,90,0.55)); border: 1px solid rgba(255,255,255,0.5); border-radius: 4px; overflow: hidden; color: #fff; font-size: 11px; }
