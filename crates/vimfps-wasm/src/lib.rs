@@ -67,6 +67,44 @@ pub extern "C" fn vf_new_mode(seed: u32, bots: u32, mode: u32) {
     });
 }
 
+/// A custom practice match: mode bits as `vf_new_mode`, bot skill 1..=5,
+/// match length (seconds) and kills to win (0: no limit).
+#[unsafe(no_mangle)]
+pub extern "C" fn vf_new_custom(
+    seed: u32,
+    bots: u32,
+    mode: u32,
+    skill: u32,
+    time_limit: u32,
+    frag_limit: u32,
+) {
+    let cfg = Config {
+        seed: seed as u64,
+        practice: true,
+        bots,
+        max_players: 1,
+        range: mode & 1 != 0,
+        respawn: mode & 2 == 0,
+        bot_skill: skill.clamp(1, 5) as u8,
+        time_limit: time_limit.max(30) as f32,
+        frag_limit: if frag_limit == 0 {
+            u32::MAX
+        } else {
+            frag_limit
+        },
+        ..Default::default()
+    };
+    STATE.with(|s| {
+        *s.borrow_mut() = Some(State {
+            room: Room::new(cfg),
+            me: None,
+            pending: Vec::new(),
+            inbuf: Vec::new(),
+            outbuf: Vec::new(),
+        })
+    });
+}
+
 /// Buffer of `len` bytes for the next `vf_send`.
 #[unsafe(no_mangle)]
 pub extern "C" fn vf_in(len: usize) -> *mut u8 {

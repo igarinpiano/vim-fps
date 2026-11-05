@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 /// Bumped whenever a message changes shape. Client and server must agree.
 pub const PROTOCOL: u32 = 3;
 
+fn default_bot_skill() -> u8 {
+    3
+}
+
 pub type ClientId = u32;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +74,10 @@ pub enum ClientMsg {
     /// Practice mode only: number of bots.
     Bots {
         n: u32,
+    },
+    /// Practice mode only: bot skill 1..=5.
+    BotSkill {
+        level: u8,
     },
 }
 
@@ -214,6 +222,9 @@ pub enum ServerMsg {
         range: bool,
         /// Joined as a spectator.
         spectator: bool,
+        /// Bot skill 1..=5.
+        #[serde(default = "default_bot_skill")]
+        bot_skill: u8,
     },
     Error {
         text: String,

@@ -28,9 +28,12 @@ pub struct HostArgs {
     /// 合言葉 (招待 URL の #pw=... に入る)
     #[arg(long)]
     pub password: Option<String>,
-    /// bot の数
+    /// bot の数 (0〜15)
     #[arg(long, default_value_t = 0)]
     pub bots: u32,
+    /// bot の強さ: 1 とても弱い / 2 弱い / 3 普通 / 4 強い (偏差撃ち) / 5 とても強い
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=5))]
+    pub bot_skill: u8,
     /// 最大人数 (bot を除く)
     #[arg(long, default_value_t = 12)]
     pub max_players: usize,
@@ -66,6 +69,7 @@ impl Default for HostArgs {
             tunnel: false,
             password: None,
             bots: 0,
+            bot_skill: 3,
             max_players: 12,
             time_limit: 10.0,
             frag_limit: 25,
@@ -128,6 +132,7 @@ async fn host(args: HostArgs) -> i32 {
         bots: args.bots,
         respawn: !args.no_respawn,
         range: false,
+        bot_skill: args.bot_skill,
     };
     let addr = SocketAddr::new(args.bind, args.port);
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -145,6 +150,8 @@ async fn host(args: HostArgs) -> i32 {
         "protocol": vimfps_core::PROTOCOL,
         "password": cfg.password.is_some(),
         "respawn": cfg.respawn,
+        "bots": cfg.bots,
+        "bot_skill": cfg.bot_skill,
     });
     let source = args.web.clone();
     let files = tokio::task::spawn_blocking(move || crate::webclient::initial(&source))

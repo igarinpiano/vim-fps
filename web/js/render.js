@@ -44,7 +44,7 @@ function labelSprite(text, color = '#ffffff', bg = 'rgba(0,0,0,0.45)', scale = 1
   ctx.fillText(text, 8, 21);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
-  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: true, transparent: true });
+  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: true, transparent: true, fog: false });
   const s = new THREE.Sprite(mat);
   s.scale.set((w / 40) * 0.45 * scale, 0.45 * scale, 1);
   return s;
@@ -65,7 +65,7 @@ function makeMarker() {
   g.stroke();
   g.fill();
   const tex = new THREE.CanvasTexture(c);
-  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true, sizeAttenuation: false });
+  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true, sizeAttenuation: false, fog: false });
   const s = new THREE.Sprite(mat);
   s.scale.set(0.035, 0.035, 1);
   s.renderOrder = 10;
@@ -370,6 +370,9 @@ export class Renderer {
   setPlayer(id, st, name, mark = null) {
     const p = this.ensurePlayer(id, name);
     p.marker.visible = !!mark && st.alive;
+    const ls = this.labelScale || 1;
+    if (!p.label.userData.base) p.label.userData.base = p.label.scale.clone();
+    p.label.scale.copy(p.label.userData.base).multiplyScalar(ls);
     if (mark) p.marker.material.color.setHex(mark === 'spotted' ? 0xffd400 : 0xff3030);
     const len = { ar: 0.6, smg: 0.4, sg: 0.65, sr: 0.9 }[st.gun] || 0.5;
     p.gun.scale.z = len / 0.6;
@@ -520,6 +523,10 @@ export class Renderer {
 
   /// cam: {x,y,z,yaw,pitch,fov}, vm: {ads 0..1, hide, bob, kick}
   render(cam, vm) {
+    // The fog starts farther away the higher the camera (the sky view).
+    const lift = Math.max(0, cam.lift || 0);
+    this.scene.fog.near = 70 + lift;
+    this.scene.fog.far = 230 + lift * 1.6;
     this.camera.position.set(cam.x, cam.y, cam.z);
     this.camera.rotation.set(cam.pitch, cam.yaw, 0);
     if (Math.abs(this.camera.fov - cam.fov) > 1e-3) {

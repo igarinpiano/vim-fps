@@ -125,6 +125,8 @@ pub struct Config {
     pub respawn: bool,
     /// The firing range (practice targets on a long field).
     pub range: bool,
+    /// How good the bots are, 1 (very weak) ..= 5 (very strong).
+    pub bot_skill: u8,
 }
 
 impl Default for Config {
@@ -139,7 +141,65 @@ impl Default for Config {
             bots: 0,
             respawn: true,
             range: false,
+            bot_skill: 3,
         }
+    }
+}
+
+pub const BOT_SKILL_NAMES: [&str; 5] = ["とても弱い", "弱い", "普通", "強い", "とても強い"];
+
+/// What a bot skill level means.
+#[derive(Debug, Clone, Copy)]
+pub struct BotSkill {
+    /// How far it sees (m).
+    pub sight: f32,
+    /// Seconds before it fires at a new target (plus distance / 250).
+    pub reaction: f32,
+    /// Aim error multiplier (1 = normal).
+    pub aim_error: f32,
+    /// How fast it turns (rad/s).
+    pub turn: f32,
+    /// Leads moving targets and aims over the bullet drop.
+    pub lead: bool,
+}
+
+pub fn bot_skill(level: u8) -> BotSkill {
+    match level.clamp(1, 5) {
+        1 => BotSkill {
+            sight: 70.0,
+            reaction: 0.9,
+            aim_error: 2.4,
+            turn: 1.6,
+            lead: false,
+        },
+        2 => BotSkill {
+            sight: 110.0,
+            reaction: 0.6,
+            aim_error: 1.6,
+            turn: 2.2,
+            lead: false,
+        },
+        3 => BotSkill {
+            sight: BOT_SIGHT,
+            reaction: 0.35,
+            aim_error: 1.0,
+            turn: 2.8,
+            lead: false,
+        },
+        4 => BotSkill {
+            sight: 170.0,
+            reaction: 0.25,
+            aim_error: 0.6,
+            turn: 3.6,
+            lead: true,
+        },
+        _ => BotSkill {
+            sight: 200.0,
+            reaction: 0.15,
+            aim_error: 0.3,
+            turn: 4.8,
+            lead: true,
+        },
     }
 }
 
@@ -430,6 +490,7 @@ impl Room {
                 respawn: self.cfg.respawn,
                 range: self.cfg.range,
                 spectator: spectate,
+                bot_skill: self.cfg.bot_skill,
             },
         );
         if spectate {
@@ -727,6 +788,16 @@ impl Room {
                 if self.cfg.practice && !self.cfg.range {
                     self.set_bots(n);
                     self.sys(format!("bot の数: {}", self.bots_wanted));
+                }
+            }
+            ClientMsg::BotSkill { level } => {
+                if self.cfg.practice && !self.cfg.range {
+                    self.cfg.bot_skill = level.clamp(1, 5);
+                    let l = self.cfg.bot_skill;
+                    self.sys(format!(
+                        "bot の強さ: {l} ({})",
+                        BOT_SKILL_NAMES[l as usize - 1]
+                    ));
                 }
             }
         }
@@ -1592,9 +1663,15 @@ impl Room {
             return;
         }
         let eye = me.pos + Vec3::new(0.0, 1.6, 0.0);
-        // Nearest visible enemy within BOT_SIGHT; the nearest running one
+        let skill = bot_skill(self.cfg.bot_skill);
+        let muzzle = me
+            .inv
+            .held_gun()
+            .map_or(880.0, |g| g.stats().muzzle_velocity);
+        // Nearest visible enemy within its sight; the nearest running one
         // close by is heard even without a line of sight.
         let mut seen: Option<(ClientId, Vec3, f32)> = None;
+        let mut seen_vel = Vec3::ZERO;
         let mut steps: Option<(Vec3, f32)> = None;
         for o in self.players.values() {
             if o.id == id || !o.alive {
@@ -1609,11 +1686,12 @@ impl Room {
             {
                 steps = Some((chest, d));
             }
-            if d > BOT_SIGHT || seen.is_some_and(|s| s.2 < d) {
+            if d > skill.sight || seen.is_some_and(|s| s.2 < d) {
                 continue;
             }
             if self.map.line_of_sight(eye, chest) {
                 seen = Some((o.id, chest, d));
+                seen_vel = o.vel;
             }
         }
         let wp = me.bot.as_ref().unwrap().waypoint;
@@ -1646,7 +1724,10 @@ impl Room {
         b.err_timer -= dt;
         if b.err_timer <= 0.0 {
             b.err_timer = 0.6;
-            b.aim_err = (err.0 * 0.03, err.1 * 0.02);
+            b.aim_err = (
+                err.0 * 0.03 * skill.aim_error,
+                err.1 * 0.02 * skill.aim_error,
+            );
         }
         if let Some((pos, _)) = steps
             && b.heard.is_none()
@@ -1665,15 +1746,23 @@ impl Room {
                 if b.target != Some(tid) {
                     b.target = Some(tid);
                     // Farther targets take longer to react to.
-                    b.reaction = 0.35 + dist / 250.0;
+                    b.reaction = skill.reaction + dist / 250.0;
                 }
                 b.reaction -= dt;
-                let d = chest - eye;
+                // Strong bots aim where the target will be when the bullet
+                // arrives, and over the drop.
+                let aim_at = if skill.lead {
+                    let t = dist / muzzle;
+                    chest + seen_vel * t + Vec3::new(0.0, 0.5 * GRAVITY * t * t, 0.0)
+                } else {
+                    chest
+                };
+                let d = aim_at - eye;
                 let want_yaw = (-d.x).atan2(-d.z) + b.aim_err.0;
                 let want_pitch = d.y.atan2(d.length_xz()) + b.aim_err.1;
                 let ready = b.reaction <= 0.0;
                 let dy = wrap_angle(want_yaw - p.yaw);
-                let step = 2.8 * dt;
+                let step = skill.turn * dt;
                 p.yaw = wrap_angle(p.yaw + dy.clamp(-step, step));
                 p.pitch += (want_pitch - p.pitch).clamp(-step, step);
                 let aimed = dy.abs() < 0.06;
@@ -2124,6 +2213,49 @@ mod tests {
             Gun::Ar.stats().reserve_max
         );
         assert!(r.cfg.time_limit > 1.0e8);
+    }
+
+    #[test]
+    fn bot_skill_levels_are_ordered() {
+        for l in 1..5u8 {
+            let (a, b) = (bot_skill(l), bot_skill(l + 1));
+            assert!(
+                a.sight <= b.sight
+                    && a.reaction > b.reaction
+                    && a.aim_error > b.aim_error
+                    && a.turn < b.turn
+            );
+        }
+        assert!(bot_skill(5).lead && !bot_skill(1).lead);
+        assert_eq!(bot_skill(0).sight, bot_skill(1).sight);
+        assert_eq!(bot_skill(9).sight, bot_skill(5).sight);
+    }
+
+    /// Kills by bots in a minute of bots-only play at a skill level.
+    fn kills_at(skill: u8) -> usize {
+        let mut r = Room::new(Config {
+            seed: 5,
+            bots: 8,
+            bot_skill: skill,
+            ..Default::default()
+        });
+        let mut kills = 0;
+        for _ in 0..(60 * 60) {
+            r.tick(1.0 / 60.0);
+            kills += r
+                .drain()
+                .iter()
+                .filter(|(_, m)| matches!(m, ServerMsg::Kill { .. }))
+                .count();
+        }
+        kills
+    }
+
+    #[test]
+    fn stronger_bots_kill_more() {
+        let weak = kills_at(1);
+        let strong = kills_at(5);
+        assert!(strong > weak, "skill 5: {strong} kills, skill 1: {weak}");
     }
 
     #[test]

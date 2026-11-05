@@ -77,7 +77,8 @@ export class LocalConnection {
     this.enc = new TextEncoder();
     this.dec = new TextDecoder();
     const bits = (mode.range ? 1 : 0) | (mode.noRespawn ? 2 : 0);
-    if (bits && ex.vf_new_mode) ex.vf_new_mode(seed >>> 0, bots >>> 0, bits);
+    if (mode.custom && ex.vf_new_custom) ex.vf_new_custom(seed >>> 0, bots >>> 0, bits, mode.skill || 3, mode.time || 600, mode.frags || 0);
+    else if (bits && ex.vf_new_mode) ex.vf_new_mode(seed >>> 0, bots >>> 0, bits);
     else ex.vf_new(seed >>> 0, bots >>> 0);
     this.last = performance.now();
     this.timer = setInterval(() => this.tick(), 1000 / 60);
