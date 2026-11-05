@@ -65,6 +65,25 @@ pub struct Map {
     pub trees: Vec<[f32; 4]>,
     pub spawns: Vec<Vec3>,
     pub pickups: Vec<PickupSpot>,
+    /// Firing range: practice dummies (where they stand, how far they
+    /// strafe left and right).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<RangeTarget>,
+    /// Text shown in the world (distance signs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<Label>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RangeTarget {
+    pub pos: Vec3,
+    pub strafe: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Label {
+    pub pos: Vec3,
+    pub text: String,
 }
 
 impl Map {
@@ -84,6 +103,8 @@ impl Map {
             trees: Vec::new(),
             spawns: Vec::new(),
             pickups: Vec::new(),
+            targets: Vec::new(),
+            labels: Vec::new(),
         };
 
         // Fence around the field (the terrain is flat near the edge).
@@ -279,6 +300,130 @@ impl Map {
                 map.pickups.push(PickupSpot { kind, pos: p });
                 placed += 1;
             }
+        }
+        map
+    }
+
+    /// The firing range: a long flat field. You start at the bench (z =
+    /// +200, facing -Z) with every gun and item on the rack; dummies stand
+    /// 10–400 m away, some strafing, some behind cover, each with a sign.
+    pub fn firing_range() -> Map {
+        let half = 240.0;
+        let n = GRID;
+        let cell = 2.0 * half / (n - 1) as f32;
+        let mut heights = vec![0.0f32; n * n];
+        // A berm behind the farthest targets.
+        for j in 0..n {
+            let z = -half + j as f32 * cell;
+            if z < -215.0 {
+                for i in 0..n {
+                    heights[j * n + i] = ((-215.0 - z) * 0.4).min(8.0);
+                }
+            }
+        }
+        let mut map = Map {
+            seed: 0,
+            half,
+            grid: n,
+            cell,
+            heights,
+            solids: Vec::new(),
+            trees: Vec::new(),
+            spawns: vec![Vec3::new(0.0, 0.0, 200.0)],
+            pickups: Vec::new(),
+            targets: Vec::new(),
+            labels: Vec::new(),
+        };
+        let h = half;
+        for b in [
+            Aabb::new(
+                Vec3::new(-h - 1.0, -5.0, -h - 1.0),
+                Vec3::new(h + 1.0, 12.0, -h),
+            ),
+            Aabb::new(
+                Vec3::new(-h - 1.0, -5.0, h),
+                Vec3::new(h + 1.0, 2.5, h + 1.0),
+            ),
+            Aabb::new(Vec3::new(-h - 1.0, -5.0, -h), Vec3::new(-h, 2.5, h)),
+            Aabb::new(Vec3::new(h, -5.0, -h), Vec3::new(h + 1.0, 2.5, h)),
+        ] {
+            map.solids.push(Solid {
+                kind: BoxKind::Fence,
+                aabb: b,
+            });
+        }
+        // The bench and the rack behind it.
+        map.solids.push(Solid {
+            kind: BoxKind::Crate,
+            aabb: Aabb::ground(0.0, 196.5, 14.0, 0.8, 1.0),
+        });
+        let rack = [
+            PickupKind::Ar,
+            PickupKind::Smg,
+            PickupKind::Sg,
+            PickupKind::Sr,
+            PickupKind::Medkit,
+            PickupKind::Grenade,
+            PickupKind::Ammo,
+        ];
+        for (i, kind) in rack.into_iter().enumerate() {
+            map.pickups.push(PickupSpot {
+                kind,
+                pos: Vec3::new(-6.0 + i as f32 * 2.0, 0.0, 202.5),
+            });
+        }
+        // Lanes: (distance, x, strafe, cover in front).
+        let lanes: [(f32, f32, f32, bool); 12] = [
+            (10.0, -6.0, 0.0, false),
+            (10.0, 6.0, 0.0, true),
+            (25.0, -10.0, 0.0, false),
+            (25.0, 10.0, 3.0, false),
+            (50.0, -14.0, 0.0, false),
+            (50.0, 14.0, 4.0, false),
+            (100.0, -18.0, 0.0, true),
+            (100.0, 18.0, 5.0, false),
+            (200.0, -24.0, 0.0, false),
+            (200.0, 24.0, 6.0, false),
+            (300.0, 0.0, 0.0, false),
+            (400.0, 0.0, 0.0, false),
+        ];
+        for (d, x, strafe, cover) in lanes {
+            let z = 200.0 - d;
+            map.targets.push(RangeTarget {
+                pos: Vec3::new(x, 0.0, z),
+                strafe,
+            });
+            map.labels.push(Label {
+                pos: Vec3::new(x, 2.8, z),
+                text: if strafe > 0.0 {
+                    format!("{d} m ↔")
+                } else {
+                    format!("{d} m")
+                },
+            });
+            if cover {
+                // Waist-high cover: only the head shows.
+                map.solids.push(Solid {
+                    kind: BoxKind::Cover,
+                    aabb: Aabb::ground(x, z + 1.2, 1.6, 0.6, 1.25),
+                });
+            }
+        }
+        // A wall to shoot around, and posts every 50 m down the middle.
+        map.solids.push(Solid {
+            kind: BoxKind::Wall,
+            aabb: Aabb::ground(-40.0, 170.0, 8.0, 0.4, 3.0),
+        });
+        for k in 1..=8 {
+            let z = 200.0 - 50.0 * k as f32;
+            map.solids.push(Solid {
+                kind: BoxKind::Trunk,
+                aabb: Aabb::ground(-34.0, z, 0.3, 0.3, 1.5),
+            });
+            map.solids.push(Solid {
+                kind: BoxKind::Trunk,
+                aabb: Aabb::ground(34.0, z, 0.3, 0.3, 1.5),
+            });
         }
         map
     }
@@ -675,6 +820,37 @@ mod tests {
         let o = Vec3::new(x, 50.0, z);
         let t = m.ray_terrain(o, Vec3::new(0.0, -1.0, 0.0), 100.0).unwrap();
         assert!((50.0 - t - m.height(x, z)).abs() < 0.05);
+    }
+
+    #[test]
+    fn firing_range_is_open_where_it_matters() {
+        let m = Map::firing_range();
+        assert!(
+            !m.blocked(m.spawns[0], PLAYER_RADIUS),
+            "the bench spot is free"
+        );
+        assert_eq!(m.targets.len(), m.labels.len());
+        for t in &m.targets {
+            assert!(
+                !m.blocked(t.pos, PLAYER_RADIUS),
+                "target at {:?} is free",
+                t.pos
+            );
+        }
+        // The rack is right behind the bench, within reach.
+        for p in &m.pickups {
+            assert!(p.pos.distance(m.spawns[0]) < 7.0);
+        }
+        // 400 m target: a clear shot from the bench at head height.
+        let far = m
+            .targets
+            .iter()
+            .find(|t| (m.spawns[0].z - t.pos.z - 400.0).abs() < 0.1)
+            .unwrap();
+        assert!(m.line_of_sight(
+            m.spawns[0] + Vec3::new(0.0, 1.6, 0.0),
+            far.pos + Vec3::new(0.0, 1.6, 0.0)
+        ));
     }
 
     #[test]

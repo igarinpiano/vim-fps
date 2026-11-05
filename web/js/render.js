@@ -169,6 +169,12 @@ export class Renderer {
       m.position.set((s.min.x + s.max.x) / 2, (s.min.y + s.max.y) / 2, (s.min.z + s.max.z) / 2);
       this.mapGroup.add(m);
     }
+    // Signs (firing range distances).
+    for (const l of map.labels || []) {
+      const s = labelSprite(l.text, '#ffffff', 'rgba(20,40,120,0.8)', 2.2);
+      s.position.set(l.pos.x, this.groundAt(map, l.pos.x, l.pos.z) + l.pos.y, l.pos.z);
+      this.mapGroup.add(s);
+    }
     const leaves = new THREE.MeshLambertMaterial({ color: 0x2f7a35 });
     const cone = new THREE.ConeGeometry(1, 1, 7);
     for (const [x, z, r, base] of map.trees) {
@@ -177,6 +183,32 @@ export class Renderer {
       m.position.set(x, base + 2.5, z);
       this.mapGroup.add(m);
     }
+  }
+
+  groundAt(map, x, z) {
+    const n = map.grid;
+    if (!n || !map.heights) return 0;
+    const i = Math.max(0, Math.min(n - 1, Math.round((x + map.half) / map.cell)));
+    const j = Math.max(0, Math.min(n - 1, Math.round((z + map.half) / map.cell)));
+    return map.heights[j * n + i];
+  }
+
+  /// A number rising from where a hit landed.
+  damageNumber(pos, dmg, head) {
+    const text = String(Math.round(dmg));
+    const s = labelSprite(text, head ? '#ff4040' : '#ffffff', 'rgba(0,0,0,0)', head ? 1.6 : 1.2);
+    s.material.depthTest = false;
+    s.renderOrder = 11;
+    s.position.set(pos.x + (Math.random() - 0.5) * 0.4, pos.y, pos.z);
+    this.scene.add(s);
+    const anim = this.s.get('uianim');
+    this.effects.push({ obj: s, t: 0, life: anim ? 0.9 : 0.6, kind: anim ? 'rise' : 'static', y: pos.y });
+  }
+
+  /// Hide one player's body (the one a spectator looks through).
+  hidePlayer(id) {
+    const p = this.players.get(id);
+    if (p) p.group.visible = false;
   }
 
   /// One model per gun (and items), each with its own sight picture when
@@ -462,6 +494,10 @@ export class Renderer {
         pos.setXYZ(1, b[0], b[1], b[2]);
         pos.needsUpdate = true;
       }
+      if (e.kind === 'rise') {
+        e.obj.position.y = e.y + e.t * 1.2;
+        e.obj.material.opacity = 1 - (e.t / e.life) ** 2;
+      }
       if (e.kind === 'boom') {
         const k = e.t / e.life;
         e.obj.scale.setScalar(0.5 + 6 * k);
@@ -471,7 +507,11 @@ export class Renderer {
     this.effects = this.effects.filter((e) => {
       if (e.t >= e.life) {
         this.scene.remove(e.obj);
-        e.obj.geometry.dispose();
+        if (e.obj.isSprite) {
+          // Sprites share one geometry: free only their own texture.
+          if (e.obj.material.map) e.obj.material.map.dispose();
+          e.obj.material.dispose();
+        } else e.obj.geometry.dispose();
         return false;
       }
       return true;

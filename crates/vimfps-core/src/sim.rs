@@ -120,6 +120,11 @@ pub struct Config {
     /// Practice mode (browser): bots may be changed with `:bots`.
     pub practice: bool,
     pub bots: u32,
+    /// false: no respawn. A round ends when one player is left standing;
+    /// the fallen watch (by default through their killer's eyes).
+    pub respawn: bool,
+    /// The firing range (practice targets on a long field).
+    pub range: bool,
 }
 
 impl Default for Config {
@@ -132,9 +137,17 @@ impl Default for Config {
             password: None,
             practice: false,
             bots: 0,
+            respawn: true,
+            range: false,
         }
     }
 }
+
+/// Firing range: dummies come back this fast, and so does everything on
+/// the rack.
+pub const RANGE_RESPAWN: f32 = 1.0;
+/// How many spectators may watch at once (on top of max_players).
+pub const MAX_SPECTATORS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -165,6 +178,9 @@ struct Bot {
     stuck_timer: f32,
     /// Where a shot was heard, and for how much longer it is interesting.
     heard: Option<(Vec3, f32)>,
+    /// Firing-range dummy: stands at `home` (strafing ±strafe m) and never
+    /// shoots.
+    dummy: Option<(Vec3, f32)>,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +205,18 @@ struct Player {
     kills: u32,
     deaths: u32,
     chat_budget: f32,
+    /// Watching only: joined as a spectator or `:watch`.
+    spectator: bool,
+    /// Out of the current no-respawn round (watching until the next).
+    out: bool,
+    /// When it went out (match clock), for the round's ranking.
+    out_at: f32,
+}
+
+impl Player {
+    fn watching(&self) -> bool {
+        self.spectator || self.out
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -278,7 +306,16 @@ fn r2(v: f32) -> f32 {
 }
 
 impl Room {
-    pub fn new(cfg: Config) -> Room {
+    pub fn new(mut cfg: Config) -> Room {
+        if cfg.range {
+            // One dummy per lane, no clock, nothing to win.
+            let map = Map::firing_range();
+            cfg.bots = map.targets.len() as u32;
+            cfg.time_limit = 1.0e9;
+            cfg.frag_limit = u32::MAX;
+            cfg.respawn = true;
+            return Room::with_map(cfg, map);
+        }
         let map = Map::generate(cfg.seed);
         Room::with_map(cfg, map)
     }
@@ -302,7 +339,11 @@ impl Room {
         let mut room = Room {
             rng: Rng::new(cfg.seed.wrapping_mul(31).wrapping_add(17)),
             left: cfg.time_limit,
-            bots_wanted: cfg.bots.min(MAX_BOTS),
+            bots_wanted: if cfg.range {
+                cfg.bots
+            } else {
+                cfg.bots.min(MAX_BOTS)
+            },
             cfg,
             map,
             players: BTreeMap::new(),
@@ -345,6 +386,7 @@ impl Room {
         name: &str,
         password: Option<&str>,
         protocol: u32,
+        spectate: bool,
     ) -> Result<ClientId, String> {
         if protocol != PROTOCOL {
             return Err(format!(
@@ -356,8 +398,12 @@ impl Room {
         {
             return Err("合言葉が違います".into());
         }
-        if self.humans() >= self.cfg.max_players {
-            return Err("満員です".into());
+        let watchers = self.players.values().filter(|p| p.spectator).count();
+        if spectate && watchers >= MAX_SPECTATORS {
+            return Err("観戦者が満員です".into());
+        }
+        if !spectate && self.humans() - watchers >= self.cfg.max_players {
+            return Err("満員です (観戦なら参加できます)".into());
         }
         let id = self.alloc_id();
         let mut name = sanitize(name, NAME_MAX);
@@ -368,6 +414,8 @@ impl Room {
             name = format!("{}#{id}", sanitize(&name, NAME_MAX - 4));
         }
         self.add_player(id, name.clone(), None);
+        let p = self.players.get_mut(&id).unwrap();
+        p.spectator = spectate;
         self.send(
             Target::One(id),
             ServerMsg::Welcome {
@@ -379,12 +427,45 @@ impl Room {
                 frag_limit: self.cfg.frag_limit,
                 practice: self.cfg.practice,
                 specs: Box::new(Specs::current()),
+                respawn: self.cfg.respawn,
+                range: self.cfg.range,
+                spectator: spectate,
             },
         );
-        self.spawn(id);
+        if spectate {
+            self.sys(format!("{name} が観戦に来ました"));
+        } else {
+            self.enter(id);
+            self.sys(format!("{name} が参加しました"));
+        }
         self.pickups_dirty = true;
-        self.sys(format!("{name} が参加しました"));
         Ok(id)
+    }
+
+    /// Into the match: spawn now, or (no-respawn round already under way)
+    /// wait out the round watching.
+    fn enter(&mut self, id: ClientId) {
+        let running = !self.cfg.respawn
+            && self.intermission.is_none()
+            && self.cfg.time_limit - self.left > 10.0
+            && self.players.values().any(|p| p.id != id && p.alive);
+        let p = self.players.get_mut(&id).unwrap();
+        p.spectator = false;
+        self.roster_dirty = true;
+        if running {
+            p.out = true;
+            p.alive = false;
+            p.out_at = f32::MIN;
+            self.send(
+                Target::One(id),
+                ServerMsg::Sys {
+                    text: "ラウンドの途中です。次のラウンドから参加します (それまで観戦)".into(),
+                },
+            );
+        } else {
+            p.out = false;
+            self.spawn(id);
+        }
     }
 
     pub fn leave(&mut self, id: ClientId) {
@@ -424,6 +505,9 @@ impl Room {
                 kills: 0,
                 deaths: 0,
                 chat_budget: 3.0,
+                spectator: false,
+                out: false,
+                out_at: 0.0,
             },
         );
         self.roster_dirty = true;
@@ -462,8 +546,14 @@ impl Room {
                 last_pos: Vec3::ZERO,
                 stuck_timer: 0.0,
                 heard: None,
+                dummy: self.map.targets.get(bots.len()).map(|t| (t.pos, t.strafe)),
             };
-            self.add_player(id, format!("bot-{n}"), Some(bot));
+            let name = if bot.dummy.is_some() {
+                format!("的-{n}")
+            } else {
+                format!("bot-{n}")
+            };
+            self.add_player(id, name, Some(bot));
             self.spawn(id);
             bots.push(id);
         }
@@ -490,7 +580,21 @@ impl Room {
                 best = *s;
             }
         }
-        let yaw = best.x.atan2(best.z);
+        let mut yaw = best.x.atan2(best.z);
+        if self.cfg.range {
+            // The bench faces down the range (-Z); dummies face the bench.
+            yaw = 0.0;
+            if let Some((home, _)) = self
+                .players
+                .get(&id)
+                .and_then(|p| p.bot.as_ref())
+                .and_then(|b| b.dummy)
+            {
+                best = home;
+                best.y = self.map.height(home.x, home.z);
+                yaw = std::f32::consts::PI;
+            }
+        }
         if let Some(p) = self.players.get_mut(&id) {
             p.pos = best;
             p.vel = Vec3::ZERO;
@@ -522,6 +626,42 @@ impl Room {
         }
         match msg {
             ClientMsg::Join { .. } => {}
+            ClientMsg::Watch => {
+                let p = self.players.get_mut(&id).unwrap();
+                if p.spectator {
+                    return;
+                }
+                p.spectator = true;
+                p.alive = false;
+                p.out = false;
+                p.reload = None;
+                p.heal = None;
+                let name = p.name.clone();
+                self.roster_dirty = true;
+                self.sys(format!("{name} が観戦に回りました"));
+            }
+            ClientMsg::Play => {
+                if !self.players[&id].spectator {
+                    return;
+                }
+                let players = self
+                    .players
+                    .values()
+                    .filter(|p| p.bot.is_none() && !p.spectator)
+                    .count();
+                if players >= self.cfg.max_players {
+                    self.send(
+                        Target::One(id),
+                        ServerMsg::Sys {
+                            text: "満員のため参加できません".into(),
+                        },
+                    );
+                    return;
+                }
+                let name = self.players[&id].name.clone();
+                self.enter(id);
+                self.sys(format!("{name} が試合に参加しました"));
+            }
             ClientMsg::Input {
                 mx,
                 mz,
@@ -584,7 +724,7 @@ impl Room {
             }
             ClientMsg::Ping { id: n } => self.send(Target::One(id), ServerMsg::Pong { id: n }),
             ClientMsg::Bots { n } => {
-                if self.cfg.practice {
+                if self.cfg.practice && !self.cfg.range {
                     self.set_bots(n);
                     self.sys(format!("bot の数: {}", self.bots_wanted));
                 }
@@ -662,7 +802,11 @@ impl Room {
             self.pickups.remove(idx);
         } else {
             self.pickups[idx].active = false;
-            self.pickups[idx].timer = WEAPON_RESPAWN;
+            self.pickups[idx].timer = if self.cfg.range {
+                RANGE_RESPAWN
+            } else {
+                WEAPON_RESPAWN
+            };
         }
         if let Some(old) = dropped {
             self.drop_gun(old, pos);
@@ -699,7 +843,7 @@ impl Room {
         } else {
             self.left -= dt;
             let top = self.players.values().map(|p| p.kills).max().unwrap_or(0);
-            if self.left <= 0.0 || top >= self.cfg.frag_limit {
+            if self.left <= 0.0 || top >= self.cfg.frag_limit || self.round_over() {
                 self.end_match();
             }
         }
@@ -742,6 +886,20 @@ impl Room {
         }
     }
 
+    /// No-respawn: the round is over when at most one of those who started
+    /// it is still standing.
+    fn round_over(&self) -> bool {
+        if self.cfg.respawn {
+            return false;
+        }
+        let entrants: Vec<&Player> = self
+            .players
+            .values()
+            .filter(|p| !p.spectator && p.out_at != f32::MIN)
+            .collect();
+        entrants.len() >= 2 && entrants.iter().filter(|p| p.alive).count() <= 1
+    }
+
     fn roster(&self) -> Vec<RosterEntry> {
         let mut v: Vec<RosterEntry> = self
             .players
@@ -752,14 +910,33 @@ impl Room {
                 kills: p.kills,
                 deaths: p.deaths,
                 bot: p.bot.is_some(),
+                spectator: p.spectator,
+                out: p.out,
             })
             .collect();
-        v.sort_by(|a, b| {
-            b.kills
-                .cmp(&a.kills)
-                .then(a.deaths.cmp(&b.deaths))
-                .then(a.id.cmp(&b.id))
-        });
+        if self.cfg.respawn {
+            v.sort_by(|a, b| {
+                a.spectator
+                    .cmp(&b.spectator)
+                    .then(b.kills.cmp(&a.kills))
+                    .then(a.deaths.cmp(&b.deaths))
+                    .then(a.id.cmp(&b.id))
+            });
+        } else {
+            // Last one standing first, then by how long each lasted.
+            let out_at = |id: ClientId| {
+                self.players
+                    .get(&id)
+                    .map_or(0.0, |p| if p.out { p.out_at } else { f32::MAX })
+            };
+            v.sort_by(|a, b| {
+                a.spectator
+                    .cmp(&b.spectator)
+                    .then(out_at(b.id).total_cmp(&out_at(a.id)))
+                    .then(b.kills.cmp(&a.kills))
+                    .then(a.id.cmp(&b.id))
+            });
+        }
         v
     }
 
@@ -786,9 +963,13 @@ impl Room {
             p.kills = 0;
             p.deaths = 0;
             p.alive = false;
+            p.out = false;
+            p.out_at = 0.0;
         }
         for id in ids {
-            self.spawn(id);
+            if !self.players[&id].spectator {
+                self.spawn(id);
+            }
         }
         for p in &mut self.pickups {
             if p.dropped.is_none() {
@@ -805,6 +986,15 @@ impl Room {
         let map = &self.map;
         let p = self.players.get_mut(&id).unwrap();
         p.chat_budget = (p.chat_budget + dt * 0.5).min(3.0);
+        if p.watching() {
+            return;
+        }
+        if self.cfg.range && p.bot.is_none() {
+            // Firing range: the reserve never runs out.
+            for g in &mut p.inv.guns {
+                g.reserve = g.gun.stats().reserve_max;
+            }
+        }
         if !p.alive {
             p.respawn -= dt;
             if p.respawn <= 0.0 {
@@ -911,7 +1101,11 @@ impl Room {
         }
         for (i, kind) in taken {
             self.pickups[i].active = false;
-            self.pickups[i].timer = ITEM_RESPAWN;
+            self.pickups[i].timer = if self.cfg.range {
+                RANGE_RESPAWN
+            } else {
+                ITEM_RESPAWN
+            };
             self.pickups_dirty = true;
             let text = match kind {
                 PickupKind::Medkit => "回復キットを拾いました",
@@ -1146,10 +1340,17 @@ impl Room {
             }
         }
         if dead {
+            let elapsed = self.cfg.time_limit - self.left;
+            let respawn = self.cfg.respawn;
+            let range = self.cfg.range;
             let v = self.players.get_mut(&victim).unwrap();
             v.alive = false;
             v.hp = 0.0;
-            v.respawn = RESPAWN_TIME;
+            v.respawn = if range { RANGE_RESPAWN } else { RESPAWN_TIME };
+            if !respawn {
+                v.out = true;
+                v.out_at = elapsed;
+            }
             v.deaths += 1;
             v.reload = None;
             v.heal = None;
@@ -1265,6 +1466,7 @@ impl Room {
         let players: Vec<PlayerState> = self
             .players
             .values()
+            .filter(|p| !p.spectator)
             .map(|p| PlayerState {
                 id: p.id,
                 x: r2(p.pos.x),
@@ -1277,6 +1479,15 @@ impl Room {
                 ads: p.input.ads,
                 mv: p.vel.length_xz() > 0.5,
                 gun: p.inv.held_gun(),
+                hp: None,
+            })
+            .collect();
+        // Those watching also see everyone's health.
+        let watched: Vec<PlayerState> = players
+            .iter()
+            .map(|st| PlayerState {
+                hp: self.players.get(&st.id).map(|p| p.hp.max(0.0).ceil()),
+                ..st.clone()
             })
             .collect();
         let grenades: Vec<GrenadeState> = self
@@ -1297,6 +1508,20 @@ impl Room {
             .collect();
         for id in humans {
             let p = &self.players[&id];
+            if p.watching() {
+                self.out.push((
+                    Target::One(id),
+                    ServerMsg::Snap {
+                        left: self.left.max(0.0).ceil(),
+                        intermission: self.intermission.map(|t| t.max(0.0).ceil()),
+                        players: watched.clone(),
+                        grenades: grenades.clone(),
+                        me: None,
+                        watching: true,
+                    },
+                ));
+                continue;
+            }
             let reload = match (p.reload, p.inv.gun_index()) {
                 (Some(t), Some(i)) => 1.0 - t / p.inv.guns[i].gun.stats().reload,
                 _ => -1.0,
@@ -1317,6 +1542,7 @@ impl Room {
                     players: players.clone(),
                     grenades: grenades.clone(),
                     me: Some(me),
+                    watching: false,
                 },
             ));
         }
@@ -1336,6 +1562,35 @@ impl Room {
 
     fn think_bot(&mut self, id: ClientId, dt: f32) {
         let me = &self.players[&id];
+        if let Some((home, strafe)) = me.bot.as_ref().unwrap().dummy {
+            // Practice dummy: face the bench; strafing ones walk ±strafe m.
+            let p = self.players.get_mut(&id).unwrap();
+            p.yaw = std::f32::consts::PI;
+            p.pitch = 0.0;
+            let b = p.bot.as_mut().unwrap();
+            let mut mx = 0;
+            if strafe > 0.0 {
+                // Facing +Z, walking "right" (mx = 1) goes toward -X. Turn
+                // round at either end of the lane.
+                let off = p.pos.x - home.x;
+                if b.err_timer == 0.0 {
+                    b.err_timer = 1.0;
+                }
+                if off <= -strafe {
+                    b.err_timer = -1.0;
+                } else if off >= strafe {
+                    b.err_timer = 1.0;
+                }
+                mx = if b.err_timer > 0.0 { 1 } else { -1 };
+            }
+            let _ = dt;
+            p.input = InputState {
+                mx,
+                instant: true,
+                ..Default::default()
+            };
+            return;
+        }
         let eye = me.pos + Vec3::new(0.0, 1.6, 0.0);
         // Nearest visible enemy within BOT_SIGHT; the nearest running one
         // close by is heard even without a line of sight.
@@ -1510,8 +1765,8 @@ mod tests {
 
     /// Two players face to face in the open, 10 m apart.
     fn duel(r: &mut Room) -> (ClientId, ClientId) {
-        let a = r.join("alice", None, PROTOCOL).unwrap();
-        let b = r.join("bob", None, PROTOCOL).unwrap();
+        let a = r.join("alice", None, PROTOCOL, false).unwrap();
+        let b = r.join("bob", None, PROTOCOL, false).unwrap();
         // Find an open spot: 12 m of free line along -Z.
         let mut spot = None;
         'search: for s in r.map.spawns.clone() {
@@ -1557,10 +1812,10 @@ mod tests {
             max_players: 1,
             ..Default::default()
         });
-        assert!(r.join("x", Some("bad"), PROTOCOL).is_err());
-        assert!(r.join("x", Some("pw"), PROTOCOL + 1).is_err());
-        let id = r.join("x", Some("pw"), PROTOCOL).unwrap();
-        assert!(r.join("y", Some("pw"), PROTOCOL).is_err());
+        assert!(r.join("x", Some("bad"), PROTOCOL, false).is_err());
+        assert!(r.join("x", Some("pw"), PROTOCOL + 1, false).is_err());
+        let id = r.join("x", Some("pw"), PROTOCOL, false).unwrap();
+        assert!(r.join("y", Some("pw"), PROTOCOL, false).is_err());
         let out = r.drain();
         assert!(
             out.iter()
@@ -1681,10 +1936,12 @@ mod tests {
             trees: Vec::new(),
             spawns: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(50.0, 0.0, 50.0)],
             pickups: Vec::new(),
+            targets: Vec::new(),
+            labels: Vec::new(),
         };
         let mut r = Room::with_map(Config::default(), map);
-        let a = r.join("a", None, PROTOCOL).unwrap();
-        let b = r.join("b", None, PROTOCOL).unwrap();
+        let a = r.join("a", None, PROTOCOL, false).unwrap();
+        let b = r.join("b", None, PROTOCOL, false).unwrap();
         r.give(a, Gun::Sr);
         (r, a, b)
     }
@@ -1741,6 +1998,135 @@ mod tests {
     }
 
     #[test]
+    fn spectators_watch_without_a_body() {
+        let mut r = room();
+        let a = r.join("player", None, PROTOCOL, false).unwrap();
+        let w = r.join("watcher", None, PROTOCOL, true).unwrap();
+        r.drain();
+        r.tick(1.0 / 20.0);
+        let out = r.drain();
+        let snap_for = |id| {
+            out.iter().find_map(|(t, m)| match m {
+                ServerMsg::Snap {
+                    players,
+                    me,
+                    watching,
+                    ..
+                } if *t == Target::One(id) => Some((players.clone(), me.clone(), *watching)),
+                _ => None,
+            })
+        };
+        let (players, me, watching) = snap_for(w).expect("watcher gets snapshots");
+        assert!(watching && me.is_none());
+        assert!(players.iter().all(|p| p.id != w), "a spectator has no body");
+        assert!(
+            players.iter().any(|p| p.id == a && p.hp.is_some()),
+            "watchers see health"
+        );
+        let (players, _, watching) = snap_for(a).unwrap();
+        assert!(!watching);
+        assert!(
+            players.iter().all(|p| p.hp.is_none()),
+            "players do not see health"
+        );
+        // :play joins the match; :watch leaves it.
+        r.handle(w, ClientMsg::Play);
+        assert!(r.players[&w].alive && !r.players[&w].spectator);
+        r.handle(w, ClientMsg::Watch);
+        assert!(!r.players[&w].alive && r.players[&w].spectator);
+    }
+
+    #[test]
+    fn no_respawn_round_ends_with_the_last_one_standing() {
+        let mut r = Room::new(Config {
+            seed: 3,
+            respawn: false,
+            ..Default::default()
+        });
+        let (a, b) = duel(&mut r);
+        r.give(a, Gun::Sr);
+        r.handle(a, input(true, (0.07f32).atan2(10.0)));
+        r.handle(a, ClientMsg::Trigger);
+        r.tick(1.0 / 60.0);
+        let out = r.drain();
+        assert!(r.players[&b].out && !r.players[&b].alive);
+        // b does not come back...
+        for _ in 0..(RESPAWN_TIME * 60.0) as usize + 30 {
+            r.tick(1.0 / 60.0);
+        }
+        assert!(!r.players[&b].alive);
+        // ...and the round is over with a first.
+        let ended = out
+            .iter()
+            .chain(r.drain().iter())
+            .find_map(|(_, m)| match m {
+                ServerMsg::MatchEnd { ranking, .. } => Some(ranking.clone()),
+                _ => None,
+            });
+        let ranking = ended.expect("round over");
+        assert_eq!(ranking[0].id, a);
+        // The next round brings everyone back.
+        for _ in 0..(INTERMISSION * 60.0) as usize + 5 {
+            r.tick(1.0 / 60.0);
+        }
+        assert!(r.players[&b].alive && !r.players[&b].out);
+    }
+
+    #[test]
+    fn firing_range_has_dummies_and_endless_ammo() {
+        let mut r = Room::new(Config {
+            range: true,
+            practice: true,
+            ..Default::default()
+        });
+        let me = r.join("me", None, PROTOCOL, false).unwrap();
+        assert_eq!(r.bots_wanted as usize, r.map.targets.len());
+        for p in r.players.values().filter(|p| p.bot.is_some()) {
+            let (home, _) = p.bot.as_ref().unwrap().dummy.unwrap();
+            assert!(p.pos.distance(Vec3::new(home.x, p.pos.y, home.z)) < 0.01);
+        }
+        // At the bench, facing down the range.
+        let pos = r.player_pos(me).unwrap();
+        assert!((pos.z - 200.0).abs() < 0.01);
+        // Strafing dummies move, still ones do not; none of them shoot.
+        let still: Vec<_> = r
+            .players
+            .values()
+            .filter(|p| p.bot.as_ref().is_some_and(|b| b.dummy.unwrap().1 == 0.0))
+            .map(|p| (p.id, p.pos))
+            .collect();
+        for _ in 0..120 {
+            r.tick(1.0 / 60.0);
+        }
+        let shots = r
+            .drain()
+            .into_iter()
+            .filter(|(_, m)| matches!(m, ServerMsg::Shot { .. }))
+            .count();
+        assert_eq!(shots, 0);
+        for (id, p0) in still {
+            assert!(r.player_pos(id).unwrap().distance(p0) < 0.01);
+        }
+        let moved = r
+            .players
+            .values()
+            .filter(|p| p.bot.as_ref().is_some_and(|b| b.dummy.unwrap().1 > 0.0))
+            .any(|p| {
+                let (home, _) = p.bot.as_ref().unwrap().dummy.unwrap();
+                (p.pos.x - home.x).abs() > 0.5
+            });
+        assert!(moved);
+        // The reserve never runs out.
+        r.players.get_mut(&me).unwrap().inv.guns[0].reserve = 0;
+        r.tick(1.0 / 60.0);
+        assert_eq!(
+            r.players[&me].inv.guns[0].reserve,
+            Gun::Ar.stats().reserve_max
+        );
+        assert!(r.cfg.time_limit > 1.0e8);
+    }
+
+    #[test]
     fn grenade_explodes_after_fuse() {
         let mut r = room();
         let (a, _) = duel(&mut r);
@@ -1765,7 +2151,7 @@ mod tests {
             time_limit: 60.0,
             ..Default::default()
         });
-        let me = r.join("me", None, PROTOCOL).unwrap();
+        let me = r.join("me", None, PROTOCOL, false).unwrap();
         let mut kills = 0;
         for _ in 0..(60 * 60) {
             r.tick(1.0 / 60.0);
@@ -1782,7 +2168,7 @@ mod tests {
     #[test]
     fn chat_is_rate_limited_and_sanitized() {
         let mut r = room();
-        let a = r.join("a", None, PROTOCOL).unwrap();
+        let a = r.join("a", None, PROTOCOL, false).unwrap();
         r.drain();
         for _ in 0..10 {
             r.handle(

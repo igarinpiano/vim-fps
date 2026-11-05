@@ -70,6 +70,14 @@ const game = {
   bob: 0,
   kick: 0,
   leaving: false,
+  // Watching (spectator, or out of a no-respawn round): whom we follow
+  // (player id), or a free camera {x, y, z, yaw, pitch}.
+  watching: false,
+  follow: null,
+  free: null,
+  bsodPending: false,
+  range: false,
+  respawnMode: true,
 };
 
 function resetGame() {
@@ -90,10 +98,16 @@ function resetGame() {
     turnLeft: 0,
     intermission: null,
     lastInput: '',
+    watching: false,
+    follow: null,
+    free: null,
+    bsodPending: false,
+    range: false,
+    respawnMode: true,
   });
   game.roster = new Map();
   game.steps = new Map();
-  game.held = { fwd: false, back: false, left: false, right: false };
+  game.held = { fwd: false, back: false, left: false, right: false, up: false, down: false };
 }
 
 // ---------------------------------------------------------------- helpers
@@ -222,6 +236,11 @@ const HELP = [
   '  :ls                  スコア           :bots 5        bot の数 (練習のみ)',
   '  :connect URL         サーバーに接続    :practice      練習',
   '  :fs                  フルスクリーン   :q             タイトルへ',
+  '  :watch               観戦に回る       :play          観戦から試合へ',
+  '  :follow 名前         その人を観戦     :range         射撃訓練場',
+  '',
+  'SPECTATE (観戦中)      n / N  次 / 前の選手    o  自由視点 (k/j 前後, h/l 旋回, K/J 上下, Shift で速く)',
+  '  復活なしの試合で倒されると、倒した相手の視点で観戦します (:set nokillcam で自由視点)',
   '',
   '設定の一覧と説明は :options',
 ];
@@ -300,7 +319,8 @@ function scoreboard() {
   const lines = ['  #  名前              キル  デス'];
   rows.forEach((r, i) => {
     const me = r.id === game.myId ? '%' : ' ';
-    lines.push(`${me}${String(i + 1).padStart(2)}  ${r.name.padEnd(16)}  ${String(r.kills).padStart(4)}  ${String(r.deaths).padStart(4)}${r.bot ? '  bot' : ''}`);
+    const tag = r.spectator ? '  観戦' : r.out ? '  脱落' : r.bot ? '  bot' : '';
+    lines.push(`${me}${String(i + 1).padStart(2)}  ${r.name.padEnd(16)}  ${String(r.kills).padStart(4)}  ${String(r.deaths).padStart(4)}${tag}`);
   });
   return lines;
 }
@@ -415,6 +435,23 @@ function runCommand(line) {
     case 'e':
     case 'connect':
       connect(args);
+      break;
+    case 'watch':
+      if (game.conn) game.conn.send({ t: 'watch' });
+      break;
+    case 'play':
+      if (game.conn) game.conn.send({ t: 'play' });
+      break;
+    case 'follow': {
+      const r = [...game.roster.values()].find((x) => x.name === args.trim());
+      if (r && game.watching) {
+        game.free = null;
+        game.follow = r.id;
+      } else balloon(`E: ${game.watching ? '見つかりません' : '観戦中だけ使えます'}: ${args}`, '', 'err');
+      break;
+    }
+    case 'range':
+      startPractice(0, { range: true });
       break;
     case 'practice':
       startPractice(args ? parseInt(args, 10) : 5);
@@ -591,13 +628,17 @@ const menu = { items: [], sel: 0 };
 function buildMenu() {
   menu.items = [];
   if (serverInfo) {
+    const mode = serverInfo.respawn === false ? ' · 復活なし' : '';
     menu.items.push({
       label: 'このサーバーに参加',
-      sub: `${serverInfo.name} · v${serverInfo.version}${serverInfo.password ? ' · 合言葉あり' : ''}`,
+      sub: `${serverInfo.name} · v${serverInfo.version}${mode}${serverInfo.password ? ' · 合言葉あり' : ''}`,
       run: () => connect(''),
     });
+    menu.items.push({ label: 'このサーバーを観戦', sub: '試合には出ずに見る (:play で途中参加)', run: () => connect('', true) });
   }
+  menu.items.push({ label: '射撃訓練場', sub: 'オフライン · 10〜400 m の的 · 全武器 · 弾無限', run: () => startPractice(0, { range: true }) });
   menu.items.push({ label: '練習する', sub: 'オフライン · bot 5 体', run: () => startPractice(5) });
+  menu.items.push({ label: '練習する (復活なし)', sub: 'オフライン · bot 5 体 · 最後の 1 人が勝ち', run: () => startPractice(5, { noRespawn: true }) });
   menu.items.push({ label: 'URL を指定して接続', sub: ':connect URL', run: () => openCommand('connect ') });
   menu.items.push({ label: '操作説明', sub: ':help', run: () => showMsg(':help', HELP) });
   menu.items.push({ label: '設定', sub: ':options', run: () => showMsg(':options — :set で変更できます', optionsHelp()) });
@@ -646,11 +687,11 @@ function attach(conn, practice) {
   };
 }
 
-function joinMsg(password) {
-  return { t: 'join', name: settings.get('name') || '', password: password || null, protocol: PROTOCOL };
+function joinMsg(password, spectate = false) {
+  return { t: 'join', name: settings.get('name') || '', password: password || null, protocol: PROTOCOL, spectate };
 }
 
-function connect(input) {
+function connect(input, spectate = false) {
   let target;
   try {
     target = parseServerUrl(input, window.location);
@@ -672,13 +713,13 @@ function connect(input) {
     return;
   }
   attach(conn, false);
-  conn.onopen = () => conn.send(joinMsg(pw ? decodeURIComponent(pw) : null));
+  conn.onopen = () => conn.send(joinMsg(pw ? decodeURIComponent(pw) : null, spectate));
 }
 
-async function startPractice(bots) {
-  balloon('練習モードを準備中…');
+async function startPractice(bots, mode = {}) {
+  balloon(mode.range ? '射撃訓練場を準備中…' : '練習モードを準備中…');
   try {
-    const conn = await LocalConnection.create(Math.floor(Math.random() * 100000), Number.isFinite(bots) ? bots : 5);
+    const conn = await LocalConnection.create(Math.floor(Math.random() * 100000), Number.isFinite(bots) ? bots : 5, mode);
     attach(conn, true);
     conn.onopen = () => conn.send(joinMsg(null));
   } catch (e) {
@@ -714,6 +755,8 @@ async function onWelcome(m) {
   game.map = m.map;
   game.world = new World(m.map);
   game.specs = m.specs;
+  game.range = !!m.range;
+  game.respawnMode = m.respawn !== false;
   const conn = game.conn;
   const ok = await ensureRenderer();
   if (!ok) return leave();
@@ -724,7 +767,13 @@ async function onWelcome(m) {
   show('hud');
   show('msgwin', false);
   vim.setMode('normal');
-  balloon(game.practice ? '練習モード' : `${serverInfo ? serverInfo.name : 'サーバー'} に参加しました`, `${Math.round(m.time_limit / 60)} 分 · ${m.frag_limit} キル先取 · :help で操作説明`);
+  if (m.spectator) startWatching(null);
+  if (game.range) balloon('射撃訓練場', 'うしろの台で y: 銃を持ち替え · 的は 10〜400 m · 弾は減りません · :q で終了');
+  else
+    balloon(
+      game.practice ? '練習モード' : `${serverInfo ? serverInfo.name : 'サーバー'} に${m.spectator ? '観戦で' : ''}参加しました`,
+      `${Math.round(m.time_limit / 60)} 分 · ${m.respawn === false ? '復活なし (最後の 1 人が勝ち)' : `${m.frag_limit} キル先取`} · :help で操作説明`,
+    );
   if (m.version !== VERSION) balloon('バージョンが違います', `サーバー v${m.version} / このページ v${VERSION}`, 'err');
 }
 
@@ -769,6 +818,9 @@ function onMessage(m) {
         clearTimeout(hitTimer);
         hitTimer = setTimeout(() => show('hitmarker', false), 160);
         sound.hit(m.head);
+        const snap = game.snaps[game.snaps.length - 1];
+        const v = snap && snap.players.get(m.victim);
+        if (v && renderer && settings.get('dmgnum')) renderer.damageNumber({ x: v.x, y: v.y + (m.head ? 2.0 : 1.4), z: v.z }, m.dmg, m.head);
       }
       if (m.victim === game.myId) {
         damageArc(m.from);
@@ -789,6 +841,24 @@ function onMessage(m) {
         game.alive = false;
         showBsod(self ? null : nameOf(m.killer), `${how}${m.head ? ' · ヘッドショット' : ''}${dist}`);
         if (vim.mode === 'view' || vim.mode === 'inventory' || vim.mode === 'map') vim.setMode('normal');
+        if (!game.respawnMode) {
+          // Out of the round: after the stop screen, watch through the
+          // killer's eyes (or a free camera with :set nokillcam).
+          game.bsodPending = true;
+          const killer = self ? null : m.killer;
+          setTimeout(() => {
+            game.bsodPending = false;
+            if (!game.conn || game.alive) return;
+            hideDeath();
+            startWatching(settings.get('killcam') ? killer : 'free');
+          }, 1600);
+        }
+      }
+      if (game.watching && m.victim === game.follow) {
+        // Whom we watched fell: follow the one who got them.
+        setTimeout(() => {
+          if (game.watching && game.follow === m.victim) game.follow = m.killer !== m.victim ? m.killer : null;
+        }, 1200);
       }
       break;
     }
@@ -816,6 +886,7 @@ function onMessage(m) {
       game.timed = null;
       game.turnLeft = 0;
       hideDeath();
+      if (game.watching) stopWatching();
       break;
     case 'match_end':
       showResult(m);
@@ -933,6 +1004,8 @@ function showResult(m) {
 }
 
 function onSnap(m) {
+  if (m.watching && !game.watching && !game.bsodPending) startWatching(null);
+  if (!m.watching && game.watching && m.me) stopWatching();
   game.me = m.me;
   game.left = m.left;
   game.intermission = m.intermission;
@@ -1055,6 +1128,15 @@ const vim = new Vim(settings, {
     const slot = inv.sel === 'gun0' ? 'gun1' : 'gun0';
     inv.sel = slot;
     game.conn.send({ t: 'select', slot });
+  },
+  follow(n) {
+    followNext(n);
+  },
+  freecam() {
+    if (game.free) {
+      game.free = null;
+      followNext(1);
+    } else startFree();
   },
   turn(deg) {
     game.turnLeft += deg * DEG;
@@ -1280,7 +1362,9 @@ let pingTimer = 0;
 function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
-  if (game.conn && game.map && renderer) {
+  if (game.conn && game.map && renderer && game.watching) {
+    watchFrame(now, dt);
+  } else if (game.conn && game.map && renderer) {
     // Look (VIEW) and quick turns.
     if (vim.mode === 'view') applyLook(aim.update(dt, zoomFactor()));
     if (game.turnLeft) {
@@ -1363,6 +1447,8 @@ function frame(now) {
     renderer.render(cam, { ads: game.adsK, hide: scoped || !game.alive, bob: bobY, kick: game.kick });
     sound.listener(cam.x, cam.y, cam.z, game.yaw);
     if (vim.mode === 'map') drawMap();
+  }
+  if (game.conn && game.map && renderer) {
 
     pingTimer += dt;
     if (pingTimer > 2 && !game.practice) {
@@ -1384,6 +1470,162 @@ function frame(now) {
     }
   }
   requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------- watching
+
+function alivePlayers() {
+  const snap = game.snaps[game.snaps.length - 1];
+  if (!snap) return [];
+  return [...snap.players.values()].filter((p) => p.alive && p.id !== game.myId).sort((a, b) => a.id - b.id);
+}
+
+/// Start watching: follow `who` (a player id), 'free' for a free camera,
+/// or null for whoever is around.
+function startWatching(who) {
+  game.watching = true;
+  game.ads = false;
+  game.zoom = 0;
+  game.fire = false;
+  game.held = { fwd: false, back: false, left: false, right: false, up: false, down: false };
+  if (who === 'free') {
+    game.follow = null;
+    startFree();
+  } else {
+    game.free = null;
+    game.follow = who;
+    if (who == null) followNext(1);
+  }
+  if (['normal', 'view', 'inventory', 'map'].includes(vim.mode)) vim.setMode('spectate');
+}
+
+function stopWatching() {
+  game.watching = false;
+  game.follow = null;
+  game.free = null;
+  show('watchbar', false);
+  if (vim.mode === 'spectate' || vim.mode === 'map') vim.setMode('normal');
+}
+
+function followNext(n) {
+  const list = alivePlayers();
+  game.free = null;
+  if (!list.length) {
+    game.follow = null;
+    return;
+  }
+  const i = list.findIndex((p) => p.id === game.follow);
+  const k = i < 0 ? (n > 0 ? 0 : list.length - 1) : (((i + n) % list.length) + list.length) % list.length;
+  game.follow = list[k].id;
+}
+
+function startFree() {
+  game.follow = null;
+  game.autoFree = false;
+  // From where the camera is now, a little higher.
+  game.free = { x: game.pos.x, y: game.pos.y + 8, z: game.pos.z, yaw: game.yaw, pitch: -0.35 };
+}
+
+/// One frame while watching: the camera is the followed player's eyes, or
+/// the free camera.
+function watchFrame(now, dt) {
+  const view = interpolated(now);
+  let target = game.follow != null ? view.get(game.follow) : null;
+  if (game.autoFree && alivePlayers().length) {
+    // Somebody to watch appeared: leave the stand-in overview.
+    game.autoFree = false;
+    game.free = null;
+  }
+  if (!game.free && (!target || !target.alive)) {
+    followNext(1);
+    target = game.follow != null ? view.get(game.follow) : null;
+    if (!target) {
+      // Nobody to follow yet: an overview until someone appears.
+      startFree();
+      game.autoFree = true;
+    }
+  }
+  for (const [id, p] of view) {
+    if (id === game.myId) continue;
+    renderer.setPlayer(id, p, nameOf(id), markOf(id, p, now));
+  }
+  let cam;
+  let vm = { ads: 0, hide: true, bob: 0, kick: 0 };
+  let scoped = false;
+  if (game.free || !target) {
+    const f = game.free;
+    if (game.turnLeft) {
+      const step = settings.get('turnanim') ? Math.min(Math.abs(game.turnLeft), 12 * dt) * Math.sign(game.turnLeft) : game.turnLeft;
+      f.yaw = wrapAngle(f.yaw + step);
+      game.turnLeft -= step;
+      if (Math.abs(game.turnLeft) < 1e-4) game.turnLeft = 0;
+    }
+    const h = game.held;
+    const speed = (game.shiftDown ? 45 : 15) * dt;
+    const fz = (h.fwd ? 1 : 0) - (h.back ? 1 : 0);
+    const fx = (h.right ? 1 : 0) - (h.left ? 1 : 0);
+    // While free, h/l turn (no sideways walk) so you can look around.
+    f.yaw = wrapAngle(f.yaw - fx * 1.6 * dt * (game.shiftDown ? 2 : 1));
+    f.x += -Math.sin(f.yaw) * fz * speed;
+    f.z += -Math.cos(f.yaw) * fz * speed;
+    f.y = Math.max(game.world.height(f.x, f.z) + 1.5, f.y + ((h.up ? 1 : 0) - (h.down ? 1 : 0)) * speed);
+    const half = game.map.half;
+    f.x = Math.max(-half, Math.min(half, f.x));
+    f.z = Math.max(-half, Math.min(half, f.z));
+    cam = { x: f.x, y: f.y, z: f.z, yaw: f.yaw, pitch: f.pitch, fov: settings.get('fov') };
+    renderer.setHeld(null);
+  } else {
+    renderer.hidePlayer(target.id);
+    const gun = target.gun && GUNS[target.gun];
+    scoped = target.ads && target.gun === 'sr';
+    cam = {
+      x: target.x,
+      y: target.y + eyeHeight(target.sneak),
+      z: target.z,
+      yaw: target.yaw,
+      pitch: target.pitch,
+      fov: target.ads && gun ? gun.ads : settings.get('fov'),
+    };
+    renderer.setHeld(target.gun || null);
+    vm = { ads: target.ads ? 1 : 0, hide: scoped, bob: 0, kick: 0 };
+  }
+  show('scope', scoped);
+  $('crosshair').dataset.mode = game.free ? 'other' : target && target.ads ? 'view' : 'normal';
+  // The compass, markers and sound follow the camera.
+  game.pos = { x: cam.x, y: cam.y - 1.6, z: cam.z };
+  game.yaw = cam.yaw;
+  game.pitch = cam.pitch;
+  game.fov = cam.fov;
+  renderer.updateEffects(dt);
+  renderer.render(cam, vm);
+  sound.listener(cam.x, cam.y, cam.z, cam.yaw);
+  if (vim.mode === 'map') drawMap();
+}
+
+function updateWatchHud() {
+  const view = game.snaps.length ? game.snaps[game.snaps.length - 1].players : new Map();
+  const t = game.follow != null ? view.get(game.follow) : null;
+  const r = game.roster.get(game.myId);
+  const voluntary = r && r.spectator;
+  let line;
+  if (game.free || !t) line = '自由視点 — k/j 前後 · h/l 旋回 · K/J 上下 · Shift で速く · n で選手を追う';
+  else line = `${nameOf(t.id)} を観戦中 — n / N 切り替え · o 自由視点`;
+  const tail = voluntary ? ' · :play で参加' : !game.respawnMode ? ' · 次のラウンドまで観戦' : '';
+  setText($('watchbar'), line + tail);
+  setText($('tb-weapon'), t && t.gun ? gunName(t.gun) : '観戦中');
+  setText($('tb-items'), t ? nameOf(t.id) : '—');
+  const hp = t && t.hp != null ? Math.max(0, t.hp) : 0;
+  $('hp-fill').style.width = `${hp}%`;
+  $('hp-fill').classList.toggle('low', hp <= 30);
+  setText($('hp-text'), t ? String(hp) : '—');
+  setText($('tb-kd'), r ? `${r.kills} / ${r.deaths}` : '');
+  setText($('tb-ping'), game.practice ? '練習' : game.ping != null ? `${Math.round(game.ping)} ms` : '');
+  setText($('clock'), game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left));
+  if (game.intermission != null) setText($('result-next'), `${Math.ceil(game.intermission)} 秒後に次の試合`);
+  show('progress', false);
+  const rows = [...game.roster.values()].filter((x) => !x.spectator);
+  const alive = rows.filter((x) => !x.out).length;
+  setText($('rank'), game.respawnMode ? `観戦中 · ${rows.length} 人` : `残り ${alive} 人 / ${rows.length} 人`);
 }
 
 /// Bullet-drop marks on the SR reticle: where to put a target 100–400 m away
@@ -1475,7 +1717,11 @@ function updateCompass(now) {
 
 function updateHud() {
   const me = game.me;
-  if (!me) return;
+  show('watchbar', game.watching);
+  if (game.watching || !me) {
+    updateWatchHud();
+    return;
+  }
   const gun = heldGun();
   const sel = me.inv.sel;
   let weapon = '素手';
@@ -1491,7 +1737,7 @@ function updateHud() {
   const r = game.roster.get(game.myId);
   setText($('tb-kd'), r ? `${r.kills} / ${r.deaths}` : '');
   setText($('tb-ping'), game.practice ? '練習' : game.ping != null ? `${Math.round(game.ping)} ms` : '');
-  setText($('clock'), game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left));
+  setText($('clock'), game.range ? '∞' : game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left));
   if (game.intermission != null) setText($('result-next'), `${Math.ceil(game.intermission)} 秒後に次の試合`);
 
   // Reload / heal progress.
@@ -1501,10 +1747,14 @@ function updateHud() {
     setText($('progress-title'), prog[0]);
     $('progress-fill').style.width = `${Math.round(prog[1] * 100)}%`;
   }
-  if (!game.alive) updateDeath(me.respawn);
+  if (!game.alive && game.respawnMode) updateDeath(me.respawn);
 
   // Rank (top right).
-  const rows = [...game.roster.values()];
+  if (game.range) {
+    setText($('rank'), '射撃訓練場 · :q で終了');
+    return;
+  }
+  const rows = [...game.roster.values()].filter((r) => !r.spectator);
   const idx = rows.findIndex((x) => x.id === game.myId);
   const top = rows[0];
   setText($('rank'), idx >= 0 ? `${idx + 1} 位 / ${rows.length} 人${top ? ` · 1 位 ${top.name} ${top.kills}` : ''}` : '');
