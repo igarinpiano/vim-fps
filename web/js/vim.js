@@ -9,6 +9,8 @@
 //              throw, r reload, v scope, Esc back
 //   INVENTORY  j/k select, gg/G, {n}, Enter/Esc/s close
 //   MAP        Esc/m/q close
+//   SPECTATE   watching: n/N next/previous player, o free camera (hjkl
+//              move, H/L faster, K/J up/down, , . turn), m map, i chat
 //   MESSAGE    (:help, :options, :spec ...) j/k scroll, Ctrl-d/u half page,
 //              Ctrl-f/b page, gg/G top/bottom, h/l sideways, Enter/Esc/q close
 //
@@ -23,6 +25,7 @@ export const MODES = {
   command: 'COMMAND',
   menu: 'MENU',
   msg: 'MESSAGE',
+  spectate: 'SPECTATE',
 };
 
 const MOVE_KEYS = ['h', 'j', 'k', 'l'];
@@ -49,6 +52,7 @@ export class Vim {
 
   setMode(mode) {
     if (mode === this.mode) return;
+    if (mode === 'map') this.mapReturn = this.mode === 'spectate' ? 'spectate' : 'normal';
     this.releaseAll();
     this.count = '';
     this.pending = '';
@@ -139,12 +143,14 @@ export class Vim {
       case 'inventory':
         return this.inventory(ev, key);
       case 'map':
-        if (key === 'Escape' || key === 'm' || key === 'q' || key === 'Enter') this.setMode('normal');
+        if (key === 'Escape' || key === 'm' || key === 'q' || key === 'Enter') this.setMode(this.mapReturn || 'normal');
         return true;
       case 'menu':
         return this.menu(ev, key);
       case 'msg':
         return this.msg(ev, key);
+      case 'spectate':
+        return this.spectate(ev, key);
       default:
         return false; // insert / command: the text box handles keys
     }
@@ -357,6 +363,59 @@ export class Vim {
         break;
       default:
         break;
+    }
+    this.showcmd();
+    return true;
+  }
+
+  /// Watching: pick whom to follow, or fly a free camera.
+  spectate(ev, key) {
+    if (this.digit(key)) return true;
+    switch (key) {
+      case 'n':
+        this.call('follow', this.takeCount(1));
+        break;
+      case 'N':
+        this.call('follow', -this.takeCount(1));
+        break;
+      case 'o':
+        this.count = '';
+        this.call('freecam');
+        break;
+      case 'h':
+      case 'j':
+      case 'k':
+      case 'l':
+      case 'H':
+      case 'J':
+      case 'K':
+      case 'L': {
+        // Free camera: hjkl walk, H/L fast sideways, K/J up and down.
+        const lower = key.toLowerCase();
+        const dir = key === 'K' ? 'up' : key === 'J' ? 'down' : this.moveDir(lower);
+        this.count = '';
+        this.held.set(ev.code, { kind: 'move', dir });
+        this.call('move', dir, true);
+        break;
+      }
+      case ',':
+        this.call('turn', this.s.get('turnangle') * this.takeCount(1));
+        break;
+      case '.':
+        this.call('turn', -this.s.get('turnangle') * this.takeCount(1));
+        break;
+      case 'm':
+        this.setMode('map');
+        break;
+      case 'i':
+      case 'I':
+        this.call('insert');
+        break;
+      case ':':
+        this.call('command');
+        break;
+      default:
+        this.count = '';
     }
     this.showcmd();
     return true;

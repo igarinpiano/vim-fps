@@ -205,6 +205,12 @@ body.uianim #boot .boot-bar i { animation: bootbar 1.2s linear infinite; }
 #crosshair[data-mode="ads-scope"]::before { width: 2px; height: 14px; left: -1px; top: -1px; background: #111; }
 #crosshair[data-mode="ads-scope"]::after { width: 30px; height: 2px; left: -15px; top: -1px; background: #111; }
 
+/* ---------- watching ---------- */
+#watchbar { position: absolute; left: 50%; top: 50px; transform: translateX(-50%); z-index: 3; max-width: calc(100vw - 24px);
+  background: #ffffe1; color: #000; border: 1px solid #000; border-radius: 6px; padding: 4px 12px; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#start[data-mode="SPECTATE"] { background: linear-gradient(180deg, #6fc6d8 0%, #2b8aa8 15%, #1d6f8a 85%, #134e63 100%); }
+@media (max-width: 640px) { #watchbar { top: 84px; font-size: 11px; white-space: normal; } }
+
 /* ---------- compass (spotting) ---------- */
 #compass { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); width: min(520px, calc(100vw - 230px)); height: 34px; z-index: 3;
   background: linear-gradient(180deg, rgba(16,40,110,0.7), rgba(10,30,90,0.55)); border: 1px solid rgba(255,255,255,0.5); border-radius: 4px; overflow: hidden; color: #fff; font-size: 11px; }

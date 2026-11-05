@@ -8,7 +8,7 @@ use crate::weapons::{Gun, Inventory, Slot};
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a message changes shape. Client and server must agree.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 pub type ClientId = u32;
 
@@ -20,7 +20,15 @@ pub enum ClientMsg {
         #[serde(default)]
         password: Option<String>,
         protocol: u32,
+        /// Join to watch only (no body, not in the match).
+        #[serde(default)]
+        spectate: bool,
     },
+    /// `:watch`: stop playing and watch.
+    Watch,
+    /// `:play`: from watching back into the match (in a no-respawn match:
+    /// from the next round).
+    Play,
     /// Held state, sent whenever it changes and a few times a second.
     Input {
         /// -1, 0 or 1: left/right.
@@ -72,6 +80,12 @@ pub struct RosterEntry {
     pub kills: u32,
     pub deaths: u32,
     pub bot: bool,
+    /// Watching only (joined as a spectator, or `:watch`).
+    #[serde(default)]
+    pub spectator: bool,
+    /// Out of this round (no-respawn match).
+    #[serde(default)]
+    pub out: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,6 +102,9 @@ pub struct PlayerState {
     /// Walking (for footstep sounds).
     pub mv: bool,
     pub gun: Option<Gun>,
+    /// Health, sent only to those who are watching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hp: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -191,6 +208,12 @@ pub enum ServerMsg {
         practice: bool,
         /// Numbers behind the game, for `:spec`.
         specs: Box<Specs>,
+        /// false: a no-respawn match (last one standing wins the round).
+        respawn: bool,
+        /// The firing range (practice targets, every gun on the rack).
+        range: bool,
+        /// Joined as a spectator.
+        spectator: bool,
     },
     Error {
         text: String,
@@ -202,7 +225,11 @@ pub enum ServerMsg {
         intermission: Option<f32>,
         players: Vec<PlayerState>,
         grenades: Vec<GrenadeState>,
+        /// None while watching.
         me: Option<MeState>,
+        /// Watching (spectator, or out of a no-respawn round).
+        #[serde(default)]
+        watching: bool,
     },
     Roster {
         players: Vec<RosterEntry>,

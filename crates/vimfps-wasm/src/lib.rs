@@ -43,6 +43,30 @@ pub extern "C" fn vf_new(seed: u32, bots: u32) {
     });
 }
 
+/// Starts a practice room with options: mode bit 1 = firing range,
+/// bit 2 = no respawn (last one standing).
+#[unsafe(no_mangle)]
+pub extern "C" fn vf_new_mode(seed: u32, bots: u32, mode: u32) {
+    let cfg = Config {
+        seed: seed as u64,
+        practice: true,
+        bots,
+        max_players: 1,
+        range: mode & 1 != 0,
+        respawn: mode & 2 == 0,
+        ..Default::default()
+    };
+    STATE.with(|s| {
+        *s.borrow_mut() = Some(State {
+            room: Room::new(cfg),
+            me: None,
+            pending: Vec::new(),
+            inbuf: Vec::new(),
+            outbuf: Vec::new(),
+        })
+    });
+}
+
 /// Buffer of `len` bytes for the next `vf_send`.
 #[unsafe(no_mangle)]
 pub extern "C" fn vf_in(len: usize) -> *mut u8 {
@@ -74,9 +98,10 @@ pub extern "C" fn vf_send(len: usize) {
                     name,
                     password,
                     protocol,
+                    spectate,
                 },
                 None,
-            ) => match st.room.join(&name, password.as_deref(), protocol) {
+            ) => match st.room.join(&name, password.as_deref(), protocol, spectate) {
                 Ok(id) => st.me = Some(id),
                 Err(text) => st.pending.push(ServerMsg::Error { text }),
             },

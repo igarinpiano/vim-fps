@@ -46,6 +46,9 @@ pub struct HostArgs {
     /// サーバー名
     #[arg(long, default_value = "vim-fps")]
     pub name: String,
+    /// 復活なし: 最後の 1 人が勝つラウンド制。倒された人は倒した相手の視点で観戦
+    #[arg(long)]
+    pub no_respawn: bool,
     /// 起動時に新しいバージョンを確認しない
     #[arg(long)]
     pub no_update_check: bool,
@@ -68,6 +71,7 @@ impl Default for HostArgs {
             frag_limit: 25,
             seed: None,
             name: "vim-fps".into(),
+            no_respawn: false,
             no_update_check: false,
             web: crate::webclient::DEFAULT_WEB.into(),
         }
@@ -79,6 +83,7 @@ enum Event {
         name: String,
         password: Option<String>,
         protocol: u32,
+        spectate: bool,
         tx: mpsc::Sender<Arc<str>>,
         reply: oneshot::Sender<Result<ClientId, String>>,
     },
@@ -121,6 +126,8 @@ async fn host(args: HostArgs) -> i32 {
         password: args.password.clone().filter(|p| !p.is_empty()),
         practice: false,
         bots: args.bots,
+        respawn: !args.no_respawn,
+        range: false,
     };
     let addr = SocketAddr::new(args.bind, args.port);
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -137,6 +144,7 @@ async fn host(args: HostArgs) -> i32 {
         "version": vimfps_core::VERSION,
         "protocol": vimfps_core::PROTOCOL,
         "password": cfg.password.is_some(),
+        "respawn": cfg.respawn,
     });
     let source = args.web.clone();
     let files = tokio::task::spawn_blocking(move || crate::webclient::initial(&source))
@@ -287,6 +295,7 @@ async fn client(mut socket: WebSocket, st: AppState, ip: IpAddr) {
         name,
         password,
         protocol,
+        spectate,
     }) = serde_json::from_str::<ClientMsg>(&text)
     else {
         return;
@@ -299,6 +308,7 @@ async fn client(mut socket: WebSocket, st: AppState, ip: IpAddr) {
             name: name.clone(),
             password,
             protocol,
+            spectate,
             tx,
             reply: reply_tx,
         })
@@ -318,7 +328,10 @@ async fn client(mut socket: WebSocket, st: AppState, ip: IpAddr) {
         }
         Err(_) => return,
     };
-    println!("[参加] #{id} {name} ({ip})");
+    println!(
+        "[{}] #{id} {name} ({ip})",
+        if spectate { "観戦" } else { "参加" }
+    );
 
     // Token bucket: 120 messages per second, bursts of 240.
     let mut tokens = 240.0f32;
@@ -371,8 +384,8 @@ async fn game_loop(cfg: Config, mut events: mpsc::Receiver<Event>) {
             ev = events.recv() => {
                 let Some(ev) = ev else { break };
                 match ev {
-                    Event::Join { name, password, protocol, tx, reply } => {
-                        let r = room.join(&name, password.as_deref(), protocol);
+                    Event::Join { name, password, protocol, spectate, tx, reply } => {
+                        let r = room.join(&name, password.as_deref(), protocol, spectate);
                         if let Ok(id) = r {
                             clients.insert(id, tx);
                         }

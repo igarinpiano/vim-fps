@@ -190,3 +190,26 @@ test('message window: j/k, counts, Ctrl-d/u/f/b, gg/G, h/l, close', () => {
   down('q');
   assert.equal(only(log, 'closeMsg').length, 1);
 });
+
+test('spectate: n/N follow, o free camera, hjkl/K/J move, map returns to spectate', () => {
+  const { log, down, up, vim } = setup();
+  vim.mode = 'spectate';
+  down('n');
+  down('3');
+  down('N');
+  down('o');
+  down('k');
+  up('k');
+  vim.key({ type: 'down', key: 'K', code: 'KeyK', shift: true });
+  down('f');
+  down('d');
+  down('d');
+  assert.deepEqual(only(log, 'follow'), [['follow', 1], ['follow', -3]]);
+  assert.equal(only(log, 'freecam').length, 1);
+  assert.deepEqual(only(log, 'move').slice(0, 3), [['move', 'fwd', true], ['move', 'fwd', false], ['move', 'up', true]]);
+  assert.equal(only(log, 'fire').length + only(log, 'throw').length, 0, 'no shooting while watching');
+  down('m');
+  assert.equal(vim.mode, 'map');
+  down('Escape');
+  assert.equal(vim.mode, 'spectate');
+});
