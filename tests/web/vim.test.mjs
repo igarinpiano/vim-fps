@@ -213,3 +213,29 @@ test('spectate: n/N follow, o free camera, hjkl/K/J move, map returns to spectat
   down('Escape');
   assert.equal(vim.mode, 'spectate');
 });
+
+test('custom match form: j/k rows, h/l and H/L values, Enter, Esc', () => {
+  const { log, down, vim } = setup();
+  vim.mode = 'form';
+  down('j');
+  down('2');
+  down('k');
+  down('l');
+  down('h');
+  vim.key({ type: 'down', key: 'L', code: 'KeyL', shift: true });
+  down('3');
+  down('l');
+  down('Enter');
+  down('Escape');
+  assert.deepEqual(only(log, 'formMove'), [['formMove', 1], ['formMove', -2]]);
+  assert.deepEqual(only(log, 'formChange'), [['formChange', 1], ['formChange', -1], ['formChange', 5], ['formChange', 3]]);
+  assert.equal(only(log, 'formSubmit').length, 1);
+  assert.equal(only(log, 'formCancel').length, 1);
+});
+
+test('spectate: O switches to the sky view', () => {
+  const { log, vim } = setup();
+  vim.mode = 'spectate';
+  vim.key({ type: 'down', key: 'O', code: 'KeyO', shift: true });
+  assert.equal(only(log, 'skycam').length, 1);
+});

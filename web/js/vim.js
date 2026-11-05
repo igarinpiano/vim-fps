@@ -10,7 +10,10 @@
 //   INVENTORY  j/k select, gg/G, {n}, Enter/Esc/s close
 //   MAP        Esc/m/q close
 //   SPECTATE   watching: n/N next/previous player, o free camera (hjkl
-//              move, H/L faster, K/J up/down, , . turn), m map, i chat
+//              move, H/L faster, K/J up/down, , . turn), O view from the
+//              sky (hjkl pan, K/J height), m map of everyone, i chat
+//   CUSTOM     custom match form: j/k row, h/l value (H/L by 5), Enter
+//              start, Esc back
 //   MESSAGE    (:help, :options, :spec ...) j/k scroll, Ctrl-d/u half page,
 //              Ctrl-f/b page, gg/G top/bottom, h/l sideways, Enter/Esc/q close
 //
@@ -26,6 +29,7 @@ export const MODES = {
   menu: 'MENU',
   msg: 'MESSAGE',
   spectate: 'SPECTATE',
+  form: 'CUSTOM',
 };
 
 const MOVE_KEYS = ['h', 'j', 'k', 'l'];
@@ -151,6 +155,8 @@ export class Vim {
         return this.msg(ev, key);
       case 'spectate':
         return this.spectate(ev, key);
+      case 'form':
+        return this.form(ev, key);
       default:
         return false; // insert / command: the text box handles keys
     }
@@ -382,6 +388,10 @@ export class Vim {
         this.count = '';
         this.call('freecam');
         break;
+      case 'O':
+        this.count = '';
+        this.call('skycam');
+        break;
       case 'h':
       case 'j':
       case 'k':
@@ -410,6 +420,51 @@ export class Vim {
       case 'i':
       case 'I':
         this.call('insert');
+        break;
+      case ':':
+        this.call('command');
+        break;
+      default:
+        this.count = '';
+    }
+    this.showcmd();
+    return true;
+  }
+
+  /// A settings form (custom match): rows and values.
+  form(ev, key) {
+    if (this.digit(key)) return true;
+    switch (key) {
+      case 'j':
+      case 'ArrowDown':
+        this.call('formMove', this.takeCount(1));
+        break;
+      case 'k':
+      case 'ArrowUp':
+        this.call('formMove', -this.takeCount(1));
+        break;
+      case 'l':
+      case 'ArrowRight':
+        this.call('formChange', this.takeCount(1));
+        break;
+      case 'h':
+      case 'ArrowLeft':
+        this.call('formChange', -this.takeCount(1));
+        break;
+      case 'L':
+        this.call('formChange', 5 * this.takeCount(1));
+        break;
+      case 'H':
+        this.call('formChange', -5 * this.takeCount(1));
+        break;
+      case 'Enter':
+        this.count = '';
+        this.call('formSubmit');
+        break;
+      case 'Escape':
+      case 'q':
+        this.count = '';
+        this.call('formCancel');
         break;
       case ':':
         this.call('command');
