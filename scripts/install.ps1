@@ -83,7 +83,7 @@ try {
         Write-Host "$dir をユーザーの PATH に追加しました (新しいターミナルから使えます)"
     }
     Write-Host ''
-    Write-Host 'ホストを立てる: vimfps host    更新: vimfps update'
+    Write-Host 'ホストを立てる: vimfps host    更新: vimfps update    アンインストール: vimfps uninstall'
 }
 finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

@@ -212,7 +212,7 @@ fn update(args: &UpdateArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn confirm(prompt: &str) -> bool {
+pub fn confirm(prompt: &str) -> bool {
     print!("{prompt}");
     let _ = std::io::stdout().flush();
     let mut s = String::new();

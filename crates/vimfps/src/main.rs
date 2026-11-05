@@ -2,9 +2,11 @@
 //!
 //!   vimfps host [--port 7777] [--tunnel] [--bots N] [--password PW]
 //!   vimfps update [--check] [--yes]
+//!   vimfps uninstall [--yes]
 
 mod server;
 mod tunnel;
+mod uninstall;
 mod update;
 mod webclient;
 
@@ -28,12 +30,15 @@ enum Cmd {
     Host(server::HostArgs),
     /// 最新版に更新する (GitHub Releases から)
     Update(update::UpdateArgs),
+    /// アンインストールする (この実行ファイルを削除。Windows ではインストール先のフォルダと PATH も)
+    Uninstall(uninstall::UninstallArgs),
 }
 
 fn main() {
     let cli = Cli::parse();
     let code = match cli.cmd {
         Some(Cmd::Update(a)) => update::run(&a),
+        Some(Cmd::Uninstall(a)) => uninstall::run(&a),
         Some(Cmd::Host(a)) => server::run(a),
         // No subcommand (e.g. double-clicked): host with the defaults.
         None => server::run(server::HostArgs::default()),

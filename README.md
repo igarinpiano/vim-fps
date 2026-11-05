@@ -111,6 +111,31 @@ vimfps update
 GitHub Releases の最新版をダウンロードし、SHA-256 を確かめてから自分自身を置き換えます (`--check` で確認だけ)。
 ホスト起動時にも新しい版があれば知らせます (`--no-update-check` で無効)。
 
+### アンインストール
+
+```bash
+vimfps uninstall
+```
+
+実行ファイルそのものを削除します (`-y` で確認なし)。CLI はほかにファイルを作らないので、これで全部です。
+手順ごとに ○ が ● に変わって進みます:
+
+```text
+● Removing C:\Users\you\AppData\Local\Programs\vimfps from PATH... done
+│
+● Deleting C:\Users\you\AppData\Local\Programs\vimfps\vimfps.exe... done
+│
+● Deleting C:\Users\you\AppData\Local\Programs\vimfps... done
+│
+● Thank you for using vim-fps!
+```
+
+- **Windows**: インストールスクリプトのフォルダ (`%LOCALAPPDATA%\Programs\vimfps`) ごと削除し、ユーザーの PATH からも外します。ほかのファイルも入っているフォルダに置いた場合は、`vimfps.exe` だけを消し、フォルダと PATH はそのままにします
+- **Linux / macOS / *BSD / illumos / Termux**: `vimfps` を削除します。シェルの設定ファイルに PATH を足す行を書いた場合は、ほかに使っていなければ消してください
+- ゲームの設定 (`:set` など) はブラウザのサイトデータに残ります。消すには、ブラウザの設定で `igarinpiano.github.io` (またはホストのアドレス) のデータを削除してください
+
+1.5.0 までの版には `uninstall` がないので、手で消してください: `rm ~/.local/bin/vimfps` (Termux は `rm "$PREFIX/bin/vimfps"`)。Windows では `%LOCALAPPDATA%\Programs\vimfps` を削除し、「環境変数」の設定でユーザーの `Path` からそのフォルダを外します。
+
 ## 操作
 
 `Esc` の代わりに `Ctrl-[` も使えます (ブラウザは `Esc` でフルスクリーンを抜けるため)。

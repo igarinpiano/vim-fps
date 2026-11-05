@@ -113,6 +113,51 @@ jobs:
           rustup default stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --release
+      # `vimfps uninstall`, run for real on a copy of the built binary.
+      - run: cargo build -p vimfps --release
+      - name: uninstall (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          own="$RUNNER_TEMP/un-own"; shared="$RUNNER_TEMP/un-shared"
+          mkdir -p "$own" "$shared"
+          cp target/release/vimfps "$own/"; cp target/release/vimfps "$shared/"
+          echo keep > "$shared/other.txt"
+          echo n | "$own/vimfps" uninstall
+          test -f "$own/vimfps"
+          "$own/vimfps" uninstall --yes
+          test ! -e "$own/vimfps"
+          "$shared/vimfps" uninstall -y
+          test ! -e "$shared/vimfps"
+          test -f "$shared/other.txt"
+      - name: uninstall (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $own = Join-Path $env:RUNNER_TEMP 'un-own\vimfps'
+          $shared = Join-Path $env:RUNNER_TEMP 'un-shared'
+          New-Item -ItemType Directory -Force $own, $shared | Out-Null
+          Copy-Item target\release\vimfps.exe $own
+          Copy-Item target\release\vimfps.exe $shared
+          Set-Content (Join-Path $shared 'other.txt') 'keep'
+          $before = [Environment]::GetEnvironmentVariable('Path', 'User')
+          [Environment]::SetEnvironmentVariable('Path', "$before;$own;$shared", 'User')
+
+          & "$own\vimfps.exe" uninstall --yes
+          if ($LASTEXITCODE -ne 0) { throw "uninstall failed: $LASTEXITCODE" }
+          & "$shared\vimfps.exe" uninstall --yes
+          if ($LASTEXITCODE -ne 0) { throw "uninstall failed: $LASTEXITCODE" }
+          Start-Sleep -Seconds 3
+
+          $after = [Environment]::GetEnvironmentVariable('Path', 'User') -split ';'
+          if (Test-Path $own) { throw "$own is still there" }
+          if ($after -contains $own) { throw "$own is still on the user PATH" }
+          # A folder with other files: only the exe goes; PATH is left alone.
+          if (Test-Path "$shared\vimfps.exe") { throw "vimfps.exe is still in $shared" }
+          if (-not (Test-Path "$shared\other.txt")) { throw "other.txt was removed" }
+          if (-not ($after -contains $shared)) { throw "$shared was taken off the user PATH" }
 
   # The oldest Rust the workspace says it supports (`rust-version` in
   # Cargo.toml; the highest one when crates differ). Skipped without one.

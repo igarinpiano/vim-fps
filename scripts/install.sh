@@ -156,7 +156,7 @@ main() {
       ;;
   esac
   say ""
-  say "ホストを立てる: vimfps host    更新: vimfps update"
+  say "ホストを立てる: vimfps host    更新: vimfps update    アンインストール: vimfps uninstall"
 }
 
 main "$@"
