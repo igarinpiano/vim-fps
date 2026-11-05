@@ -219,14 +219,36 @@ export class Renderer {
     const terrain = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
     this.mapGroup.add(terrain);
 
-    const mats = {};
-    for (const [k, col] of Object.entries(COLORS)) mats[k] = new THREE.MeshLambertMaterial({ color: col });
+    // Solids and tree crowns: instanced, one mesh per kind and 100 m tile
+    // (a draw call for each instead of one per box, of which the field holds
+    // well over a thousand; tiles out of view are still skipped).
+    const TILE = 100;
+    const tile = (x, z) => `${Math.floor((x + map.half) / TILE)},${Math.floor((z + map.half) / TILE)}`;
     const box = new THREE.BoxGeometry(1, 1, 1);
+    const solidMats = {};
+    const byKind = new Map();
     for (const s of map.solids) {
-      const m = new THREE.Mesh(box, mats[s.kind] || mats.wall);
-      m.scale.set(s.max.x - s.min.x, s.max.y - s.min.y, s.max.z - s.min.z);
-      m.position.set((s.min.x + s.max.x) / 2, (s.min.y + s.max.y) / 2, (s.min.z + s.max.z) / 2);
-      this.mapGroup.add(m);
+      const kind = COLORS[s.kind] !== undefined ? s.kind : 'wall';
+      const key = `${kind}|${tile((s.min.x + s.max.x) / 2, (s.min.z + s.max.z) / 2)}`;
+      if (!byKind.has(key)) byKind.set(key, []);
+      byKind.get(key).push(s);
+    }
+    const m4 = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const v = new THREE.Vector3();
+    const sc = new THREE.Vector3();
+    for (const [key, list] of byKind) {
+      const kind = key.split('|')[0];
+      solidMats[kind] = solidMats[kind] || new THREE.MeshLambertMaterial({ color: COLORS[kind] });
+      const inst = new THREE.InstancedMesh(box, solidMats[kind], list.length);
+      list.forEach((s, i) => {
+        v.set((s.min.x + s.max.x) / 2, (s.min.y + s.max.y) / 2, (s.min.z + s.max.z) / 2);
+        sc.set(s.max.x - s.min.x, s.max.y - s.min.y, s.max.z - s.min.z);
+        inst.setMatrixAt(i, m4.compose(v, q, sc));
+      });
+      inst.instanceMatrix.needsUpdate = true;
+      inst.computeBoundingSphere();
+      this.mapGroup.add(inst);
     }
     // Signs (firing range distances).
     for (const l of map.labels || []) {
@@ -236,11 +258,20 @@ export class Renderer {
     }
     const leaves = new THREE.MeshLambertMaterial({ color: 0x2f7a35 });
     const cone = new THREE.ConeGeometry(1, 1, 7);
-    for (const [x, z, r, base] of map.trees) {
-      const m = new THREE.Mesh(cone, leaves);
-      m.scale.set(r, 5, r);
-      m.position.set(x, base + 2.5, z);
-      this.mapGroup.add(m);
+    const treeTiles = new Map();
+    for (const t of map.trees) {
+      const key = tile(t[0], t[1]);
+      if (!treeTiles.has(key)) treeTiles.set(key, []);
+      treeTiles.get(key).push(t);
+    }
+    for (const list of treeTiles.values()) {
+      const crowns = new THREE.InstancedMesh(cone, leaves, list.length);
+      list.forEach(([x, z, r, base], i) => {
+        crowns.setMatrixAt(i, m4.compose(v.set(x, base + 2.5, z), q, sc.set(r, 5, r)));
+      });
+      crowns.instanceMatrix.needsUpdate = true;
+      crowns.computeBoundingSphere();
+      this.mapGroup.add(crowns);
     }
   }
 

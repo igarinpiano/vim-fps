@@ -84,6 +84,7 @@ function resetGame() {
   Object.assign(game, {
     conn: null,
     practice: false,
+    offlineName: null,
     myId: null,
     map: null,
     world: null,
@@ -774,12 +775,30 @@ function connect(input, spectate = false) {
   conn.onopen = () => conn.send(joinMsg(pw ? decodeURIComponent(pw) : null, spectate));
 }
 
+/// The task bar's ping: "練習 12 ms" offline (or the mode's name), "34 ms"
+/// on a server.
+function pingLabel() {
+  const tag = game.practice ? (game.offlineName || offlineName({})).short : '';
+  if (game.ping == null) return tag;
+  const ms = `${game.ping < 10 ? game.ping.toFixed(1) : Math.round(game.ping)} ms`;
+  return tag ? `${tag} ${ms}` : ms;
+}
+
+/// What an offline game is called: short (task bar) and long (messages).
+function offlineName(mode) {
+  if (mode.range) return { short: '訓練場', long: '射撃訓練場' };
+  if (mode.custom) return { short: 'カスタム', long: 'カスタムマッチ' };
+  return { short: '練習', long: mode.noRespawn ? '練習モード (復活なし)' : '練習モード' };
+}
+
 async function startPractice(bots, mode = {}) {
-  balloon(mode.range ? '射撃訓練場を準備中…' : '練習モードを準備中…');
+  const name = offlineName(mode);
+  balloon(`${name.long}を準備中…`);
   try {
     const seed = mode.seed || Math.floor(Math.random() * 100000);
     const conn = await LocalConnection.create(seed, Number.isFinite(bots) ? bots : 5, mode);
     attach(conn, true);
+    game.offlineName = name;
     conn.onopen = () => conn.send(joinMsg(null));
   } catch (e) {
     showMsg('エラー', [String(e.message || e)], true);
@@ -830,7 +849,7 @@ async function onWelcome(m) {
   if (game.range) balloon('射撃訓練場', 'うしろの台で y: 銃を持ち替え · 的は 10〜400 m · 弾は減りません · :q で終了');
   else
     balloon(
-      game.practice ? '練習モード' : `${serverInfo ? serverInfo.name : 'サーバー'} に${m.spectator ? '観戦で' : ''}参加しました`,
+      game.practice ? (game.offlineName || offlineName({})).long : `${serverInfo ? serverInfo.name : 'サーバー'} に${m.spectator ? '観戦で' : ''}参加しました`,
       `${Math.round(m.time_limit / 60)} 分 · ${m.respawn === false ? '復活なし (最後の 1 人が勝ち)' : m.frag_limit > 1e6 ? 'キル数の上限なし' : `${m.frag_limit} キル先取`} · bot の強さ ${m.bot_skill || 3} · :help で操作説明`,
     );
   if (m.version !== VERSION) balloon('バージョンが違います', `サーバー v${m.version} / このページ v${VERSION}`, 'err');
@@ -1922,7 +1941,7 @@ function updateWatchHud() {
   $('hp-fill').classList.toggle('low', hp <= 30);
   setText($('hp-text'), t ? String(hp) : '—');
   setText($('tb-kd'), r ? `${r.kills} / ${r.deaths}` : '');
-  setText($('tb-ping'), game.ping != null ? `${game.practice ? '練習 ' : ''}${game.ping < 10 ? game.ping.toFixed(1) : Math.round(game.ping)} ms` : game.practice ? '練習' : '');
+  setText($('tb-ping'), pingLabel());
   setText($('clock'), game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left));
   if (game.intermission != null) setText($('result-next'), `${Math.ceil(game.intermission)} 秒後に次の試合`);
   show('progress', false);
@@ -2039,7 +2058,7 @@ function updateHud() {
   setText($('hp-text'), String(hp));
   const r = game.roster.get(game.myId);
   setText($('tb-kd'), r ? `${r.kills} / ${r.deaths}` : '');
-  setText($('tb-ping'), game.ping != null ? `${game.practice ? '練習 ' : ''}${game.ping < 10 ? game.ping.toFixed(1) : Math.round(game.ping)} ms` : game.practice ? '練習' : '');
+  setText($('tb-ping'), pingLabel());
   setText($('clock'), game.range ? '∞' : game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left));
   if (game.intermission != null) setText($('result-next'), `${Math.ceil(game.intermission)} 秒後に次の試合`);
 
