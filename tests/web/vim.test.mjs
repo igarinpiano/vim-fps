@@ -239,3 +239,23 @@ test('spectate: O switches to the sky view', () => {
   vim.key({ type: 'down', key: 'O', code: 'KeyO', shift: true });
   assert.equal(only(log, 'skycam').length, 1);
 });
+
+test('spectate: u/d tilt the view while held (Shift too)', () => {
+  const { log, down, up, vim } = setup();
+  vim.mode = 'spectate';
+  down('u');
+  up('u');
+  down('d');
+  up('d');
+  vim.key({ type: 'down', key: 'D', code: 'KeyD', shift: true });
+  vim.key({ type: 'up', key: 'D', code: 'KeyD', shift: true });
+  assert.deepEqual(only(log, 'move'), [
+    ['move', 'tiltUp', true],
+    ['move', 'tiltUp', false],
+    ['move', 'tiltDown', true],
+    ['move', 'tiltDown', false],
+    ['move', 'tiltDown', true],
+    ['move', 'tiltDown', false],
+  ]);
+  assert.equal(only(log, 'throw').length, 0, 'd does not throw while watching');
+});

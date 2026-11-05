@@ -408,6 +408,17 @@ export class Vim {
         this.call('move', dir, true);
         break;
       }
+      case 'u':
+      case 'U':
+      case 'd':
+      case 'D': {
+        // Free camera and sky view: tilt the view up (u) / down (d).
+        const dir = key.toLowerCase() === 'u' ? 'tiltUp' : 'tiltDown';
+        this.count = '';
+        this.held.set(ev.code, { kind: 'move', dir });
+        this.call('move', dir, true);
+        break;
+      }
       case ',':
         this.call('turn', this.s.get('turnangle') * this.takeCount(1));
         break;
