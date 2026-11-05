@@ -120,6 +120,13 @@ impl Aabb {
             && self.max.z + margin > o.min.z
     }
 
+    /// Distance from `p` to the box on the ground plane (0 inside it).
+    pub fn distance_xz(&self, p: Vec3) -> f32 {
+        let dx = (self.min.x - p.x).max(p.x - self.max.x).max(0.0);
+        let dz = (self.min.z - p.z).max(p.z - self.max.z).max(0.0);
+        (dx * dx + dz * dz).sqrt()
+    }
+
     /// Slab test. Returns the distance along `dir` (unit) to the entry point.
     pub fn ray(&self, origin: Vec3, dir: Vec3, max: f32) -> Option<f32> {
         let mut tmin = 0.0f32;

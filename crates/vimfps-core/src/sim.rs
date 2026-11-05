@@ -14,7 +14,13 @@ pub const RUN_SPEED: f32 = 6.0;
 pub const SNEAK_SPEED: f32 = 2.6;
 pub const ACCEL: f32 = 40.0;
 pub const RESPAWN_TIME: f32 = 3.0;
-pub const PROTECT_TIME: f32 = 1.5;
+pub const PROTECT_TIME: f32 = 3.0;
+/// A spawn point in sight of someone alive this close is avoided.
+pub const SPAWN_SIGHT: f32 = 250.0;
+/// Bots use a medkit below this much health (when no enemy is in sight),
+/// and go for one lying nearby below BOT_SEEK_MEDKIT with none on them.
+pub const BOT_HEAL_BELOW: f32 = 70.0;
+pub const BOT_SEEK_MEDKIT: f32 = 60.0;
 pub const INTERMISSION: f32 = 10.0;
 pub const MAX_HP: f32 = 100.0;
 pub const NAME_MAX: usize = 16;
@@ -627,7 +633,9 @@ impl Room {
             .filter(|p| p.alive && p.id != id)
             .map(|p| p.pos)
             .collect();
-        // The spawn point farthest from everybody, with a little randomness.
+        // A spawn point no one alive can see, as far from everybody as
+        // possible, with a little randomness. (Only if every point is in
+        // someone's sight is one of those taken: the farthest.)
         let mut best = self.map.spawns[0];
         let mut best_score = f32::MIN;
         for s in &self.map.spawns {
@@ -635,7 +643,13 @@ impl Room {
                 .iter()
                 .map(|o| o.distance(*s))
                 .fold(1000.0f32, f32::min);
-            let score = d + self.rng.range(0.0, 20.0);
+            let chest = *s + Vec3::new(0.0, 1.2, 0.0);
+            let seen = !self.cfg.range
+                && others.iter().any(|o| {
+                    o.distance(*s) < SPAWN_SIGHT
+                        && self.map.line_of_sight(*o + Vec3::new(0.0, 1.6, 0.0), chest)
+                });
+            let score = d + self.rng.range(0.0, 20.0) - if seen { 1000.0 } else { 0.0 };
             if score > best_score {
                 best_score = score;
                 best = *s;
@@ -1700,6 +1714,18 @@ impl Room {
                 seen_vel = o.vel;
             }
         }
+        // Hurt with no medkit on it: a medkit lying nearby is worth a detour.
+        let medkit = if me.hp < BOT_SEEK_MEDKIT && me.inv.medkits == 0 {
+            self.pickups
+                .iter()
+                .filter(|k| k.active && k.kind == PickupKind::Medkit)
+                .map(|k| (k.pos, k.pos.distance(Vec3::new(me.pos.x, 0.0, me.pos.z))))
+                .filter(|(_, d)| *d < 80.0)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(p, _)| p)
+        } else {
+            None
+        };
         let wp = me.bot.as_ref().unwrap().waypoint;
         let need_wp = me.bot.as_ref().unwrap().wander_timer <= 0.0 || me.pos.distance(wp) < 3.0;
         let new_wp = if need_wp {
@@ -1749,6 +1775,14 @@ impl Room {
         match seen {
             Some((tid, chest, dist)) => {
                 b.heard = None;
+                // Fight with a gun. A heal under way goes on only when badly
+                // hurt (switching away stops it).
+                if !matches!(p.inv.sel, Slot::Gun0 | Slot::Gun1)
+                    && !(p.heal.is_some() && p.hp < 40.0)
+                    && p.inv.select(Slot::Gun0)
+                {
+                    p.heal = None;
+                }
                 if b.target != Some(tid) {
                     b.target = Some(tid);
                     // Farther targets take longer to react to.
@@ -1791,8 +1825,9 @@ impl Room {
             }
             None => {
                 b.target = None;
-                // Investigate what was heard, otherwise wander.
-                let goal = b.heard.map(|(p, _)| p).unwrap_or(b.waypoint);
+                // Investigate what was heard, otherwise fetch a medkit when
+                // hurt, otherwise wander.
+                let goal = b.heard.map(|(p, _)| p).or(medkit).unwrap_or(b.waypoint);
                 let d = goal - pos;
                 let want_yaw = (-d.x).atan2(-d.z);
                 let dy = wrap_angle(want_yaw - p.yaw);
@@ -1803,12 +1838,23 @@ impl Room {
                     mz: if dy.abs() < 0.6 { 1 } else { 0 },
                     ..Default::default()
                 };
-                // Reload when idle.
+                // Hurt and out of sight: use a medkit (walking on). Then back
+                // to the gun.
+                let heal = p.hp < BOT_HEAL_BELOW && p.inv.medkits > 0;
+                if heal && p.heal.is_none() && p.reload.is_none() {
+                    if p.inv.sel != Slot::Medkit {
+                        p.inv.select(Slot::Medkit);
+                    }
+                    p.trigger = 0.1;
+                } else if !heal && p.heal.is_none() && p.inv.sel == Slot::Medkit {
+                    p.inv.select(Slot::Gun0);
+                }
+                // Reload when idle (not while healing).
                 let empty = p
                     .inv
                     .gun_index()
                     .is_some_and(|i| p.inv.guns[i].ammo < p.inv.guns[i].gun.stats().mag / 2);
-                if empty && p.reload.is_none() {
+                if empty && p.reload.is_none() && p.heal.is_none() && !heal {
                     self.start_reload(id);
                 }
             }
@@ -2033,6 +2079,7 @@ mod tests {
             pickups: Vec::new(),
             targets: Vec::new(),
             labels: Vec::new(),
+            top: Default::default(),
         };
         let mut r = Room::with_map(Config::default(), map);
         let a = r.join("a", None, PROTOCOL, false).unwrap();
@@ -2345,5 +2392,83 @@ mod tests {
             .collect();
         assert_eq!(chats.len(), 3);
         assert_eq!(chats[0], "hi there");
+    }
+
+    /// A flat field with the given solids and spawn points.
+    fn walled_room(solids: Vec<crate::map::Solid>, spawns: Vec<Vec3>) -> Room {
+        use crate::map::GRID;
+        let half = crate::map::HALF;
+        let map = Map {
+            seed: 0,
+            half,
+            grid: GRID,
+            cell: 2.0 * half / (GRID - 1) as f32,
+            heights: vec![0.0; GRID * GRID],
+            solids,
+            trees: Vec::new(),
+            spawns,
+            pickups: Vec::new(),
+            targets: Vec::new(),
+            labels: Vec::new(),
+            top: Default::default(),
+        };
+        Room::with_map(Config::default(), map)
+    }
+
+    #[test]
+    fn spawn_avoids_points_in_sight() {
+        use crate::map::{BoxKind, Solid};
+        use crate::math::Aabb;
+        // Alice stands at the origin. One spawn point is far but in the
+        // open; the other is nearer but behind a wall.
+        let open = Vec3::new(0.0, 0.0, 120.0);
+        let hidden = Vec3::new(40.0, 0.0, 0.0);
+        let wall = Solid {
+            kind: BoxKind::Wall,
+            aabb: Aabb::new(Vec3::new(30.0, 0.0, -5.0), Vec3::new(31.0, 3.0, 5.0)),
+        };
+        for _ in 0..20 {
+            let mut r = walled_room(vec![wall.clone()], vec![Vec3::ZERO, open, hidden]);
+            let a = r.join("alice", None, PROTOCOL, false).unwrap();
+            r.players.get_mut(&a).unwrap().pos = Vec3::ZERO;
+            let b = r.join("bob", None, PROTOCOL, false).unwrap();
+            r.spawn(b);
+            assert_eq!(
+                r.player_pos(b),
+                Some(hidden),
+                "bob spawns out of alice's sight"
+            );
+        }
+        // With no cover anywhere, the farthest point still wins.
+        let mut r = walled_room(Vec::new(), vec![Vec3::ZERO, open, hidden]);
+        let a = r.join("alice", None, PROTOCOL, false).unwrap();
+        r.players.get_mut(&a).unwrap().pos = Vec3::ZERO;
+        let b = r.join("bob", None, PROTOCOL, false).unwrap();
+        r.spawn(b);
+        assert_eq!(r.player_pos(b), Some(open));
+    }
+
+    #[test]
+    fn bots_heal_when_hurt_and_out_of_sight() {
+        let mut r = walled_room(Vec::new(), vec![Vec3::ZERO]);
+        r.set_bots(1);
+        let bot = *r.players.keys().next().unwrap();
+        {
+            let p = r.players.get_mut(&bot).unwrap();
+            p.hp = 35.0;
+            p.inv.medkits = 2;
+            p.protect = 0.0;
+        }
+        for _ in 0..(60 * 5) {
+            r.tick(1.0 / 60.0);
+        }
+        let p = &r.players[&bot];
+        // 35 + 60 = 95 after one; it stops above BOT_HEAL_BELOW.
+        assert!(p.hp > BOT_HEAL_BELOW, "hp {}", p.hp);
+        assert_eq!(p.inv.medkits, 1, "one medkit used");
+        assert!(
+            matches!(p.inv.sel, Slot::Gun0 | Slot::Gun1),
+            "back to the gun"
+        );
     }
 }

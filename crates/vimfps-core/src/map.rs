@@ -6,13 +6,24 @@ use crate::rng::Rng;
 use serde::{Deserialize, Serialize};
 
 /// Half of the playable field's side (the field is 2*HALF square).
-pub const HALF: f32 = 120.0;
+pub const HALF: f32 = 200.0;
 /// Player collision radius.
 pub const PLAYER_RADIUS: f32 = 0.4;
 /// Height samples per side of the terrain grid.
-pub const GRID: usize = 81;
+pub const GRID: usize = 135;
 /// A ledge lower than this above your feet does not block walking.
 pub const STEP: f32 = 0.45;
+
+// What a generated field holds (it is 400 m square; the counts are about
+// three times the 240 m field's, for more cover per square metre too).
+const BUILDINGS: usize = 24;
+const ROCKS: usize = 170;
+const COVERS: usize = 170;
+const CRATES: usize = 110;
+const TREES: usize = 420;
+const SPAWNS: usize = 48;
+/// Rolling hills: bumps on the field (the first third of them big).
+const BUMPS: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +83,9 @@ pub struct Map {
     /// Text shown in the world (distance signs).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<Label>,
+    /// The highest terrain sample, worked out once (rays above it miss).
+    #[serde(skip)]
+    pub top: std::sync::OnceLock<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,6 +119,7 @@ impl Map {
             pickups: Vec::new(),
             targets: Vec::new(),
             labels: Vec::new(),
+            top: Default::default(),
         };
 
         // Fence around the field (the terrain is flat near the edge).
@@ -137,7 +152,7 @@ impl Map {
         // Buildings: four walls with door gaps and a roof.
         let mut buildings = 0;
         let mut tries = 0;
-        while buildings < 9 && tries < 500 {
+        while buildings < BUILDINGS && tries < 6000 {
             tries += 1;
             let w = rng.range(9.0, 16.0).round();
             let d = rng.range(9.0, 16.0).round();
@@ -197,7 +212,7 @@ impl Map {
             &mut solids,
             &mut footprints,
             BoxKind::Rock,
-            45,
+            ROCKS,
             (1.5, 4.5),
             (1.3, 2.8),
         );
@@ -206,7 +221,7 @@ impl Map {
             &mut solids,
             &mut footprints,
             BoxKind::Cover,
-            40,
+            COVERS,
             (4.0, 10.0),
             (1.0, 1.15),
         );
@@ -215,7 +230,7 @@ impl Map {
             &mut solids,
             &mut footprints,
             BoxKind::Crate,
-            30,
+            CRATES,
             (1.2, 2.0),
             (1.2, 2.0),
         );
@@ -223,7 +238,7 @@ impl Map {
         // Trees: a trunk (solid) and a crown (visual).
         let mut n = 0;
         let mut tries = 0;
-        while n < 140 && tries < 4000 {
+        while n < TREES && tries < 16000 {
             tries += 1;
             let cx = rng.range(-h + 4.0, h - 4.0);
             let cz = rng.range(-h + 4.0, h - 4.0);
@@ -245,7 +260,9 @@ impl Map {
 
         // Spawn points, spread over the field.
         let mut tries = 0;
-        while map.spawns.len() < 24 && tries < 5000 {
+        // Each next to something to take cover behind (a rock, a low wall, a
+        // crate, a tree or a building, within 5 m).
+        while map.spawns.len() < SPAWNS && tries < 40000 {
             tries += 1;
             let mut p = Vec3::new(
                 rng.range(-h + 8.0, h - 8.0),
@@ -253,7 +270,15 @@ impl Map {
                 rng.range(-h + 8.0, h - 8.0),
             );
             p.y = map.height(p.x, p.z);
-            if map.blocked(p, 1.5) || map.spawns.iter().any(|s| s.distance(p) < 25.0) {
+            if map.blocked(p, 1.5) || map.spawns.iter().any(|s| s.distance(p) < 30.0) {
+                continue;
+            }
+            let covered = map.solids.iter().any(|s| {
+                !matches!(s.kind, BoxKind::Fence | BoxKind::Roof)
+                    && s.aabb.max.y > p.y + 1.0
+                    && s.aabb.distance_xz(p) < 5.0
+            });
+            if !covered && tries < 30000 {
                 continue;
             }
             map.spawns.push(p);
@@ -261,13 +286,13 @@ impl Map {
 
         // Pickups: weapons more often inside/near buildings, items anywhere.
         let kinds = [
-            (PickupKind::Sr, 4),
-            (PickupKind::Sg, 5),
-            (PickupKind::Smg, 5),
-            (PickupKind::Ar, 4),
-            (PickupKind::Medkit, 10),
-            (PickupKind::Grenade, 8),
-            (PickupKind::Ammo, 10),
+            (PickupKind::Sr, 9),
+            (PickupKind::Sg, 12),
+            (PickupKind::Smg, 12),
+            (PickupKind::Ar, 10),
+            (PickupKind::Medkit, 30),
+            (PickupKind::Grenade, 20),
+            (PickupKind::Ammo, 28),
         ];
         let building_centres: Vec<Vec3> = footprints
             .iter()
@@ -277,7 +302,7 @@ impl Map {
         for (kind, count) in kinds {
             let mut placed = 0;
             let mut tries = 0;
-            while placed < count && tries < 3000 {
+            while placed < count && tries < 6000 {
                 tries += 1;
                 let weapon = matches!(
                     kind,
@@ -333,6 +358,7 @@ impl Map {
             pickups: Vec::new(),
             targets: Vec::new(),
             labels: Vec::new(),
+            top: Default::default(),
         };
         let h = half;
         for b in [
@@ -448,7 +474,9 @@ impl Map {
     }
 
     fn max_height(&self) -> f32 {
-        self.heights.iter().copied().fold(0.0, f32::max)
+        *self
+            .top
+            .get_or_init(|| self.heights.iter().copied().fold(0.0, f32::max))
     }
 
     /// Sets the grid inside a rectangle to its mean height and blends a ring
@@ -629,8 +657,8 @@ fn hills(rng: &mut Rng, half: f32) -> Vec<f32> {
         a: f32,
     }
     let mut bumps = Vec::new();
-    for i in 0..18 {
-        let big = i < 6;
+    for i in 0..BUMPS {
+        let big = i < BUMPS / 3;
         bumps.push(Bump {
             x: rng.range(-half + 20.0, half - 20.0),
             z: rng.range(-half + 20.0, half - 20.0),
