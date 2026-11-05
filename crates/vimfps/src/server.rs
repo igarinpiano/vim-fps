@@ -55,7 +55,7 @@ pub struct HostArgs {
     /// 起動時に新しいバージョンを確認しない
     #[arg(long)]
     pub no_update_check: bool,
-    /// macOS: ほかの端末から接続できるか (ファイアウォール・ローカルネットワークの制限) を起動時に確認しない
+    /// macOS: 起動時にファイアウォールが接続を通すか確認しない
     #[arg(long, env = "VIMFPS_NO_NETWORK_CHECK")]
     pub no_network_check: bool,
     /// 配信する Web クライアント: 公開版の URL (起動時と 10 分ごとに最新を取得)
@@ -108,10 +108,13 @@ struct AppState {
 }
 
 pub fn run(args: HostArgs) -> i32 {
-    // Before listening: a firewall rule added now applies to the listener.
-    #[cfg(target_os = "macos")]
-    if !args.no_network_check && !args.bind.is_loopback() {
-        crate::macnet::check();
+    // Before the socket is opened: a firewall that turns players away tells
+    // neither side, so see to it before anyone waits.
+    if !args.no_network_check
+        && !args.bind.is_loopback()
+        && let Some((state, program)) = crate::firewall::incoming()
+    {
+        crate::firewall::settle(state, &program);
     }
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -223,7 +226,7 @@ async fn host(args: HostArgs) -> i32 {
 
 /// The address other machines on the LAN reach this one at (no packet is
 /// sent: connecting a UDP socket only picks the outgoing interface).
-pub fn lan_ip() -> Option<IpAddr> {
+fn lan_ip() -> Option<IpAddr> {
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("192.0.2.1:80").ok()?;
     let ip = s.local_addr().ok()?.ip();

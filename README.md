@@ -75,36 +75,23 @@ URL は起動のたびに変わります。
 | `--seed N` | マップのシード |
 | `--no-respawn` | 復活なし: 最後の 1 人が勝つラウンド制 (倒された人は観戦、次のラウンドで全員復帰) |
 | `--web URL` / `--web embedded` | 配信する Web クライアント (既定: GitHub Pages の最新版) |
-| `--no-network-check` | macOS: 起動時の接続の確認 (下) をしない |
+| `--no-network-check` | macOS: 起動時のファイアウォールの確認 (下) をしない |
 
-#### macOS で LAN からつながらないとき
+#### macOS のファイアウォール
 
-macOS では、次の 2 つのどちらかで、ほかの端末からホストに接続できないことがあります。
-
-- **ファイアウォール** が `vimfps` への接続を許可していない (「外部からの接続をすべてブロック」を含む)
-- **ローカルネットワークの制限** (macOS 15 以降): `vimfps` を動かしているターミナルのアプリ (iTerm・VS Code など。標準の「ターミナル」は対象外) がローカルネットワークを使えない
-
-`vimfps host` は起動時にこれを調べ、見つかれば許可するコマンドを表示して `[y/N]` で聞きます。`y` なら (管理者のパスワードを聞いてから) 実行します:
-
-```text
-● Allowing vimfps through the firewall... done
-│
-● Allowing the local network 192.168.1.0/24... done
-│
-● Ready to host!
-```
-
-実行するコマンドは次のとおりです (手で実行しても同じです):
+macOS のファイアウォールが有効だと、`vimfps` に規則が無いか遮断する規則があるとき、ほかの端末からの接続が届きません (規則が無いときは、システムのダイアログで許可するまで届きません)。
+`vimfps host` は待ち受けを始める前にこれを調べ (`socketfilterfw` に管理者の権限なしで尋ねます)、通らないときは `[y/N]` で聞きます。
+`y` のときだけ次の 2 つを `sudo` で実行し (パスワードは `sudo` が聞きます)、もう一度確かめます:
 
 ```bash
 sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add ~/.local/bin/vimfps
 sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp ~/.local/bin/vimfps
-sudo defaults write com.apple.network.local-network AllowedWiFiLocalNetworkAddresses -array-add 192.168.1.0/24
-sudo defaults write com.apple.network.local-network AllowedEthernetLocalNetworkAddresses -array-add 192.168.1.0/24
 ```
 
-最後の 2 行は、その LAN (例: `192.168.1.0/24`) へのアクセスを**すべてのアプリ**に許可します (macOS 15.5 以降)。
-アプリごとに許可したいときは、代わりに「システム設定 > プライバシーとセキュリティ > ローカルネットワーク」でターミナルのアプリをオンにして、開き直してください。
+- 断ったとき・端末でない (パイプやスクリプト) ときは、何も変えずに直し方を表示して、そのまま起動します
+- 手で許可するときは「システム設定 → ネットワーク → ファイアウォール → オプション…」で `vimfps` を「外部からの接続を許可」にします
+- `vimfps update` で実行ファイルが入れ替わると、もう一度聞かれることがあります
+- `--no-network-check` で確認しません
 
 ### bot の強さ
 | 段階 | 見える距離 | 反応 | 照準のぶれ | 振り向き | 偏差撃ち |
