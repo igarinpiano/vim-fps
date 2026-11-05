@@ -4,6 +4,8 @@
 //!   vimfps update [--check] [--yes]
 //!   vimfps uninstall [--yes]
 
+mod flow;
+mod macnet;
 mod server;
 mod tunnel;
 mod uninstall;

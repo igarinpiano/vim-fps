@@ -1,2 +1,2 @@
 // Kept equal to the workspace version in Cargo.toml (checked by CI).
-export const VERSION = '1.5.1';
+export const VERSION = '1.5.2';
