@@ -30,6 +30,23 @@ pub const BOT_HEARING: f32 = 120.0;
 pub const BOT_FOOTSTEPS: f32 = 22.0;
 
 pub const HEAD_RADIUS: f32 = 0.25;
+/// Standard gravity (m/s²): bullets and grenades fall at this rate.
+pub const GRAVITY: f32 = 9.81;
+/// Bullets live at most this long (seconds).
+pub const BULLET_LIFE: f32 = 3.0;
+
+/// Where a bullet fired at `vel` from `from` is after `t` seconds (no air
+/// resistance: v·t + ½·g·t²).
+pub fn ballistic(from: Vec3, vel: Vec3, t: f32) -> Vec3 {
+    from + vel * t + Vec3::new(0.0, -0.5 * GRAVITY * t * t, 0.0)
+}
+
+/// How far below the line of sight a bullet is after `distance` metres
+/// (fired horizontally at `speed` m/s).
+pub fn drop_at(distance: f32, speed: f32) -> f32 {
+    let t = distance / speed;
+    0.5 * GRAVITY * t * t
+}
 
 /// Grenade speed (m/s) for `{power}dd`.
 pub fn throw_speed(power: u32) -> f32 {
@@ -61,6 +78,7 @@ impl Specs {
                         falloff_end: s.falloff.1,
                         min_factor: s.min_factor,
                         range: s.range,
+                        muzzle_velocity: s.muzzle_velocity,
                     }
                 })
                 .collect(),
@@ -79,6 +97,7 @@ impl Specs {
             max_grenades: MAX_GRENADES,
             throw_speeds: (1..=MAX_THROW).map(throw_speed).collect(),
             head_radius: HEAD_RADIUS,
+            gravity: GRAVITY,
             tick_rate: TICK_RATE,
             snap_rate: SNAP_RATE,
         }
@@ -183,6 +202,20 @@ struct Pickup {
     dropped: Option<GunSlot>,
 }
 
+/// A bullet in flight.
+#[derive(Debug, Clone)]
+struct Bullet {
+    owner: ClientId,
+    gun: Gun,
+    /// Where it was fired from (the victim's hit direction).
+    origin: Vec3,
+    pos: Vec3,
+    vel: Vec3,
+    /// Path length so far (damage falloff and range).
+    traveled: f32,
+    age: f32,
+}
+
 #[derive(Debug, Clone)]
 struct Grenade {
     id: u32,
@@ -203,6 +236,7 @@ pub struct Room {
     pickups_dirty: bool,
     roster_dirty: bool,
     grenades: Vec<Grenade>,
+    bullets: Vec<Bullet>,
     left: f32,
     intermission: Option<f32>,
     snap_acc: f32,
@@ -246,6 +280,11 @@ fn r2(v: f32) -> f32 {
 impl Room {
     pub fn new(cfg: Config) -> Room {
         let map = Map::generate(cfg.seed);
+        Room::with_map(cfg, map)
+    }
+
+    /// A room on a given map (tests use a flat, empty one).
+    pub fn with_map(cfg: Config, map: Map) -> Room {
         let pickups = map
             .pickups
             .iter()
@@ -273,6 +312,7 @@ impl Room {
             pickups_dirty: true,
             roster_dirty: true,
             grenades: Vec::new(),
+            bullets: Vec::new(),
             intermission: None,
             snap_acc: 0.0,
             out: Vec::new(),
@@ -670,6 +710,7 @@ impl Room {
             for id in ids {
                 self.update_player(id, dt);
             }
+            self.update_bullets(dt);
             self.update_grenades(dt);
         }
         self.update_pickups(dt);
@@ -725,6 +766,7 @@ impl Room {
     fn end_match(&mut self) {
         self.intermission = Some(INTERMISSION);
         self.grenades.clear();
+        self.bullets.clear();
         let ranking = self.roster();
         self.send(
             Target::All,
@@ -922,38 +964,43 @@ impl Room {
             _ => st.spread_hip * if moving { 1.3 } else { 1.0 },
         };
         let (yaw, pitch) = (p.yaw, p.pitch);
+        let p_vel = p.vel;
         let gun = slot.gun;
 
-        let mut dmg: BTreeMap<ClientId, (f32, bool)> = BTreeMap::new();
-        let mut tracer_end = None;
+        // Each pellet is a projectile. The tracer's end is where the first
+        // one would hit the world (players are found while it flies).
+        let mut first: Option<(Vec3, Vec3)> = None;
         for _ in 0..st.pellets {
             let dy = self.rng.range(-1.0, 1.0);
             let dp = self.rng.range(-1.0, 1.0);
             let k = spread.to_radians() * (dy * dy + dp * dp).sqrt().min(1.0);
             let ang = dy.atan2(dp);
             let dir = Vec3::from_angles(yaw + k * ang.sin(), pitch + k * ang.cos());
-            let (t, hit) = self.trace(id, eye, dir, st.range);
-            if tracer_end.is_none() {
-                tracer_end = Some(eye + dir * t);
+            let vel = dir * st.muzzle_velocity + Vec3::new(p_vel.x, 0.0, p_vel.z);
+            if first.is_none() {
+                first = Some((vel, self.world_impact(eye, vel, st.range)));
             }
-            if let Some((victim, head)) = hit {
-                let e = dmg.entry(victim).or_insert((0.0, false));
-                e.0 += gun.damage_at(t, head);
-                e.1 |= head;
-            }
+            self.bullets.push(Bullet {
+                owner: id,
+                gun,
+                origin: eye,
+                pos: eye,
+                vel,
+                traveled: 0.0,
+                age: 0.0,
+            });
         }
+        let (vel, to) = first.unwrap_or((Vec3::ZERO, eye));
         self.send(
             Target::All,
             ServerMsg::Shot {
                 id,
                 from: eye,
-                to: tracer_end.unwrap_or(eye),
+                to,
+                vel,
                 gun,
             },
         );
-        for (victim, (d, head)) in dmg {
-            self.damage(victim, id, d, head, Cause::Gun(gun), eye);
-        }
         // Bots within earshot turn toward the shot.
         for p in self.players.values_mut() {
             if p.id == id || !p.alive {
@@ -968,41 +1015,97 @@ impl Room {
         }
     }
 
-    /// Nearest hit along a ray: distance, and the player hit (with headshot).
-    fn trace(
-        &self,
-        shooter: ClientId,
-        origin: Vec3,
-        dir: Vec3,
-        range: f32,
-    ) -> (f32, Option<(ClientId, bool)>) {
-        let wall = self.map.raycast(origin, dir, range).unwrap_or(range);
-        let mut best = wall;
-        let mut hit = None;
-        for p in self.players.values() {
-            if p.id == shooter || !p.alive {
+    /// Where a bullet would first hit terrain or a solid (ignoring
+    /// players), or where it ends its range.
+    fn world_impact(&self, from: Vec3, vel: Vec3, range: f32) -> Vec3 {
+        let dt = 1.0 / TICK_RATE;
+        let mut t = 0.0;
+        let mut pos = from;
+        let mut traveled = 0.0;
+        while t < BULLET_LIFE && traveled < range {
+            let next = ballistic(from, vel, t + dt);
+            let d = next - pos;
+            let len = d.length();
+            if len > 1e-6 {
+                let dir = d * (1.0 / len);
+                if let Some(h) = self.map.raycast(pos, dir, len) {
+                    return pos + dir * h;
+                }
+            }
+            traveled += len;
+            pos = next;
+            t += dt;
+        }
+        pos
+    }
+
+    /// Moves every bullet along its arc (one straight segment per tick) and
+    /// applies what it hits first: a player (head or body), or the world.
+    fn update_bullets(&mut self, dt: f32) {
+        // (attacker, victim) -> damage, headshot, gun, origin: the pellets of
+        // one shotgun blast landing in the same tick count as one hit.
+        let mut hits: BTreeMap<(ClientId, ClientId), (f32, bool, Gun, Vec3)> = BTreeMap::new();
+        let mut keep = Vec::with_capacity(self.bullets.len());
+        let bullets = std::mem::take(&mut self.bullets);
+        for mut b in bullets {
+            let st = b.gun.stats();
+            let next = b.pos + b.vel * dt + Vec3::new(0.0, -0.5 * GRAVITY * dt * dt, 0.0);
+            let d = next - b.pos;
+            let len = d.length();
+            if len < 1e-6 {
                 continue;
             }
-            let sneak = p.input.sneak;
-            let head_c = p.pos + Vec3::new(0.0, if sneak { 1.22 } else { 1.67 }, 0.0);
-            if let Some(t) = ray_sphere(origin, dir, head_c, HEAD_RADIUS, best)
-                && t < best
-            {
-                best = t;
-                hit = Some((p.id, true));
+            let dir = d * (1.0 / len);
+            let wall = self.map.raycast(b.pos, dir, len).unwrap_or(f32::MAX);
+            let mut best = wall.min(len);
+            let mut hit = None;
+            for p in self.players.values() {
+                if p.id == b.owner || !p.alive {
+                    continue;
+                }
+                let sneak = p.input.sneak;
+                let head_c = p.pos + Vec3::new(0.0, if sneak { 1.22 } else { 1.67 }, 0.0);
+                if let Some(t) = ray_sphere(b.pos, dir, head_c, HEAD_RADIUS, best)
+                    && t < best
+                {
+                    best = t;
+                    hit = Some((p.id, true));
+                }
+                let body = Aabb::new(
+                    p.pos + Vec3::new(-0.33, 0.0, -0.33),
+                    p.pos + Vec3::new(0.33, if sneak { 1.0 } else { 1.45 }, 0.33),
+                );
+                if let Some(t) = body.ray(b.pos, dir, best)
+                    && t < best
+                {
+                    best = t;
+                    hit = Some((p.id, false));
+                }
             }
-            let body = Aabb::new(
-                p.pos + Vec3::new(-0.33, 0.0, -0.33),
-                p.pos + Vec3::new(0.33, if sneak { 1.0 } else { 1.45 }, 0.33),
-            );
-            if let Some(t) = body.ray(origin, dir, best)
-                && t < best
-            {
-                best = t;
-                hit = Some((p.id, false));
+            if let Some((victim, head)) = hit {
+                let dist = b.traveled + best;
+                let e = hits
+                    .entry((b.owner, victim))
+                    .or_insert((0.0, false, b.gun, b.origin));
+                e.0 += b.gun.damage_at(dist, head);
+                e.1 |= head;
+                continue;
+            }
+            if wall <= len {
+                continue;
+            }
+            b.traveled += len;
+            b.age += dt;
+            b.pos = next;
+            b.vel.y -= GRAVITY * dt;
+            if b.traveled < st.range && b.age < BULLET_LIFE {
+                keep.push(b);
             }
         }
-        (best, hit)
+        self.bullets = keep;
+        for ((attacker, victim), (d, head, gun, origin)) in hits {
+            self.damage(victim, attacker, d, head, Cause::Gun(gun), origin);
+        }
     }
 
     fn damage(
@@ -1091,7 +1194,7 @@ impl Room {
                 boom.push((g.owner, g.pos));
                 continue;
             }
-            g.vel.y -= 9.8 * dt;
+            g.vel.y -= GRAVITY * dt;
             let mut n = g.pos + g.vel * dt;
             let ground = self.map.height(n.x, n.z) + 0.08;
             if n.y < ground {
@@ -1562,6 +1665,79 @@ mod tests {
         r.tick(1.0 / 60.0);
         let hp = r.player_hp(b).unwrap();
         assert!(hp > 0.0 && hp < MAX_HP, "hp {hp}");
+    }
+
+    /// A flat field with nothing on it, for long-range shots.
+    fn flat_room() -> (Room, ClientId, ClientId) {
+        use crate::map::GRID;
+        let half = crate::map::HALF;
+        let map = Map {
+            seed: 0,
+            half,
+            grid: GRID,
+            cell: 2.0 * half / (GRID - 1) as f32,
+            heights: vec![0.0; GRID * GRID],
+            solids: Vec::new(),
+            trees: Vec::new(),
+            spawns: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(50.0, 0.0, 50.0)],
+            pickups: Vec::new(),
+        };
+        let mut r = Room::with_map(Config::default(), map);
+        let a = r.join("a", None, PROTOCOL).unwrap();
+        let b = r.join("b", None, PROTOCOL).unwrap();
+        r.give(a, Gun::Sr);
+        (r, a, b)
+    }
+
+    /// Fires one scoped SR shot at `pitch` toward a target `dist` m away
+    /// (straight ahead, -Z) and returns (ticks until the hit, headshot).
+    fn long_shot(dist: f32, pitch: f32) -> Option<(usize, bool)> {
+        let (mut r, a, b) = flat_room();
+        r.teleport(a, Vec3::new(0.0, 0.0, 100.0), 0.0);
+        r.teleport(b, Vec3::new(0.0, 0.0, 100.0 - dist), std::f32::consts::PI);
+        r.handle(a, input(true, pitch));
+        r.handle(a, ClientMsg::Trigger);
+        r.drain();
+        for tick in 1..=120 {
+            r.tick(1.0 / 60.0);
+            for (_, m) in r.drain() {
+                if let ServerMsg::Hit { victim, head, .. } = m
+                    && victim == b
+                {
+                    return Some((tick, head));
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn ballistics_formula() {
+        let p = ballistic(Vec3::ZERO, Vec3::new(0.0, 0.0, -850.0), 0.5);
+        assert!((p.z + 425.0).abs() < 1e-3);
+        assert!((p.y + 0.5 * GRAVITY * 0.25).abs() < 1e-4);
+        // SR at 200 m: about 27 cm below the line of sight.
+        assert!((drop_at(200.0, 850.0) - 0.2715).abs() < 0.001);
+    }
+
+    #[test]
+    fn bullets_take_time_to_arrive() {
+        // 210 m at 850 m/s ≈ 0.247 s ≈ 15 ticks: not hit at once.
+        let (ticks, _) = long_shot(210.0, (0.07f32).atan2(210.0)).expect("hit");
+        assert!((13..=17).contains(&ticks), "arrived after {ticks} ticks");
+    }
+
+    #[test]
+    fn bullets_drop_with_gravity() {
+        let dist = 210.0;
+        // Aimed straight at the head: the bullet has fallen ~30 cm by then,
+        // so it hits the body instead.
+        let (_, head) = long_shot(dist, (0.07f32).atan2(dist)).expect("hit");
+        assert!(!head, "an uncorrected long shot should drop below the head");
+        // Aimed higher by the drop: headshot.
+        let drop = drop_at(dist, Gun::Sr.stats().muzzle_velocity);
+        let (_, head) = long_shot(dist, (0.07 + drop).atan2(dist)).expect("hit");
+        assert!(head, "aiming over by the drop should hit the head");
     }
 
     #[test]

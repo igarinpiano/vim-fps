@@ -230,7 +230,23 @@ const HELP = [
 function specLines(sp) {
   const L = [];
   const f = (v, d = 1) => (Number.isInteger(v) ? String(v) : v.toFixed(d));
-  L.push('弾: すべてヒットスキャン (弾速は無限大 = 撃った瞬間に着弾。落下・偏差撃ちは不要)');
+  if (sp.gravity && sp.guns.every((g) => g.muzzle_velocity)) {
+    L.push(`弾: 実際に飛ぶ弾 (初速で撃ち出され、重力 ${sp.gravity} m/s² で落ちる。空気抵抗なし)`);
+    L.push('    遠くの相手には「届くまでの時間ぶん先」と「落ちるぶん上」を狙います (SR のスコープの目盛り 1〜4 = 100〜400 m)');
+    L.push('');
+    L.push('到達時間 / 落下   100 m          200 m          300 m          400 m');
+    for (const g of sp.guns) {
+      const cells = [100, 200, 300, 400].map((d) => {
+        if (d > g.range) return '(射程外)'.padEnd(14);
+        const t = d / g.muzzle_velocity;
+        return `${t.toFixed(2)}s ${Math.round(0.5 * sp.gravity * t * t * 100)}cm`.padEnd(14);
+      });
+      L.push(`${`${g.name} ${g.muzzle_velocity}m/s`.padEnd(17)}${cells.join(' ')}`);
+    }
+  } else {
+    L.push('弾: ヒットスキャン (このサーバーは旧版: 撃った瞬間に着弾)');
+  }
+  L.push('');
   L.push(`HP ${sp.hp}   頭の当たり判定 半径 ${sp.head_radius} m   サーバー ${sp.tick_rate} Hz / 送信 ${sp.snap_rate} Hz`);
   L.push('');
   L.push('武器   ダメージ(胴/頭)  連射    装弾/予備  リロード  拡散 腰/構え/スコープ  減衰 (距離→倍率)     射程');
@@ -241,7 +257,8 @@ function specLines(sp) {
     const fall = g.min_factor >= 1 ? 'なし' : `${g.falloff_start}m→${g.falloff_end}m ×${g.min_factor}`;
     L.push(`${g.name.padEnd(5)}  ${dmg.padEnd(15)}  ${rof.padEnd(9)} ${`${g.mag}/${g.reserve_max}`.padEnd(9)}  ${`${g.reload}s`.padEnd(7)}  ${spread.padEnd(19)}  ${fall.padEnd(20)}  ${g.range}m`);
   }
-  L.push('  (頭 = 胴 × 倍率。腰撃ちで歩いていると拡散 ×1.3。SG は 1 発で 9 粒)');
+  L.push('  (頭 = 胴 × 倍率。腰撃ちで歩いていると拡散 ×1.3。SG は 1 発で 9 粒。減衰は弾が飛んだ距離で決まる)');
+  L.push('  (SR は構えると低倍率スコープ、v でさらに高倍率)');
   L.push('');
   L.push(`移動: 走り ${sp.run_speed} m/s · スニーク ${sp.sneak_speed} m/s · 加速度 ${sp.accel} m/s² (:set nomoveaccel で無限大) · 構え中は歩けない`);
   L.push(`回復キット: +${sp.medkit_heal} HP、${sp.medkit_time} 秒 (最大 ${sp.max_medkits} 個)`);
@@ -605,7 +622,7 @@ function renderMenu() {
 function showTitle() {
   show('title');
   show('hud', false);
-  for (const id of ['inventory', 'mapwin', 'chatwin', 'deathwin', 'resultwin', 'progress']) show(id, false);
+  for (const id of ['inventory', 'mapwin', 'chatwin', 'bsod', 'boot', 'resultwin', 'progress']) show(id, false);
   buildMenu();
   vim.setMode('menu');
 }
@@ -736,7 +753,7 @@ function onMessage(m) {
     case 'shot': {
       const mine = m.id === game.myId;
       if (!mine) game.shots.push({ x: m.from.x, z: m.from.z, id: m.id, t: performance.now() });
-      if (renderer) renderer.tracer(m.from, m.to, mine);
+      if (renderer) renderer.tracer(m.from, m.to, mine, m.vel, game.specs && game.specs.gravity);
       sound.shot(m.gun, mine ? null : m.from);
       if (mine) {
         if (renderer) renderer.muzzle();
@@ -770,10 +787,7 @@ function onMessage(m) {
       );
       if (m.victim === game.myId) {
         game.alive = false;
-        $('death-text').textContent = self
-          ? 'E492: Not an editor command: alive — 自分のグレネードで倒れました'
-          : `E492: Not an editor command: alive — ${nameOf(m.killer)} に倒されました (${how}${m.head ? '、ヘッドショット' : ''}${dist ? `、${dist.slice(3)}` : ''})`;
-        show('deathwin');
+        showBsod(self ? null : nameOf(m.killer), `${how}${m.head ? ' · ヘッドショット' : ''}${dist}`);
         if (vim.mode === 'view' || vim.mode === 'inventory' || vim.mode === 'map') vim.setMode('normal');
       }
       break;
@@ -801,7 +815,7 @@ function onMessage(m) {
       game.alive = true;
       game.timed = null;
       game.turnLeft = 0;
-      show('deathwin', false);
+      hideDeath();
       break;
     case 'match_end':
       showResult(m);
@@ -825,6 +839,74 @@ function onMessage(m) {
 
 let hitTimer = null;
 
+// ---------------------------------------------------------------- death screen
+
+/// The stop screen shown when you are killed. It "reboots" (boot screen)
+/// for the last BOOT_TIME seconds before the respawn.
+const BOOT_TIME = 0.8;
+let bsodState = { killer: null, how: '' };
+
+function bsodCode(name) {
+  // Four hex words from the killer's name, for the "technical information".
+  const bytes = [...new TextEncoder().encode(name || 'SELF')].slice(0, 4);
+  while (bytes.length < 4) bytes.push(0);
+  return bytes.map((b) => `0x${b.toString(16).toUpperCase().padStart(8, '0')}`).join(', ');
+}
+
+function showBsod(killer, how) {
+  bsodState = { killer, how, at: performance.now() };
+  renderBsod(null);
+  show('boot', false);
+  show('bsod');
+}
+
+function renderBsod(left) {
+  const { killer, how } = bsodState;
+  const id = (killer ? `KILLED_BY_${killer}` : 'SELF_DESTRUCT').toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+  const count = left == null ? '' : ` ${Math.max(0, Math.ceil(left - BOOT_TIME))}`;
+  const lines = [
+    '<span class="hl"> vim-fps </span>',
+    '',
+    'プレイヤーが倒されたため、問題が起きないようにシステムを停止しました。',
+    '',
+    esc(id),
+    '',
+    killer ? `倒した相手: ${esc(killer)}` : '原因: 自分のグレネード',
+    `詳細: ${esc(how)}`,
+    '',
+    'このエラーが続く場合は、遮蔽物に隠れるか、先に撃ってください。',
+    '',
+    `自動的に再起動します…${count}`,
+    '',
+    '技術情報:',
+    '',
+    `*** STOP: 0x000000DE (${bsodCode(killer)})`,
+    '***  E492: Not an editor command: alive',
+  ];
+  $('bsod-text').innerHTML = lines.join('\n');
+}
+
+function updateDeath(serverLeft) {
+  // Until the first snapshot after the kill arrives, the last one still says
+  // "alive, 0 s": count from the moment of death instead.
+  const total = (game.specs && game.specs.respawn) || 3;
+  const local = total - (performance.now() - (bsodState.at || 0)) / 1000;
+  const left = serverLeft > 0 ? serverLeft : Math.max(0, local);
+  if (left > BOOT_TIME) {
+    // Once rebooting, stay there until the respawn.
+    if (!$('boot').classList.contains('hidden')) return;
+    renderBsod(left);
+  } else if ($('boot').classList.contains('hidden')) {
+    show('bsod', false);
+    show('boot');
+  }
+}
+
+function hideDeath() {
+  show('bsod', false);
+  show('boot', false);
+}
+
 function damageArc(from) {
   const dx = from.x - game.pos.x;
   const dz = from.z - game.pos.z;
@@ -847,7 +929,7 @@ function showResult(m) {
     t.appendChild(tr);
   });
   show('resultwin');
-  show('deathwin', false);
+  hideDeath();
 }
 
 function onSnap(m) {
@@ -864,7 +946,7 @@ function onSnap(m) {
     if (mine.alive && !game.alive && game.me && game.me.respawn === 0) {
       game.alive = true;
       game.pos = { x: mine.x, y: mine.y, z: mine.z };
-      show('deathwin', false);
+      hideDeath();
     }
     if (mine.alive && game.alive) {
       // Reconcile the predicted position with the server's.
@@ -1251,8 +1333,10 @@ function frame(now) {
     const gun = heldGun();
     const sel = game.me && game.me.inv.sel;
     renderer.setHeld(sel === 'medkit' || sel === 'grenade' ? sel : gun ? gun.gun : null);
-    const scoped = game.ads && game.zoom === 2 && gun && gun.gun === 'sr';
+    // The SR looks through its scope at both stages (low / high power).
+    const scoped = game.ads && gun && gun.gun === 'sr' && game.adsK > 0.5;
     show('scope', scoped);
+    if (scoped) updateHoldover();
     const style = game.ads && game.adsK > 0.6 && !scoped ? renderer.adsStyle() : null;
     $('crosshair').dataset.mode = style ? `ads-${style}` : vim.mode === 'view' ? 'view' : vim.mode === 'normal' ? 'normal' : 'other';
     const bobOn = settings.get('bob');
@@ -1300,6 +1384,34 @@ function frame(now) {
     }
   }
   requestAnimationFrame(frame);
+}
+
+/// Bullet-drop marks on the SR reticle: where to put a target 100–400 m away
+/// (the bullet falls ½·g·t² below the line of sight, t = distance / speed).
+let holdoverKey = '';
+function updateHoldover() {
+  const el = $('holdover');
+  const canvasH = $('view').clientHeight;
+  const sr = game.specs && game.specs.guns.find((g) => g.id === 'sr');
+  const speed = sr ? sr.muzzle_velocity : 850;
+  const g = (game.specs && game.specs.gravity) || 9.81;
+  const key = `${Math.round(game.fov * 10)}:${canvasH}:${speed}`;
+  if (key === holdoverKey) return;
+  holdoverKey = key;
+  const half = Math.tan((game.fov * DEG) / 2);
+  let html = '';
+  let last = 0;
+  for (const d of [100, 200, 300, 400]) {
+    const t = d / speed;
+    const drop = 0.5 * g * t * t;
+    const px = (drop / d / half) * (canvasH / 2);
+    // Only marks that can be told apart from the centre and each other
+    // (at low power the drop is a few pixels: aim at the centre).
+    if (px > canvasH * 0.33 || px < 6 || px - last < 10) continue;
+    last = px;
+    html += `<i style="top:${px.toFixed(1)}px"><b>${d / 100}</b></i>`;
+  }
+  el.innerHTML = html;
 }
 
 /// Marker over an enemy: 'spotted' (marked with *), 'seen' (in view), or null.
@@ -1389,7 +1501,7 @@ function updateHud() {
     setText($('progress-title'), prog[0]);
     $('progress-fill').style.width = `${Math.round(prog[1] * 100)}%`;
   }
-  if (!game.alive && me.respawn > 0) setText($('death-timer'), `${Math.ceil(me.respawn)} 秒後に復活します`);
+  if (!game.alive) updateDeath(me.respawn);
 
   // Rank (top right).
   const rows = [...game.roster.values()];
@@ -1457,6 +1569,9 @@ for (const [id, fn] of Object.entries(CLOSERS)) {
     fn();
   });
 }
+
+// ?debug: expose the state for automated browser tests (nothing else changes).
+if (new URLSearchParams(location.search).has('debug')) window.vimfps = { game, settings, onMessage: (m) => onMessage(m) };
 
 async function boot() {
   showTitle();

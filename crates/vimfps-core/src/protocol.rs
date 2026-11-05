@@ -140,6 +140,8 @@ pub struct GunSpec {
     pub falloff_end: f32,
     pub min_factor: f32,
     pub range: f32,
+    /// Bullet speed when it leaves the barrel (m/s).
+    pub muzzle_velocity: f32,
 }
 
 /// Every number a player may want to know, sent with the welcome so the
@@ -163,6 +165,8 @@ pub struct Specs {
     /// Throw speed (m/s) for power 1..=5.
     pub throw_speeds: Vec<f32>,
     pub head_radius: f32,
+    /// m/s² pulling bullets and grenades down.
+    pub gravity: f32,
     pub tick_rate: f32,
     pub snap_rate: f32,
 }
@@ -209,7 +213,12 @@ pub enum ServerMsg {
     Shot {
         id: ClientId,
         from: Vec3,
+        /// Where the bullet will hit the world (players aside).
         to: Vec3,
+        /// Its initial velocity: the client draws the same falling arc.
+        /// (Older clients ignore it and draw a straight line.)
+        #[serde(default)]
+        vel: Vec3,
         gun: Gun,
     },
     Hit {
