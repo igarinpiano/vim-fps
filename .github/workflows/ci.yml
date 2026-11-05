@@ -34,6 +34,10 @@ jobs:
           rustup default stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
+      # The CLI embeds web/pkg/vimfps.wasm; without it the build warns.
+      - name: Build the practice-mode wasm (embedded by the CLI)
+        shell: bash
+        run: bash scripts/build-wasm.sh
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Scripts
         run: |
@@ -112,6 +116,10 @@ jobs:
           rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The CLI embeds web/pkg/vimfps.wasm; without it the build warns.
+      - name: Build the practice-mode wasm (embedded by the CLI)
+        shell: bash
+        run: bash scripts/build-wasm.sh
       - run: cargo test --workspace --release
       # `vimfps uninstall`, run for real on a copy of the built binary.
       - run: cargo build -p vimfps --release
@@ -183,5 +191,8 @@ jobs:
           rustup default "$MSRV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: steps.msrv.outputs.version != ''
+      - name: Build the practice-mode wasm (embedded by the CLI)
+        if: steps.msrv.outputs.version != ''
+        run: bash scripts/build-wasm.sh
       - if: steps.msrv.outputs.version != ''
         run: cargo check --workspace --all-targets

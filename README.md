@@ -75,6 +75,36 @@ URL は起動のたびに変わります。
 | `--seed N` | マップのシード |
 | `--no-respawn` | 復活なし: 最後の 1 人が勝つラウンド制 (倒された人は観戦、次のラウンドで全員復帰) |
 | `--web URL` / `--web embedded` | 配信する Web クライアント (既定: GitHub Pages の最新版) |
+| `--no-network-check` | macOS: 起動時の接続の確認 (下) をしない |
+
+#### macOS で LAN からつながらないとき
+
+macOS では、次の 2 つのどちらかで、ほかの端末からホストに接続できないことがあります。
+
+- **ファイアウォール** が `vimfps` への接続を許可していない (「外部からの接続をすべてブロック」を含む)
+- **ローカルネットワークの制限** (macOS 15 以降): `vimfps` を動かしているターミナルのアプリ (iTerm・VS Code など。標準の「ターミナル」は対象外) がローカルネットワークを使えない
+
+`vimfps host` は起動時にこれを調べ、見つかれば許可するコマンドを表示して `[y/N]` で聞きます。`y` なら (管理者のパスワードを聞いてから) 実行します:
+
+```text
+● Allowing vimfps through the firewall... done
+│
+● Allowing the local network 192.168.1.0/24... done
+│
+● Ready to host!
+```
+
+実行するコマンドは次のとおりです (手で実行しても同じです):
+
+```bash
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add ~/.local/bin/vimfps
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp ~/.local/bin/vimfps
+sudo defaults write com.apple.network.local-network AllowedWiFiLocalNetworkAddresses -array-add 192.168.1.0/24
+sudo defaults write com.apple.network.local-network AllowedEthernetLocalNetworkAddresses -array-add 192.168.1.0/24
+```
+
+最後の 2 行は、その LAN (例: `192.168.1.0/24`) へのアクセスを**すべてのアプリ**に許可します (macOS 15.5 以降)。
+アプリごとに許可したいときは、代わりに「システム設定 > プライバシーとセキュリティ > ローカルネットワーク」でターミナルのアプリをオンにして、開き直してください。
 
 ### bot の強さ
 | 段階 | 見える距離 | 反応 | 照準のぶれ | 振り向き | 偏差撃ち |
