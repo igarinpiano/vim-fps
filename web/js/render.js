@@ -169,14 +169,24 @@ export class Renderer {
 
   buildMap(map) {
     this.clear();
-    // Outside the fence: flat ground.
-    const outer = new THREE.Mesh(
-      new THREE.PlaneGeometry(map.half * 2 + 400, map.half * 2 + 400),
-      new THREE.MeshLambertMaterial({ color: 0x5f9a40 }),
-    );
-    outer.rotation.x = -Math.PI / 2;
-    outer.position.y = -0.05;
-    this.mapGroup.add(outer);
+    // Outside the fence: flat ground, as a frame around the field only. (One
+    // plane under everything showed through wherever the field dips below
+    // it, down to -2.5 m: over the feet, and in deep dips over the eyes.)
+    const outerMat = new THREE.MeshLambertMaterial({ color: 0x5f9a40 });
+    const inner = map.half;
+    const outerHalf = map.half + 200;
+    const band = outerHalf - inner;
+    for (const [w, d, x, z] of [
+      [outerHalf * 2, band, 0, -(inner + band / 2)],
+      [outerHalf * 2, band, 0, inner + band / 2],
+      [band, inner * 2, -(inner + band / 2), 0],
+      [band, inner * 2, inner + band / 2, 0],
+    ]) {
+      const outer = new THREE.Mesh(new THREE.PlaneGeometry(w, d), outerMat);
+      outer.rotation.x = -Math.PI / 2;
+      outer.position.set(x, -0.05, z);
+      this.mapGroup.add(outer);
+    }
 
     // The terrain: one vertex per height sample, coloured by height, with a
     // faint grid so slopes and movement are easy to read.
