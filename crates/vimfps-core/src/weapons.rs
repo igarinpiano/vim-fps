@@ -33,7 +33,11 @@ pub struct GunStats {
     /// `falloff.1`.
     pub falloff: (f32, f32),
     pub min_factor: f32,
+    /// How far a bullet flies before it is gone (metres along its path).
     pub range: f32,
+    /// Muzzle velocity (m/s). Bullets are real projectiles: they take time
+    /// to arrive and fall under gravity (see `sim::GRAVITY`).
+    pub muzzle_velocity: f32,
 }
 
 impl Gun {
@@ -57,6 +61,7 @@ impl Gun {
                 falloff: (35.0, 100.0),
                 min_factor: 0.6,
                 range: 300.0,
+                muzzle_velocity: 880.0,
             },
             Gun::Smg => GunStats {
                 name: "SMG",
@@ -74,6 +79,7 @@ impl Gun {
                 falloff: (15.0, 50.0),
                 min_factor: 0.45,
                 range: 200.0,
+                muzzle_velocity: 400.0,
             },
             Gun::Sg => GunStats {
                 name: "SG",
@@ -91,6 +97,7 @@ impl Gun {
                 falloff: (8.0, 30.0),
                 min_factor: 0.15,
                 range: 60.0,
+                muzzle_velocity: 380.0,
             },
             Gun::Sr => GunStats {
                 name: "SR",
@@ -103,11 +110,12 @@ impl Gun {
                 reserve_max: 25,
                 reload: 3.0,
                 spread_hip: 10.0,
-                spread_ads: 1.2,
+                spread_ads: 0.15,
                 spread_scope: 0.0,
                 falloff: (300.0, 400.0),
                 min_factor: 1.0,
                 range: 400.0,
+                muzzle_velocity: 850.0,
             },
         }
     }

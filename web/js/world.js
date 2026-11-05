@@ -15,7 +15,8 @@ export const GUNS = {
   ar: { name: 'AR', ads: 55, scope: 32 },
   smg: { name: 'SMG', ads: 62, scope: 48 },
   sg: { name: 'SG', ads: 66, scope: 58 },
-  sr: { name: 'SR', ads: 45, scope: 14 },
+  // SR: both stages are a scope (low and high power).
+  sr: { name: 'SR', ads: 28, scope: 12 },
 };
 
 export class World {

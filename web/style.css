@@ -88,6 +88,10 @@ kbd { font-family: var(--mono); background: #fff; border: 1px solid #aaa; border
   background: radial-gradient(circle at 50% 50%, transparent 0, transparent 34vh, #000 34.3vh); }
 #scope::before { content: ""; position: absolute; left: 0; right: 0; top: calc(50% - 0.5px); height: 1px; background: #000; }
 #scope::after { content: ""; position: absolute; top: 0; bottom: 0; left: calc(50% - 0.5px); width: 1px; background: #000; }
+/* Bullet-drop marks below the centre: 1 = 100 m, 2 = 200 m ... */
+#holdover { position: absolute; left: 50%; top: 50%; width: 0; height: 0; }
+#holdover i { position: absolute; left: -9px; width: 18px; height: 2px; background: #000; }
+#holdover i b { position: absolute; left: 22px; top: -7px; font: 700 10px var(--mono); color: #000; text-shadow: 0 0 2px #fff; }
 #dmgdir { position: absolute; left: 50%; top: calc(50% - 17px); width: 0; height: 0; z-index: 6; pointer-events: none; }
 #dmgdir .arc { position: absolute; left: -60px; top: -140px; width: 120px; height: 24px; transform-origin: 60px 140px;
   background: radial-gradient(ellipse at 50% 100%, rgba(255,40,40,0.85), rgba(255,40,40,0) 70%); }
@@ -141,9 +145,20 @@ body.touch .xpbtn { min-height: 40px; font-size: 15px; flex: 1; }
 #msgwin { left: 50%; top: 45%; transform: translate(-50%, -50%); max-width: calc(100vw - 32px); }
 #msg-body { margin: 0; font: 13px/1.5 var(--mono); background: #fff; border: 1px solid #7f9db9; padding: 8px 10px; max-height: calc(100vh - 200px); max-width: calc(100vw - 60px); overflow: auto; white-space: pre; min-width: min(560px, calc(100vw - 60px)); }
 #msg-body .err { color: #c00000; }
-#deathwin { left: 50%; top: 38%; transform: translate(-50%, -50%); width: min(400px, calc(100vw - 32px)); }
-#deathwin .body { display: flex; gap: 14px; align-items: flex-start; }
-#deathwin p { margin: 4px 0; }
+/* Death: stop screen and reboot (they cover everything, the taskbar too). */
+#bsod { position: fixed; inset: 0; z-index: 100; background: #0000aa; color: #fff; display: flex; align-items: center; justify-content: center; padding: 16px; }
+#bsod-text { margin: 0; font: 15px/1.45 var(--mono); white-space: pre-wrap; max-width: 760px; width: 100%; }
+#bsod-text .hl { background: #aaaaaa; color: #0000aa; padding: 0 6px; }
+#boot { position: fixed; inset: 0; z-index: 100; background: #000; color: #ddd; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; font-family: var(--font); }
+#boot .boot-logo { display: flex; align-items: center; gap: 10px; font: 800 40px var(--mono); }
+#boot .boot-logo .v { color: #3ec45c; } #boot .boot-logo .dash { color: #888; } #boot .boot-logo .f { color: #4f86f7; }
+#boot .boot-logo .flag { width: 26px; height: 26px; transform: rotate(45deg); border-radius: 3px; background: linear-gradient(135deg, #b9f5b9, #1f8a3c); }
+#boot .boot-bar { position: relative; width: 160px; height: 14px; border: 2px solid #b2b2b2; border-radius: 4px; overflow: hidden; }
+#boot .boot-bar i { position: absolute; top: 2px; width: 10px; height: 6px; border-radius: 1px; background: linear-gradient(180deg, #8fb6ff, #2a5fd6); left: 6px; }
+#boot .boot-bar i:nth-child(2) { left: 19px; } #boot .boot-bar i:nth-child(3) { left: 32px; }
+body.uianim #boot .boot-bar i { animation: bootbar 1.2s linear infinite; }
+@keyframes bootbar { from { transform: translateX(-40px); } to { transform: translateX(170px); } }
+#boot p { margin: 0; font-size: 13px; color: #999; }
 .icon-err { flex: none; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 20px; background: radial-gradient(circle at 35% 30%, #ff8a7a, #d11a0a 60%, #9a0f04); border: 1px solid #7a0a00; }
 #resultwin { left: 50%; top: 42%; transform: translate(-50%, -50%); min-width: min(360px, calc(100vw - 32px)); }
 #result-table { border-collapse: collapse; width: 100%; background: #fff; border: 1px solid #7f9db9; font-size: 13px; }

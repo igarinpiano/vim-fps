@@ -397,14 +397,32 @@ export class Renderer {
     }
   }
 
-  tracer(from, to, mine) {
-    const geo = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(from.x, from.y - (mine ? 0.15 : 0), from.z),
-      new THREE.Vector3(to.x, to.y, to.z),
-    ]);
-    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xfff2a8, transparent: true, opacity: 0.85 }));
+  /// A bullet: with `vel`, a short streak flying the same falling arc as
+  /// on the server (x = x0 + v·t + ½·g·t²) until it reaches `to`; without it
+  /// (an older server), a straight flash.
+  tracer(from, to, mine, vel, gravity = 9.81) {
+    const speedXZ = vel ? Math.hypot(vel.x, vel.z) : 0;
+    if (!vel || Math.hypot(vel.x, vel.y, vel.z) < 1) {
+      const geo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(from.x, from.y - (mine ? 0.15 : 0), from.z),
+        new THREE.Vector3(to.x, to.y, to.z),
+      ]);
+      const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xfff2a8, transparent: true, opacity: 0.85 }));
+      this.scene.add(line);
+      this.effects.push({ obj: line, t: 0, life: 0.06, kind: 'tracer' });
+      return;
+    }
+    const flight =
+      speedXZ > 1
+        ? Math.hypot(to.x - from.x, to.z - from.z) / speedXZ
+        : Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z) / Math.hypot(vel.x, vel.y, vel.z);
+    const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xfff2a8, transparent: true, opacity: 0.9 }));
+    line.frustumCulled = false;
     this.scene.add(line);
-    this.effects.push({ obj: line, t: 0, life: 0.06, kind: 'tracer' });
+    // Start at the muzzle for your own shots (a little below the eye).
+    const start = { x: from.x, y: from.y - (mine ? 0.12 : 0), z: from.z };
+    this.effects.push({ obj: line, t: 0, life: Math.max(0.03, flight), kind: 'bullet', from: start, vel, g: gravity });
   }
 
   explosion(pos) {
@@ -431,6 +449,19 @@ export class Renderer {
     }
     for (const e of this.effects) {
       e.t += dt;
+      if (e.kind === 'bullet') {
+        // Streak from where the bullet was 15 ms ago to where it is now.
+        const at = (t) => {
+          const tt = Math.min(t, e.life);
+          return [e.from.x + e.vel.x * tt, e.from.y + e.vel.y * tt - 0.5 * e.g * tt * tt, e.from.z + e.vel.z * tt];
+        };
+        const a = at(Math.max(0, e.t - 0.015));
+        const b = at(e.t);
+        const pos = e.obj.geometry.attributes.position;
+        pos.setXYZ(0, a[0], a[1], a[2]);
+        pos.setXYZ(1, b[0], b[1], b[2]);
+        pos.needsUpdate = true;
+      }
       if (e.kind === 'boom') {
         const k = e.t / e.life;
         e.obj.scale.setScalar(0.5 + 6 * k);

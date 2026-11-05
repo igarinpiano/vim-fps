@@ -13,7 +13,7 @@
   <canvas id="view"></canvas>
 
   <div id="hud" class="hidden">
-    <div id="scope" class="hidden"></div>
+    <div id="scope" class="hidden"><div id="holdover"></div></div>
     <div id="crosshair" data-mode="normal"></div>
     <div id="hitmarker" class="hidden">✕</div>
     <div id="dmgdir"></div>
@@ -71,13 +71,14 @@
     <div class="body"><pre id="msg-body"></pre><div class="hint">j / k でスクロール · Ctrl-d / Ctrl-u 半ページ · gg / G 先頭・末尾 · h / l 横 · Enter / Esc / q で閉じる</div></div>
   </div>
 
-  <!-- Death -->
-  <div id="deathwin" class="window dialog hidden">
-    <div class="titlebar"><span>vimfps</span><span class="tb-btns"><i class="x">×</i></span></div>
-    <div class="body">
-      <div class="icon-err">✕</div>
-      <div><p id="death-text"></p><p id="death-timer"></p></div>
-    </div>
+  <!-- Death: a blue stop screen, then a reboot into the respawn -->
+  <div id="bsod" class="hidden" aria-live="assertive">
+    <pre id="bsod-text"></pre>
+  </div>
+  <div id="boot" class="hidden">
+    <div class="boot-logo"><span class="flag"></span><span class="v">vim</span><span class="dash">-</span><span class="f">fps</span></div>
+    <div class="boot-bar"><i></i><i></i><i></i></div>
+    <p>再起動しています…</p>
   </div>
 
   <!-- Result -->
