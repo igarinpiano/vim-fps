@@ -1610,7 +1610,13 @@ impl Room {
                 ServerMsg::Snap {
                     left: self.left.max(0.0).ceil(),
                     intermission: self.intermission.map(|t| t.max(0.0).ceil()),
-                    players: players.clone(),
+                    // Offline practice (and the range) shows everyone's
+                    // health; in a hosted match only watchers see it.
+                    players: if self.cfg.practice {
+                        watched.clone()
+                    } else {
+                        players.clone()
+                    },
                     grenades: grenades.clone(),
                     me: Some(me),
                     watching: false,
@@ -2118,6 +2124,22 @@ mod tests {
             players.iter().all(|p| p.hp.is_none()),
             "players do not see health"
         );
+        // Offline practice: players see health too.
+        let mut r2 = Room::new(Config {
+            seed: 3,
+            practice: true,
+            bots: 2,
+            max_players: 1,
+            ..Default::default()
+        });
+        let me = r2.join("me", None, PROTOCOL, false).unwrap();
+        r2.drain();
+        r2.tick(1.0 / 20.0);
+        let hp_seen = r2.drain().iter().any(|(t, m)| {
+            matches!(m, ServerMsg::Snap { players, .. }
+                if *t == Target::One(me) && players.iter().any(|p| p.id != me && p.hp.is_some()))
+        });
+        assert!(hp_seen, "practice shows everyone's health");
         // :play joins the match; :watch leaves it.
         r.handle(w, ClientMsg::Play);
         assert!(r.players[&w].alive && !r.players[&w].spectator);

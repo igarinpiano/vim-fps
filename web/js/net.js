@@ -12,7 +12,10 @@ export class WsConnection {
     this.closed = false;
     this.ws = new WebSocket(url);
     this.ws.onopen = () => this.onopen();
+    this.stats = { bytesIn: 0, bytesOut: 0, msgsIn: 0, msgsOut: 0, kind: 'WebSocket', url };
     this.ws.onmessage = (e) => {
+      this.stats.bytesIn += e.data.length;
+      this.stats.msgsIn += 1;
       try {
         this.onmessage(JSON.parse(e.data));
       } catch (err) {
@@ -29,7 +32,12 @@ export class WsConnection {
   }
 
   send(obj) {
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(obj));
+    if (this.ws.readyState === WebSocket.OPEN) {
+      const text = JSON.stringify(obj);
+      this.stats.bytesOut += text.length;
+      this.stats.msgsOut += 1;
+      this.ws.send(text);
+    }
   }
 
   close() {
@@ -76,6 +84,7 @@ export class LocalConnection {
     this.closed = false;
     this.enc = new TextEncoder();
     this.dec = new TextDecoder();
+    this.stats = { bytesIn: 0, bytesOut: 0, msgsIn: 0, msgsOut: 0, kind: 'ブラウザ内 (wasm)', url: null };
     const bits = (mode.range ? 1 : 0) | (mode.noRespawn ? 2 : 0);
     if (mode.custom && ex.vf_new_custom) ex.vf_new_custom(seed >>> 0, bots >>> 0, bits, mode.skill || 3, mode.time || 600, mode.frags || 0);
     else if (bits && ex.vf_new_mode) ex.vf_new_mode(seed >>> 0, bots >>> 0, bits);
@@ -88,6 +97,8 @@ export class LocalConnection {
   send(obj) {
     if (this.closed) return;
     const bytes = this.enc.encode(JSON.stringify(obj));
+    this.stats.bytesOut += bytes.length;
+    this.stats.msgsOut += 1;
     const ptr = this.ex.vf_in(bytes.length);
     new Uint8Array(this.ex.memory.buffer, ptr, bytes.length).set(bytes);
     this.ex.vf_send(bytes.length);
@@ -102,7 +113,10 @@ export class LocalConnection {
     if (!n) return;
     const ptr = this.ex.vf_out();
     const text = this.dec.decode(new Uint8Array(this.ex.memory.buffer, ptr, n));
-    for (const m of JSON.parse(text)) this.onmessage(m);
+    this.stats.bytesIn += n;
+    const msgs = JSON.parse(text);
+    this.stats.msgsIn += msgs.length;
+    for (const m of msgs) this.onmessage(m);
   }
 
   close() {
