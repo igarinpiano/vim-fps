@@ -825,18 +825,32 @@ mod tests {
     #[test]
     fn firing_range_is_open_where_it_matters() {
         let m = Map::firing_range();
-        assert!(!m.blocked(m.spawns[0], PLAYER_RADIUS), "the bench spot is free");
+        assert!(
+            !m.blocked(m.spawns[0], PLAYER_RADIUS),
+            "the bench spot is free"
+        );
         assert_eq!(m.targets.len(), m.labels.len());
         for t in &m.targets {
-            assert!(!m.blocked(t.pos, PLAYER_RADIUS), "target at {:?} is free", t.pos);
+            assert!(
+                !m.blocked(t.pos, PLAYER_RADIUS),
+                "target at {:?} is free",
+                t.pos
+            );
         }
         // The rack is right behind the bench, within reach.
         for p in &m.pickups {
             assert!(p.pos.distance(m.spawns[0]) < 7.0);
         }
         // 400 m target: a clear shot from the bench at head height.
-        let far = m.targets.iter().find(|t| (m.spawns[0].z - t.pos.z - 400.0).abs() < 0.1).unwrap();
-        assert!(m.line_of_sight(m.spawns[0] + Vec3::new(0.0, 1.6, 0.0), far.pos + Vec3::new(0.0, 1.6, 0.0)));
+        let far = m
+            .targets
+            .iter()
+            .find(|t| (m.spawns[0].z - t.pos.z - 400.0).abs() < 0.1)
+            .unwrap();
+        assert!(m.line_of_sight(
+            m.spawns[0] + Vec3::new(0.0, 1.6, 0.0),
+            far.pos + Vec3::new(0.0, 1.6, 0.0)
+        ));
     }
 
     #[test]
