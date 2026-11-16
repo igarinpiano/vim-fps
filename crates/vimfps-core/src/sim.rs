@@ -229,6 +229,14 @@ pub struct BotSkill {
     pub turn: f32,
     /// Leads moving targets and aims over the bullet drop.
     pub lead: bool,
+    /// Goes for an empty tank from this far (m), and how often it sets out
+    /// for one from anywhere on the field (share of its wanderings).
+    pub tank_reach: f32,
+    pub tank_chance: f32,
+    /// Fights with its head: gets into a tank standing near a fight, takes
+    /// cover behind one when hurt, holds still to heal, throws grenades at
+    /// tanks.
+    pub tactics: bool,
 }
 
 pub fn bot_skill(level: u8) -> BotSkill {
@@ -239,6 +247,9 @@ pub fn bot_skill(level: u8) -> BotSkill {
             aim_error: 2.4,
             turn: 1.6,
             lead: false,
+            tank_reach: 30.0,
+            tank_chance: 0.3,
+            tactics: false,
         },
         2 => BotSkill {
             sight: 110.0,
@@ -246,6 +257,9 @@ pub fn bot_skill(level: u8) -> BotSkill {
             aim_error: 1.6,
             turn: 2.2,
             lead: false,
+            tank_reach: 30.0,
+            tank_chance: 0.3,
+            tactics: false,
         },
         3 => BotSkill {
             sight: BOT_SIGHT,
@@ -253,6 +267,9 @@ pub fn bot_skill(level: u8) -> BotSkill {
             aim_error: 1.0,
             turn: 2.8,
             lead: false,
+            tank_reach: 30.0,
+            tank_chance: 0.3,
+            tactics: false,
         },
         4 => BotSkill {
             sight: 170.0,
@@ -260,6 +277,9 @@ pub fn bot_skill(level: u8) -> BotSkill {
             aim_error: 0.6,
             turn: 3.6,
             lead: true,
+            tank_reach: 60.0,
+            tank_chance: 0.6,
+            tactics: true,
         },
         _ => BotSkill {
             sight: 200.0,
@@ -267,6 +287,9 @@ pub fn bot_skill(level: u8) -> BotSkill {
             aim_error: 0.3,
             turn: 4.8,
             lead: true,
+            tank_reach: 90.0,
+            tank_chance: 0.8,
+            tactics: true,
         },
     }
 }
@@ -311,6 +334,8 @@ struct Bot {
     no_tank: f32,
     /// Stuck on the way somewhere: go by the waypoint for this long.
     detour: f32,
+    /// Until the next grenade may be thrown.
+    throw_cd: f32,
     /// Where a shot was heard, and for how much longer it is interesting.
     heard: Option<(Vec3, f32)>,
     /// Firing-range dummy: stands at `home` (strafing ±strafe m) and never
@@ -919,6 +944,30 @@ impl Room {
         }
     }
 
+    /// Whether a tank's hull stands on the line from `a` to `b` (bots do not
+    /// see through one). `skip`: tanks to leave out (the ones the two ends
+    /// sit in).
+    fn tank_between(&self, a: Vec3, b: Vec3, skip: [Option<u32>; 2]) -> bool {
+        let d = b - a;
+        let len = d.length();
+        if len < 1e-4 {
+            return false;
+        }
+        let dir = d * (1.0 / len);
+        let r = TANK_RADIUS * 0.85;
+        self.tanks
+            .iter()
+            .filter(|t| t.alive && !skip.contains(&Some(t.id)))
+            .any(|t| {
+                Aabb::new(
+                    t.pos + Vec3::new(-r, 0.0, -r),
+                    t.pos + Vec3::new(r, TANK_HEIGHT, r),
+                )
+                .ray(a, dir, len)
+                .is_some()
+            })
+    }
+
     /// What a segment from `from` along `dir` (length `max`) meets first
     /// among players and tanks: (distance, what). Drivers sit inside their
     /// tank; `owner` and its own tank are passed through.
@@ -1336,6 +1385,7 @@ impl Room {
                 stuck_n: 0,
                 no_tank: 0.0,
                 detour: 0.0,
+                throw_cd: 0.0,
                 heard: None,
                 dummy: self.map.targets.get(bots.len()).map(|t| (t.pos, t.strafe)),
             };
@@ -2261,7 +2311,23 @@ impl Room {
                 g.vel.x *= 0.7;
                 g.vel.z *= 0.7;
             }
-            let inside = |p: Vec3| self.map.solids.iter().any(|s| s.aabb.contains(p));
+            // Solids, and tanks (a grenade bounces off a hull).
+            let hulls: Vec<Aabb> = self
+                .tanks
+                .iter()
+                .filter(|t| t.alive)
+                .map(|t| {
+                    let r = TANK_RADIUS * 0.85;
+                    Aabb::new(
+                        t.pos + Vec3::new(-r, 0.0, -r),
+                        t.pos + Vec3::new(r, TANK_HEIGHT, r),
+                    )
+                })
+                .collect();
+            let inside = |p: Vec3| {
+                self.map.solids.iter().any(|s| s.aabb.contains(p))
+                    || hulls.iter().any(|h| h.contains(p))
+            };
             if inside(n) {
                 if inside(Vec3::new(n.x, g.pos.y, g.pos.z)) {
                     n.x = g.pos.x;
@@ -2513,13 +2579,25 @@ impl Room {
                 .iter()
                 .filter(|t| t.alive && t.driver.is_none())
                 .map(|t| (t.pos, (t.pos - me.pos).length_xz()))
-                .filter(|(_, d)| *d < 30.0)
+                .filter(|(_, d)| *d < skill.tank_reach)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
+        };
+        // Tanks nobody drives, close enough to hide behind.
+        let cover_tanks: Vec<Vec3> = if skill.tactics && !driving {
+            self.tanks
+                .iter()
+                .filter(|t| t.alive && t.driver.is_none())
+                .map(|t| t.pos)
+                .filter(|t| (*t - me.pos).length_xz() < 25.0)
+                .collect()
+        } else {
+            Vec::new()
         };
         // Nearest visible enemy within its sight; the nearest running one
         // close by is heard even without a line of sight.
         let mut seen: Option<(ClientId, Vec3, f32)> = None;
         let mut seen_vel = Vec3::ZERO;
+        let mut seen_in_tank = false;
         let mut steps: Option<(Vec3, f32)> = None;
         for o in self.players.values() {
             if o.id == id || !o.alive {
@@ -2537,9 +2615,12 @@ impl Room {
             if d > skill.sight || seen.is_some_and(|s| s.2 < d) {
                 continue;
             }
-            if self.map.line_of_sight(eye, chest) {
+            if self.map.line_of_sight(eye, chest)
+                && !self.tank_between(eye, chest, [me.tank, o.tank])
+            {
                 seen = Some((o.id, chest, d));
                 seen_vel = o.vel;
+                seen_in_tank = o.tank.is_some();
             }
         }
         // Hurt with no medkit on it: a medkit lying nearby is worth a detour.
@@ -2572,7 +2653,7 @@ impl Room {
             if !driving
                 && !free.is_empty()
                 && me.bot.as_ref().unwrap().no_tank <= 0.0
-                && self.rng.chance(0.3)
+                && self.rng.chance(skill.tank_chance)
             {
                 p = free[self.rng.below(free.len())];
             }
@@ -2606,6 +2687,7 @@ impl Room {
         };
         let mut want_use = false;
         let mut want_reload = false;
+        let mut want_throw = None;
         let err = (self.rng.range(-1.0, 1.0), self.rng.range(-1.0, 1.0));
         let p = self.players.get_mut(&id).unwrap();
         let pos = p.pos;
@@ -2642,6 +2724,7 @@ impl Room {
         }
         b.no_tank = (b.no_tank - dt).max(0.0);
         b.detour = (b.detour - dt).max(0.0);
+        b.throw_cd = (b.throw_cd - dt).max(0.0);
         b.err_timer -= dt;
         if b.err_timer <= 0.0 {
             b.err_timer = 0.6;
@@ -2702,7 +2785,70 @@ impl Room {
                 p.yaw = wrap_angle(p.yaw + dy.clamp(-step, step));
                 p.pitch += (want_pitch - p.pitch).clamp(-step, step);
                 let aimed = dy.abs() < 0.06;
-                if let Some(h) = hull
+                // With its head (strong bots, on foot, the enemy not on top
+                // of it): a tank standing by is armour to get into; hurt or
+                // out of rounds, its far side is cover.
+                let enemy = chest;
+                let fall_back = if !skill.tactics || driving || dist < 8.0 {
+                    None
+                } else if let Some((t, d)) =
+                    near_tank.filter(|(_, d)| *d < 15.0 || (*d < 45.0 && *d < dist * 0.5))
+                {
+                    want_use = d < TANK_ENTER - 0.6;
+                    Some(t)
+                } else if p.hp < 55.0 || p.reload.is_some() {
+                    cover_tanks
+                        .iter()
+                        .map(|t| {
+                            let away = Vec3::new(t.x - enemy.x, 0.0, t.z - enemy.z).normalize();
+                            *t + away * (TANK_RADIUS + 1.2)
+                        })
+                        .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)))
+                } else {
+                    None
+                };
+                // Bullets barely scratch a tank: a grenade under it does.
+                if skill.tactics
+                    && !driving
+                    && seen_in_tank
+                    && ready
+                    && p.inv.grenades > 0
+                    && b.throw_cd <= 0.0
+                    && dy.abs() < 0.15
+                    && (8.0..32.0).contains(&dist)
+                {
+                    // Thrown about 14° above the line of sight, a grenade
+                    // lands at some 60% of the way and rolls the rest: the
+                    // speed for that, as a power 1..=5.
+                    let v = (dist * 10.5).sqrt();
+                    want_throw = Some((((v - 6.0) / 3.5).round() as u32).clamp(1, MAX_THROW));
+                    b.throw_cd = 3.5;
+                }
+                if let Some(goal) = fall_back {
+                    let d = goal - pos;
+                    if d.length_xz() > 0.8 {
+                        let want = (-d.x).atan2(-d.z);
+                        let dy = wrap_angle(want - p.yaw);
+                        let step = 6.0 * dt;
+                        p.yaw = wrap_angle(p.yaw + dy.clamp(-step, step));
+                        p.input = InputState {
+                            mz: if dy.abs() < 0.8 { 1 } else { 0 },
+                            ..Default::default()
+                        };
+                    } else {
+                        // There (and still in sight): down, and shoot back.
+                        p.input = InputState {
+                            sneak: true,
+                            ads: true,
+                            zoom: 1,
+                            fire: ready && aimed,
+                            ..Default::default()
+                        };
+                        if ready && aimed && p.cooldown <= 0.0 {
+                            p.trigger = 0.1;
+                        }
+                    }
+                } else if let Some(h) = hull
                     && (dist < 14.0 || (dist > 90.0 && !aimed))
                 {
                     // Too close for the gun (its own blast): run them over.
@@ -2740,6 +2886,8 @@ impl Room {
                 let goal = match ring_goal {
                     _ if b.detour > 0.0 => b.waypoint,
                     Some(c) if outside_next => c,
+                    // Strong bots take the tank before looking into a noise.
+                    _ if skill.tactics && tank_goal.is_some() => tank_goal.unwrap(),
                     _ => b
                         .heard
                         .map(|(p, _)| p)
@@ -2753,13 +2901,24 @@ impl Room {
                 let step = 2.5 * dt;
                 p.yaw = wrap_angle(p.yaw + dy.clamp(-step, step));
                 p.pitch *= 0.9;
-                let (mx, mz) = match hull {
+                let (mx, mut mz) = match hull {
                     Some(h) => drive(h, want_yaw),
                     None => (0, if dy.abs() < 0.6 { 1 } else { 0 }),
                 };
+                // Strong bots stay down where they are (out of sight) until
+                // the medkit has done its work.
+                let hold = skill.tactics
+                    && !driving
+                    && !outside_next
+                    && p.hp < BOT_HEAL_BELOW
+                    && p.inv.medkits > 0;
+                if hold {
+                    mz = 0;
+                }
                 p.input = InputState {
                     mx,
                     mz,
+                    sneak: hold,
                     ..Default::default()
                 };
                 // Hurt and out of sight: use a medkit (walking on). Then back
@@ -2788,6 +2947,9 @@ impl Room {
         }
         if want_use {
             self.use_key(id);
+        }
+        if let Some(power) = want_throw {
+            self.throw(id, power);
         }
     }
 
@@ -3796,5 +3958,149 @@ mod tests {
             }
         }
         let _ = (drivers, shells);
+    }
+    /// A flat field, one bot of the given skill, a tank parked at (20, 0).
+    fn bot_and_tank(skill: u8) -> (Room, ClientId, ClientId) {
+        use crate::map::GRID;
+        let half = crate::map::HALF;
+        let map = Map {
+            seed: 0,
+            half,
+            grid: GRID,
+            cell: 2.0 * half / (GRID - 1) as f32,
+            heights: vec![0.0; GRID * GRID],
+            solids: Vec::new(),
+            trees: Vec::new(),
+            spawns: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(50.0, 0.0, 50.0)],
+            pickups: Vec::new(),
+            targets: Vec::new(),
+            labels: Vec::new(),
+            tanks: vec![Vec3::new(20.0, 0.0, 0.0)],
+            top: Default::default(),
+        };
+        let mut r = Room::with_map(
+            Config {
+                bots: 1,
+                bot_skill: skill,
+                ring: false,
+                ..Default::default()
+            },
+            map,
+        );
+        let bot = *r.players.keys().next().unwrap();
+        let a = r.join("a", None, PROTOCOL, false).unwrap();
+        (r, bot, a)
+    }
+
+    #[test]
+    fn strong_bots_hide_behind_a_tank_when_hurt() {
+        // The enemy stands 40 m down -Z from the tank; the bot, hurt, a few
+        // metres to the tank's side, in the open.
+        let run = |skill: u8| {
+            let (mut r, bot, a) = bot_and_tank(skill);
+            r.teleport(a, Vec3::new(20.0, 0.0, -40.0), std::f32::consts::PI);
+            r.teleport(bot, Vec3::new(28.0, 0.0, 6.0), 0.0);
+            let p = r.players.get_mut(&bot).unwrap();
+            p.hp = 40.0;
+            p.inv.medkits = 0;
+            // Not into it: behind it.
+            p.bot.as_mut().unwrap().no_tank = 1.0e6;
+            r.players.get_mut(&a).unwrap().protect = 1.0e6;
+            let mut hidden = 0;
+            for _ in 0..(8.0 * 60.0) as usize {
+                r.tick(1.0 / 60.0);
+                r.players.get_mut(&bot).unwrap().hp = 40.0;
+                let eye = r.player_pos(a).unwrap() + Vec3::new(0.0, 1.6, 0.0);
+                let chest = r.player_pos(bot).unwrap() + Vec3::new(0.0, 1.2, 0.0);
+                if r.tank_between(eye, chest, [None, None]) {
+                    hidden += 1;
+                }
+            }
+            assert!(r.players[&bot].tank.is_none());
+            hidden
+        };
+        let strong = run(5);
+        assert!(strong > 3 * 60, "hidden for {strong} ticks");
+        assert_eq!(run(3), 0);
+    }
+
+    #[test]
+    fn strong_bots_get_into_a_tank_next_to_a_fight() {
+        let run = |skill: u8| {
+            let (mut r, bot, a) = bot_and_tank(skill);
+            r.teleport(a, Vec3::new(20.0, 0.0, -60.0), std::f32::consts::PI);
+            r.teleport(bot, Vec3::new(29.0, 0.0, 6.0), 0.0);
+            r.players.get_mut(&a).unwrap().protect = 1.0e6;
+            for _ in 0..(6.0 * 60.0) as usize {
+                r.tick(1.0 / 60.0);
+                if r.players[&bot].tank.is_some() {
+                    return true;
+                }
+            }
+            false
+        };
+        assert!(run(4));
+        assert!(!run(2));
+    }
+
+    #[test]
+    fn strong_bots_throw_grenades_at_tanks() {
+        let run = |skill: u8| {
+            let (mut r, bot, a) = bot_and_tank(skill);
+            r.teleport(a, Vec3::new(17.0, 0.0, 0.0), 0.0);
+            r.handle(a, ClientMsg::Use);
+            assert!(r.players[&a].tank.is_some());
+            r.teleport(bot, Vec3::new(20.0, 0.0, 22.0), 0.0);
+            r.players.get_mut(&bot).unwrap().inv.grenades = 3;
+            let mut booms = 0;
+            for _ in 0..(12.0 * 60.0) as usize {
+                r.tick(1.0 / 60.0);
+                for (_, m) in r.drain() {
+                    if let ServerMsg::Explode { pos } = m {
+                        booms += 1;
+                        let _ = pos;
+                    }
+                }
+            }
+            (booms, TANK_HP - r.tanks[0].hp)
+        };
+        let (booms, dmg) = run(5);
+        assert!(booms >= 2, "booms {booms}");
+        // More than the bullets alone would have done.
+        let (weak_booms, weak_dmg) = run(3);
+        assert_eq!(weak_booms, 0);
+        assert!(dmg > weak_dmg + 60.0, "{dmg} vs {weak_dmg}");
+    }
+
+    #[test]
+    fn stronger_bots_take_tanks_more() {
+        // How often a bot gets into a tank, over a few fields.
+        let boardings = |skill: u8| {
+            let mut total = 0;
+            for seed in [5, 6, 7, 8] {
+                let mut r = Room::new(Config {
+                    seed,
+                    bots: 6,
+                    bot_skill: skill,
+                    frag_limit: u32::MAX,
+                    ..Default::default()
+                });
+                let mut was = vec![false; r.tanks.len()];
+                for _ in 0..(180.0 * 60.0) as usize {
+                    r.tick(1.0 / 60.0);
+                    r.drain();
+                    for (i, t) in r.tanks.iter().enumerate() {
+                        let now = t.driver.is_some();
+                        if now && !was[i] {
+                            total += 1;
+                        }
+                        was[i] = now;
+                    }
+                }
+            }
+            total
+        };
+        let (weak, strong) = (boardings(2), boardings(5));
+        assert!(strong > weak, "strong {strong} weak {weak}");
     }
 }
