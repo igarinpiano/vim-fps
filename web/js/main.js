@@ -750,12 +750,12 @@ window.addEventListener('drop', (e) => {
 function showSounds() {
   sound.wake();
   const st = sound.sampleStatus();
-  const word = { file: 'ファイルを再生', synth: 'ファイルなし (代わりの合成音)', '?': '確認中 (キーを押してからもう一度)' };
+  const word = { file: 'ファイルを再生', none: 'ファイルなし (無音)', '?': '確認中 (キーを押してからもう一度)' };
   const L = ['次の 3 つの場面で音声ファイルを鳴らします。ファイルは同梱していません: web/assets/sounds/ に置いてください。', ''];
   for (const [name, when] of Object.entries(EVENT_SOUNDS)) L.push(`  ${`${name}.wav`.padEnd(13)} ${when.padEnd(22)} ${word[st[name]]}`);
   L.push('');
   L.push('  .wav の代わりに .mp3 / .ogg でも読みます (startup.mp3 など)。ファイル名は半角英数字のこの名前のままにしてください。');
-  L.push('  音量は :set volume=70。ファイルが無い間は短い合成音が鳴ります。');
+  L.push('  音量は :set volume=70。ファイルが無い場面では何も鳴りません。');
   showMsg(':sounds — 効果音のファイル', L);
 }
 

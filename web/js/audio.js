@@ -3,8 +3,8 @@
 // spawning, being killed and the end of a match (see EVENT_SOUNDS).
 
 /// Event sounds: files in web/assets/sounds/, named <event>.wav (or .mp3 /
-/// .ogg). They are not shipped with the game: drop your own in. Until a
-/// file is there, a short synthesized chime stands in.
+/// .ogg). They are not shipped with the game: drop your own in. Without a
+/// file the moment passes in silence.
 export const EVENT_SOUNDS = {
   startup: 'スポーン時 (起動音)',
   error: 'キルされた時 (エラー音)',
@@ -77,13 +77,13 @@ export class Sound {
     }
   }
 
-  /// For each event sound: 'file' (loaded), 'synth' (no file: the stand-in
-  /// chime) or '?' (not loaded yet).
+  /// For each event sound: 'file' (loaded), 'none' (no file: silent) or
+  /// '?' (not loaded yet).
   sampleStatus() {
     const out = {};
     for (const name of Object.keys(EVENT_SOUNDS)) {
       const v = this.samples.get(name);
-      out[name] = v === 'missing' ? 'synth' : v && typeof v.then !== 'function' ? 'file' : '?';
+      out[name] = v === 'missing' ? 'none' : v && typeof v.then !== 'function' ? 'file' : '?';
     }
     return out;
   }
@@ -100,10 +100,8 @@ export class Sound {
     }
     this.queued = null;
     this.stopEvent();
-    if (buf === 'missing') {
-      this.chime(name);
-      return;
-    }
+    // No file: nothing plays.
+    if (buf === 'missing') return;
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
     const g = this.ctx.createGain();
@@ -126,15 +124,6 @@ export class Sound {
     } catch {
       // Already stopped.
     }
-  }
-
-  /// Stand-ins while there is no file: a rising, a flat and a falling chime.
-  chime(name) {
-    const err = name === 'error';
-    const notes = { startup: [523, 659, 784, 1047], error: [220, 208], shutdown: [784, 659, 523, 392] }[name] || [660];
-    notes.forEach((freq, i) => {
-      setTimeout(() => this.tone({ freq, dur: err ? 0.22 : 0.3, gain: 0.14, type: err ? 'square' : 'sine' }), i * (err ? 160 : 130));
-    });
   }
 
   listener(x, y, z, yaw) {
