@@ -751,11 +751,11 @@ function showSounds() {
   sound.wake();
   const st = sound.sampleStatus();
   const word = { file: 'ファイルを再生', none: 'ファイルなし (無音)', '?': '確認中 (キーを押してからもう一度)' };
-  const L = ['次の 3 つの場面で音声ファイルを鳴らします。ファイルは同梱していません: web/assets/sounds/ に置いてください。', ''];
+  const L = ['次の場面で web/assets/sounds/ の音声ファイルを鳴らします。', ''];
   for (const [name, when] of Object.entries(EVENT_SOUNDS)) L.push(`  ${`${name}.wav`.padEnd(13)} ${when.padEnd(22)} ${word[st[name]]}`);
   L.push('');
   L.push('  .wav の代わりに .mp3 / .ogg でも読みます (startup.mp3 など)。ファイル名は半角英数字のこの名前のままにしてください。');
-  L.push('  音量は :set volume=70。ファイルが無い場面では何も鳴りません。');
+  L.push('  音量は :set volume=70。ファイルが無い場面では何も鳴りません (被弾だけは合成音)。');
   showMsg(':sounds — 効果音のファイル', L);
 }
 
@@ -1242,7 +1242,10 @@ function onMessage(m) {
         damageArc(m.from);
         // Outside the ring (you "hit" yourself): a tick, and the arc points
         // back to the middle of the circle.
-        if (m.attacker === m.victim && ringOutside() > 0) sound.ringTick();
+        // error2 from its file; without one, the synthesized sounds.
+        if (sound.damage()) {
+          // Played.
+        } else if (m.attacker === m.victim && ringOutside() > 0) sound.ringTick();
         else sound.hurt();
       }
       break;

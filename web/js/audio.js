@@ -1,6 +1,7 @@
 // Sounds. Gunfire, steps and the like are synthesized (no audio files),
-// positional with a PannerNode. Three moments play a sound file instead:
-// spawning, being killed and the end of a match (see EVENT_SOUNDS).
+// positional with a PannerNode. A few moments play a sound file instead:
+// spawning, being killed, taking damage and the end of a match (see
+// EVENT_SOUNDS).
 
 /// Event sounds: files in web/assets/sounds/, named <event>.wav (or .mp3 /
 /// .ogg). They are not shipped with the game: drop your own in. Without a
@@ -8,6 +9,7 @@
 export const EVENT_SOUNDS = {
   startup: 'スポーン時 (起動音)',
   error: 'キルされた時 (エラー音)',
+  error2: '被弾した時 (ダメージを受けるたび)',
   shutdown: '試合終了時 (システム終了音)',
 };
 const SOUND_EXTS = ['wav', 'mp3', 'ogg'];
@@ -112,6 +114,26 @@ export class Sound {
     src.onended = () => {
       if (this.playing && this.playing.src === src) this.playing = null;
     };
+  }
+
+  /// Taking damage: error2 from its file, over whatever else plays (it
+  /// does not cut the event sounds off). Hits that come faster than a few
+  /// a second share one play. Returns false when there is no file (the
+  /// caller then plays its synthesized sound).
+  damage() {
+    if (!this.ctx) return true;
+    const buf = this.samples.get('error2');
+    if (!buf || buf === 'missing' || typeof buf.then === 'function') return false;
+    const now = performance.now();
+    if (this.lastDamage && now - this.lastDamage < 180) return true;
+    this.lastDamage = now;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const g = this.ctx.createGain();
+    g.gain.value = 0.8;
+    src.connect(g).connect(this.master);
+    src.start();
+    return true;
   }
 
   stopEvent() {
