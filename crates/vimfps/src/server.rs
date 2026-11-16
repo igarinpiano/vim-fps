@@ -52,6 +52,12 @@ pub struct HostArgs {
     /// 復活なし: 最後の 1 人が勝つラウンド制。倒された人は倒した相手の視点で観戦
     #[arg(long)]
     pub no_respawn: bool,
+    /// リングなし (既定: 段階的に縮む円の外にいるとダメージ)
+    #[arg(long)]
+    pub no_ring: bool,
+    /// 戦車なし (既定: マップに 3 両)
+    #[arg(long)]
+    pub no_tanks: bool,
     /// 起動時に新しいバージョンを確認しない
     #[arg(long)]
     pub no_update_check: bool,
@@ -79,6 +85,8 @@ impl Default for HostArgs {
             seed: None,
             name: "vim-fps".into(),
             no_respawn: false,
+            no_ring: false,
+            no_tanks: false,
             no_update_check: false,
             no_network_check: false,
             web: crate::webclient::DEFAULT_WEB.into(),
@@ -145,6 +153,8 @@ async fn host(args: HostArgs) -> i32 {
         respawn: !args.no_respawn,
         range: false,
         bot_skill: args.bot_skill,
+        ring: !args.no_ring,
+        tanks: !args.no_tanks,
     };
     let addr = SocketAddr::new(args.bind, args.port);
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -164,6 +174,8 @@ async fn host(args: HostArgs) -> i32 {
         "respawn": cfg.respawn,
         "bots": cfg.bots,
         "bot_skill": cfg.bot_skill,
+        "ring": cfg.ring,
+        "tanks": cfg.tanks,
     });
     let source = args.web.clone();
     let files = tokio::task::spawn_blocking(move || crate::webclient::initial(&source))

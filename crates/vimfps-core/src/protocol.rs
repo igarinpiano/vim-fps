@@ -8,7 +8,7 @@ use crate::weapons::{Gun, Inventory, Slot};
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a message changes shape. Client and server must agree.
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 fn default_bot_skill() -> u8 {
     3
@@ -65,6 +65,8 @@ pub enum ClientMsg {
     },
     /// `y`: pick up the gun at your feet.
     Pickup,
+    /// `e`: get into the tank next to you, or out of the one you drive.
+    Use,
     Chat {
         text: String,
     },
@@ -113,6 +115,45 @@ pub struct PlayerState {
     /// Health, sent only to those who are watching.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hp: Option<f32>,
+    /// The tank this player drives (they sit inside: no body to see or hit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tank: Option<u32>,
+}
+
+/// A tank on the field (destroyed ones are not listed until they come back).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TankState {
+    pub id: u32,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    /// Where the hull points.
+    pub yaw: f32,
+    /// Where the turret points (the driver's view), and the gun's elevation.
+    pub aim: f32,
+    pub pitch: f32,
+    pub hp: f32,
+    pub driver: Option<ClientId>,
+    /// Loading the next shell: 0..1, or -1 when ready.
+    pub reload: f32,
+}
+
+/// The ring: outside the circle (x, z, r) everyone loses `dps` health a
+/// second. It shrinks in stages toward (nx, nz, nr).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RingState {
+    pub x: f32,
+    pub z: f32,
+    pub r: f32,
+    pub nx: f32,
+    pub nz: f32,
+    pub nr: f32,
+    /// Seconds until it starts shrinking (or, while shrinking, until it
+    /// stops); -1 once it has reached its last size.
+    pub t: f32,
+    pub shrinking: bool,
+    pub dps: f32,
+    pub stage: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -194,6 +235,34 @@ pub struct Specs {
     pub gravity: f32,
     pub tick_rate: f32,
     pub snap_rate: f32,
+    // Tanks.
+    #[serde(default)]
+    pub tank_hp: f32,
+    #[serde(default)]
+    pub tank_speed: f32,
+    #[serde(default)]
+    pub tank_reverse: f32,
+    /// Hull turn rate (degrees a second).
+    #[serde(default)]
+    pub tank_turn: f32,
+    /// Share of a bullet's damage that gets through the armour.
+    #[serde(default)]
+    pub tank_bullet_factor: f32,
+    #[serde(default)]
+    pub tank_respawn: f32,
+    #[serde(default)]
+    pub shell_speed: f32,
+    #[serde(default)]
+    pub shell_reload: f32,
+    #[serde(default)]
+    pub shell_radius: f32,
+    #[serde(default)]
+    pub shell_damage: f32,
+    // The ring: radius of each stage (metres) and damage a second outside.
+    #[serde(default)]
+    pub ring_radii: Vec<f32>,
+    #[serde(default)]
+    pub ring_dps: Vec<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -201,6 +270,10 @@ pub struct Specs {
 pub enum Cause {
     Gun(Gun),
     Grenade,
+    /// A tank: its shell, or being run over.
+    Tank,
+    /// Outside the ring for too long.
+    Ring,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -225,6 +298,9 @@ pub enum ServerMsg {
         /// Bot skill 1..=5.
         #[serde(default = "default_bot_skill")]
         bot_skill: u8,
+        /// The ring is on (a shrinking circle; outside it hurts).
+        #[serde(default)]
+        ring: bool,
     },
     Error {
         text: String,
@@ -241,6 +317,10 @@ pub enum ServerMsg {
         /// Watching (spectator, or out of a no-respawn round).
         #[serde(default)]
         watching: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tanks: Vec<TankState>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ring: Option<RingState>,
     },
     Roster {
         players: Vec<RosterEntry>,
@@ -258,6 +338,14 @@ pub enum ServerMsg {
         #[serde(default)]
         vel: Vec3,
         gun: Gun,
+    },
+    /// A tank fired: the shell flies the arc from `from` at `vel` and bursts
+    /// at `to` (or earlier, on whoever it meets: an `Explode` says where).
+    Shell {
+        id: ClientId,
+        from: Vec3,
+        to: Vec3,
+        vel: Vec3,
     },
     Hit {
         attacker: ClientId,
