@@ -9,6 +9,30 @@ export const STEP = 0.45;
 
 export const eyeHeight = (sneak) => (sneak ? 1.15 : 1.6);
 
+// Tanks (crates/vimfps-core/src/sim.rs: TANK_*): the driver's eye height,
+// the hull's radius and height, how close `e` gets you in, the gun's
+// elevation limits (radians), and the field of view when aiming.
+export const TANK = { eye: 2.6, radius: 2.0, height: 2.4, enter: 4.5, pitch: [-0.17, 0.5], ads: 45, scope: 18 };
+
+/// Walkers do not pass through tanks: a position inside a hull is moved out
+/// to its edge (as the server does). tanks: [{x, y, z}].
+export function pushOutOfTanks(world, pos, tanks) {
+  let p = pos;
+  const min = TANK.radius + 0.35;
+  for (const t of tanks) {
+    const dx = p.x - t.x;
+    const dz = p.z - t.z;
+    const d = Math.hypot(dx, dz);
+    if (d >= min || Math.abs(p.y - t.y) >= TANK.height) continue;
+    const ux = d > 1e-3 ? dx / d : 1;
+    const uz = d > 1e-3 ? dz / d : 0;
+    const x = t.x + ux * min;
+    const z = t.z + uz * min;
+    if (!world.blocked(x, z, PLAYER_RADIUS)) p = { x, y: world.height(x, z), z };
+  }
+  return p;
+}
+
 // Client-only numbers (field of view when aiming); the rules themselves
 // come from the server in the welcome message (`:spec`).
 export const GUNS = {

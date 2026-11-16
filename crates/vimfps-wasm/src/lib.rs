@@ -44,7 +44,8 @@ pub extern "C" fn vf_new(seed: u32, bots: u32) {
 }
 
 /// Starts a practice room with options: mode bit 1 = firing range,
-/// bit 2 = no respawn (last one standing).
+/// bit 2 = no respawn (last one standing), bit 4 = no ring, bit 8 = no
+/// tanks.
 #[unsafe(no_mangle)]
 pub extern "C" fn vf_new_mode(seed: u32, bots: u32, mode: u32) {
     let cfg = Config {
@@ -54,6 +55,8 @@ pub extern "C" fn vf_new_mode(seed: u32, bots: u32, mode: u32) {
         max_players: 1,
         range: mode & 1 != 0,
         respawn: mode & 2 == 0,
+        ring: mode & 4 == 0,
+        tanks: mode & 8 == 0,
         ..Default::default()
     };
     STATE.with(|s| {
@@ -85,6 +88,8 @@ pub extern "C" fn vf_new_custom(
         max_players: 1,
         range: mode & 1 != 0,
         respawn: mode & 2 == 0,
+        ring: mode & 4 == 0,
+        tanks: mode & 8 == 0,
         bot_skill: skill.clamp(1, 5) as u8,
         time_limit: time_limit.max(30) as f32,
         frag_limit: if frag_limit == 0 {

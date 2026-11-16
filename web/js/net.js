@@ -1,7 +1,7 @@
 // Connections. Both kinds look the same to the game: send(obj), and
 // onmessage(msg) / onclose(reason) callbacks.
 
-export const PROTOCOL = 3;
+export const PROTOCOL = 4;
 
 /// WebSocket to a CLI host. The page's own host when url is omitted.
 export class WsConnection {
@@ -70,7 +70,7 @@ export class LocalConnection {
     return JSON.parse(new TextDecoder().decode(new Uint8Array(ex.memory.buffer, ptr, n)));
   }
 
-  /// mode: { range, noRespawn }
+  /// mode: { range, noRespawn, noRing, noTanks }
   static async create(seed, bots, mode = {}) {
     const ex = await loadWasm();
     return new LocalConnection(ex, seed, bots, mode);
@@ -85,7 +85,7 @@ export class LocalConnection {
     this.enc = new TextEncoder();
     this.dec = new TextDecoder();
     this.stats = { bytesIn: 0, bytesOut: 0, msgsIn: 0, msgsOut: 0, kind: 'ブラウザ内 (wasm)', url: null };
-    const bits = (mode.range ? 1 : 0) | (mode.noRespawn ? 2 : 0);
+    const bits = (mode.range ? 1 : 0) | (mode.noRespawn ? 2 : 0) | (mode.noRing ? 4 : 0) | (mode.noTanks ? 8 : 0);
     if (mode.custom && ex.vf_new_custom) ex.vf_new_custom(seed >>> 0, bots >>> 0, bits, mode.skill || 3, mode.time || 600, mode.frags || 0);
     else if (bits && ex.vf_new_mode) ex.vf_new_mode(seed >>> 0, bots >>> 0, bits);
     else ex.vf_new(seed >>> 0, bots >>> 0);

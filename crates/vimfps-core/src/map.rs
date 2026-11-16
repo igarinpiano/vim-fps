@@ -22,6 +22,8 @@ const COVERS: usize = 170;
 const CRATES: usize = 110;
 const TREES: usize = 420;
 const SPAWNS: usize = 48;
+/// Tanks parked on the field.
+const TANKS: usize = 3;
 /// Rolling hills: bumps on the field (the first third of them big).
 const BUMPS: usize = 50;
 
@@ -83,6 +85,9 @@ pub struct Map {
     /// Text shown in the world (distance signs).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<Label>,
+    /// Where tanks are parked (and come back after being destroyed).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tanks: Vec<Vec3>,
     /// The highest terrain sample, worked out once (rays above it miss).
     #[serde(skip)]
     pub top: std::sync::OnceLock<f32>,
@@ -119,6 +124,7 @@ impl Map {
             pickups: Vec::new(),
             targets: Vec::new(),
             labels: Vec::new(),
+            tanks: Vec::new(),
             top: Default::default(),
         };
 
@@ -326,6 +332,32 @@ impl Map {
                 placed += 1;
             }
         }
+
+        // Tanks: on open, fairly level ground, well apart, not on a spawn
+        // point or a pickup. (Placed last, so the rest of a seed's field is
+        // what it always was.)
+        let mut tries = 0;
+        while map.tanks.len() < TANKS && tries < 4000 {
+            tries += 1;
+            let mut p = Vec3::new(
+                rng.range(-h * 0.8, h * 0.8),
+                0.0,
+                rng.range(-h * 0.8, h * 0.8),
+            );
+            p.y = map.height(p.x, p.z);
+            let level = [(3.0, 0.0), (-3.0, 0.0), (0.0, 3.0), (0.0, -3.0)]
+                .iter()
+                .all(|(dx, dz)| (map.height(p.x + dx, p.z + dz) - p.y).abs() < 0.8);
+            if !level
+                || map.blocked(p, 4.0)
+                || map.tanks.iter().any(|t| t.distance(p) < 110.0)
+                || map.spawns.iter().any(|s| s.distance(p) < 9.0)
+                || map.pickups.iter().any(|s| s.pos.distance(p) < 5.0)
+            {
+                continue;
+            }
+            map.tanks.push(Vec3::new(r2(p.x), p.y, r2(p.z)));
+        }
         map
     }
 
@@ -358,6 +390,7 @@ impl Map {
             pickups: Vec::new(),
             targets: Vec::new(),
             labels: Vec::new(),
+            tanks: Vec::new(),
             top: Default::default(),
         };
         let h = half;
@@ -440,6 +473,8 @@ impl Map {
             kind: BoxKind::Wall,
             aabb: Aabb::ground(-40.0, 170.0, 8.0, 0.4, 3.0),
         });
+        // A tank to try, parked beside the bench.
+        map.tanks.push(Vec3::new(18.0, 0.0, 206.0));
         for k in 1..=8 {
             let z = 200.0 - 50.0 * k as f32;
             map.solids.push(Solid {
@@ -646,6 +681,10 @@ impl Map {
     }
 }
 
+fn r2(v: f32) -> f32 {
+    (v * 100.0).round() / 100.0
+}
+
 /// Rolling hills: a few anisotropic bumps (some of them dips), fading to
 /// flat ground near the fence.
 fn hills(rng: &mut Rng, half: f32) -> Vec<f32> {
@@ -798,6 +837,19 @@ mod tests {
             serde_json::to_string(&a).unwrap(),
             serde_json::to_string(&b).unwrap()
         );
+    }
+
+    #[test]
+    fn tanks_are_parked_in_the_open() {
+        for seed in 0..5 {
+            let m = Map::generate(seed);
+            assert!(!m.tanks.is_empty(), "seed {seed}");
+            for t in &m.tanks {
+                assert!(!m.blocked(*t, 2.5), "seed {seed}: tank in a solid");
+            }
+        }
+        let m = Map::firing_range();
+        assert!(m.tanks.iter().all(|t| !m.blocked(*t, 2.5)));
     }
 
     #[test]

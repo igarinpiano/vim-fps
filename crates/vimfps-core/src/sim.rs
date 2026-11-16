@@ -41,6 +41,47 @@ pub const GRAVITY: f32 = 9.81;
 /// Bullets live at most this long (seconds).
 pub const BULLET_LIFE: f32 = 3.0;
 
+// ---- tanks ----
+pub const TANK_HP: f32 = 400.0;
+/// Forward and reverse speed (m/s), acceleration (m/s²), hull turn (rad/s).
+pub const TANK_SPEED: f32 = 9.0;
+pub const TANK_REVERSE: f32 = 4.0;
+pub const TANK_ACCEL: f32 = 6.0;
+pub const TANK_TURN: f32 = 0.9;
+/// Collision radius and height of a tank.
+pub const TANK_RADIUS: f32 = 2.0;
+pub const TANK_HEIGHT: f32 = 2.4;
+/// The driver looks out from this high above the ground.
+pub const TANK_EYE: f32 = 2.6;
+/// `e` gets you in from this close (to the tank's centre).
+pub const TANK_ENTER: f32 = 4.5;
+/// A destroyed tank is back at its parking spot after this long.
+pub const TANK_RESPAWN: f32 = 45.0;
+/// Bullets do this share of their damage to a tank.
+pub const TANK_BULLET_FACTOR: f32 = 0.15;
+/// The gun's elevation limits (radians).
+pub const TANK_PITCH: (f32, f32) = (-0.17, 0.5);
+/// Being run over by a tank moving at least TANK_RAM_SPEED.
+pub const TANK_RAM_DAMAGE: f32 = 200.0;
+pub const TANK_RAM_SPEED: f32 = 3.0;
+/// A destroyed tank blows up.
+pub const TANK_BLAST_RADIUS: f32 = 6.0;
+pub const TANK_BLAST_DAMAGE: f32 = 80.0;
+pub const SHELL_SPEED: f32 = 200.0;
+pub const SHELL_RELOAD: f32 = 3.0;
+pub const SHELL_RADIUS: f32 = 6.0;
+pub const SHELL_DAMAGE: f32 = 150.0;
+/// Extra damage to a tank the shell hits squarely.
+pub const SHELL_DIRECT: f32 = 100.0;
+
+// ---- the ring ----
+/// Radius after each stage, as a share of the field's half side.
+pub const RING_RADII: [f32; 5] = [0.9, 0.6, 0.38, 0.24, 0.15];
+/// Health lost per second outside, by stage (the last one from then on).
+pub const RING_DPS: [f32; 6] = [2.0, 3.0, 5.0, 8.0, 12.0, 15.0];
+/// Before the first stage the ring holds the whole field.
+pub const RING_START: f32 = 1.45;
+
 /// Where a bullet fired at `vel` from `from` is after `t` seconds (no air
 /// resistance: v·t + ½·g·t²).
 pub fn ballistic(from: Vec3, vel: Vec3, t: f32) -> Vec3 {
@@ -106,6 +147,21 @@ impl Specs {
             gravity: GRAVITY,
             tick_rate: TICK_RATE,
             snap_rate: SNAP_RATE,
+            tank_hp: TANK_HP,
+            tank_speed: TANK_SPEED,
+            tank_reverse: TANK_REVERSE,
+            tank_turn: TANK_TURN.to_degrees().round(),
+            tank_bullet_factor: TANK_BULLET_FACTOR,
+            tank_respawn: TANK_RESPAWN,
+            shell_speed: SHELL_SPEED,
+            shell_reload: SHELL_RELOAD,
+            shell_radius: SHELL_RADIUS,
+            shell_damage: SHELL_DAMAGE,
+            ring_radii: RING_RADII
+                .iter()
+                .map(|k| (k * crate::map::HALF).round())
+                .collect(),
+            ring_dps: RING_DPS.to_vec(),
         }
     }
 }
@@ -133,6 +189,10 @@ pub struct Config {
     pub range: bool,
     /// How good the bots are, 1 (very weak) ..= 5 (very strong).
     pub bot_skill: u8,
+    /// The ring: a circle that shrinks in stages; outside it hurts.
+    pub ring: bool,
+    /// Tanks parked on the field.
+    pub tanks: bool,
 }
 
 impl Default for Config {
@@ -148,6 +208,8 @@ impl Default for Config {
             respawn: true,
             range: false,
             bot_skill: 3,
+            ring: true,
+            tanks: true,
         }
     }
 }
@@ -167,6 +229,14 @@ pub struct BotSkill {
     pub turn: f32,
     /// Leads moving targets and aims over the bullet drop.
     pub lead: bool,
+    /// Goes for an empty tank from this far (m), and how often it sets out
+    /// for one from anywhere on the field (share of its wanderings).
+    pub tank_reach: f32,
+    pub tank_chance: f32,
+    /// Fights with its head: gets into a tank standing near a fight, takes
+    /// cover behind one when hurt, holds still to heal, throws grenades at
+    /// tanks.
+    pub tactics: bool,
 }
 
 pub fn bot_skill(level: u8) -> BotSkill {
@@ -177,6 +247,9 @@ pub fn bot_skill(level: u8) -> BotSkill {
             aim_error: 2.4,
             turn: 1.6,
             lead: false,
+            tank_reach: 30.0,
+            tank_chance: 0.3,
+            tactics: false,
         },
         2 => BotSkill {
             sight: 110.0,
@@ -184,6 +257,9 @@ pub fn bot_skill(level: u8) -> BotSkill {
             aim_error: 1.6,
             turn: 2.2,
             lead: false,
+            tank_reach: 30.0,
+            tank_chance: 0.3,
+            tactics: false,
         },
         3 => BotSkill {
             sight: BOT_SIGHT,
@@ -191,6 +267,9 @@ pub fn bot_skill(level: u8) -> BotSkill {
             aim_error: 1.0,
             turn: 2.8,
             lead: false,
+            tank_reach: 30.0,
+            tank_chance: 0.3,
+            tactics: false,
         },
         4 => BotSkill {
             sight: 170.0,
@@ -198,6 +277,9 @@ pub fn bot_skill(level: u8) -> BotSkill {
             aim_error: 0.6,
             turn: 3.6,
             lead: true,
+            tank_reach: 60.0,
+            tank_chance: 0.6,
+            tactics: true,
         },
         _ => BotSkill {
             sight: 200.0,
@@ -205,6 +287,9 @@ pub fn bot_skill(level: u8) -> BotSkill {
             aim_error: 0.3,
             turn: 4.8,
             lead: true,
+            tank_reach: 90.0,
+            tank_chance: 0.8,
+            tactics: true,
         },
     }
 }
@@ -242,6 +327,15 @@ struct Bot {
     err_timer: f32,
     last_pos: Vec3,
     stuck_timer: f32,
+    /// How many checks in a row it has not moved (a stuck tank is left).
+    stuck_n: u8,
+    /// No getting into a tank for this long (it just left one, or could not
+    /// reach one).
+    no_tank: f32,
+    /// Stuck on the way somewhere: go by the waypoint for this long.
+    detour: f32,
+    /// Until the next grenade may be thrown.
+    throw_cd: f32,
     /// Where a shot was heard, and for how much longer it is interesting.
     heard: Option<(Vec3, f32)>,
     /// Firing-range dummy: stands at `home` (strafing ±strafe m) and never
@@ -277,6 +371,8 @@ struct Player {
     out: bool,
     /// When it went out (match clock), for the round's ranking.
     out_at: f32,
+    /// The tank it drives.
+    tank: Option<u32>,
 }
 
 impl Player {
@@ -311,6 +407,62 @@ struct Bullet {
 }
 
 #[derive(Debug, Clone)]
+struct Tank {
+    id: u32,
+    /// Where it is parked at the start (and comes back to).
+    home: Vec3,
+    pos: Vec3,
+    /// Hull heading; the turret follows the driver's view (`aim`, `pitch`).
+    yaw: f32,
+    aim: f32,
+    pitch: f32,
+    /// Along the hull: + forward, - reverse (m/s).
+    speed: f32,
+    hp: f32,
+    alive: bool,
+    respawn: f32,
+    driver: Option<ClientId>,
+    cooldown: f32,
+}
+
+/// A tank shell in flight.
+#[derive(Debug, Clone)]
+struct Shell {
+    owner: ClientId,
+    tank: u32,
+    pos: Vec3,
+    vel: Vec3,
+    age: f32,
+}
+
+/// The ring: the circle now (`c`, `r`), and the stage it is heading for.
+#[derive(Debug, Clone)]
+struct Ring {
+    c: (f32, f32),
+    r: f32,
+    from_c: (f32, f32),
+    from_r: f32,
+    to_c: (f32, f32),
+    to_r: f32,
+    /// Stages finished so far.
+    stage: usize,
+    /// Until the shrink starts (or, while shrinking, ends).
+    timer: f32,
+    shrinking: bool,
+    /// Length of a wait and of a shrink (s).
+    unit: f32,
+    /// Damage is dealt in steps of half a second.
+    acc: f32,
+}
+
+/// What a bullet or shell met.
+#[derive(Debug, Clone, Copy)]
+enum Struck {
+    Player(ClientId, bool),
+    Tank(usize),
+}
+
+#[derive(Debug, Clone)]
 struct Grenade {
     id: u32,
     owner: ClientId,
@@ -331,6 +483,9 @@ pub struct Room {
     roster_dirty: bool,
     grenades: Vec<Grenade>,
     bullets: Vec<Bullet>,
+    tanks: Vec<Tank>,
+    shells: Vec<Shell>,
+    ring: Option<Ring>,
     left: f32,
     intermission: Option<f32>,
     snap_acc: f32,
@@ -420,12 +575,623 @@ impl Room {
             roster_dirty: true,
             grenades: Vec::new(),
             bullets: Vec::new(),
+            tanks: Vec::new(),
+            shells: Vec::new(),
+            ring: None,
             intermission: None,
             snap_acc: 0.0,
             out: Vec::new(),
         };
+        room.reset_field();
         room.sync_bots();
         room
+    }
+
+    /// Tanks back on their parking spots and the ring wide open (a new
+    /// match).
+    fn reset_field(&mut self) {
+        for p in self.players.values_mut() {
+            p.tank = None;
+        }
+        self.shells.clear();
+        self.tanks = if self.cfg.tanks {
+            self.map
+                .tanks
+                .iter()
+                .enumerate()
+                .map(|(i, &home)| {
+                    let yaw = home.x.atan2(home.z);
+                    Tank {
+                        id: i as u32,
+                        home,
+                        pos: home,
+                        yaw,
+                        aim: yaw,
+                        pitch: 0.0,
+                        speed: 0.0,
+                        hp: TANK_HP,
+                        alive: true,
+                        respawn: 0.0,
+                        driver: None,
+                        cooldown: 0.0,
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.ring = if self.cfg.ring && !self.cfg.range {
+            // A match runs through every stage in four fifths of its time;
+            // a no-respawn round (over much sooner) in at most four minutes.
+            let total = if self.cfg.respawn {
+                self.cfg.time_limit
+            } else {
+                self.cfg.time_limit.min(300.0)
+            };
+            let unit = (total * 0.08).clamp(10.0, 60.0);
+            let r = self.map.half * RING_START;
+            let mut ring = Ring {
+                c: (0.0, 0.0),
+                r,
+                from_c: (0.0, 0.0),
+                from_r: r,
+                to_c: (0.0, 0.0),
+                to_r: r,
+                stage: 0,
+                timer: unit,
+                shrinking: false,
+                unit,
+                acc: 0.0,
+            };
+            self.aim_ring(&mut ring);
+            Some(ring)
+        } else {
+            None
+        };
+    }
+
+    /// Picks the circle of the ring's next stage: inside the present one.
+    fn aim_ring(&mut self, ring: &mut Ring) {
+        let half = self.map.half;
+        let to_r = half * RING_RADII[ring.stage.min(RING_RADII.len() - 1)];
+        // Stage 0 starts from a circle wider than the field: centre the
+        // first one near the middle. After that, anywhere it fits inside.
+        let slack = if ring.stage == 0 {
+            half * 0.25
+        } else {
+            (ring.r - to_r).max(0.0)
+        };
+        let ang = self.rng.range(0.0, std::f32::consts::TAU);
+        let d = slack * self.rng.range(0.0, 1.0).sqrt();
+        let lim = (half - to_r * 0.6).max(0.0);
+        ring.to_c = (
+            (ring.c.0 + ang.cos() * d).clamp(-lim, lim),
+            (ring.c.1 + ang.sin() * d).clamp(-lim, lim),
+        );
+        ring.to_r = to_r;
+    }
+
+    fn update_ring(&mut self, dt: f32) {
+        let Some(mut ring) = self.ring.take() else {
+            return;
+        };
+        if ring.stage < RING_RADII.len() {
+            ring.timer -= dt;
+            if ring.shrinking {
+                let k = (1.0 - ring.timer / ring.unit).clamp(0.0, 1.0);
+                ring.c = (
+                    ring.from_c.0 + (ring.to_c.0 - ring.from_c.0) * k,
+                    ring.from_c.1 + (ring.to_c.1 - ring.from_c.1) * k,
+                );
+                ring.r = ring.from_r + (ring.to_r - ring.from_r) * k;
+            }
+            if ring.timer <= 0.0 {
+                if ring.shrinking {
+                    ring.shrinking = false;
+                    ring.c = ring.to_c;
+                    ring.r = ring.to_r;
+                    ring.stage += 1;
+                    ring.timer = ring.unit;
+                    if ring.stage < RING_RADII.len() {
+                        self.aim_ring(&mut ring);
+                    } else {
+                        self.sys("リングは最後の大きさになりました".into());
+                    }
+                } else {
+                    ring.shrinking = true;
+                    ring.from_c = ring.c;
+                    ring.from_r = ring.r;
+                    ring.timer = ring.unit;
+                    self.sys(format!(
+                        "リングが縮み始めました (第 {} 段階 / {})",
+                        ring.stage + 1,
+                        RING_RADII.len()
+                    ));
+                }
+            }
+        }
+        // Outside: health drains, whatever you are in.
+        ring.acc += dt;
+        let mut burn = Vec::new();
+        if ring.acc >= 0.5 {
+            ring.acc -= 0.5;
+            let dps = RING_DPS[ring.stage.min(RING_DPS.len() - 1)];
+            for p in self.players.values() {
+                let d = (p.pos.x - ring.c.0).hypot(p.pos.z - ring.c.1);
+                if p.alive && d > ring.r {
+                    burn.push((p.id, dps * 0.5, Vec3::new(ring.c.0, p.pos.y, ring.c.1)));
+                }
+            }
+        }
+        self.ring = Some(ring);
+        for (id, dmg, from) in burn {
+            self.damage(id, id, dmg, false, Cause::Ring, from);
+        }
+    }
+
+    /// The circle to be inside of: the ring's next stage (which lies within
+    /// the present one).
+    fn safe_circle(&self) -> Option<((f32, f32), f32)> {
+        self.ring.as_ref().map(|r| (r.to_c, r.to_r))
+    }
+
+    fn tank_index(&self, id: u32) -> Option<usize> {
+        self.tanks.iter().position(|t| t.id == id)
+    }
+
+    /// Takes a player out of the tank it drives (the tank stays where it
+    /// is). The player is not moved.
+    fn unseat(&mut self, id: ClientId) {
+        if let Some(p) = self.players.get_mut(&id) {
+            p.tank = None;
+        }
+        for t in &mut self.tanks {
+            if t.driver == Some(id) {
+                t.driver = None;
+            }
+        }
+    }
+
+    /// `e`: into the nearest empty tank, or out of the one being driven.
+    fn use_key(&mut self, id: ClientId) {
+        let p = &self.players[&id];
+        if !p.alive || self.intermission.is_some() {
+            return;
+        }
+        let pos = p.pos;
+        if let Some(i) = p.tank.and_then(|t| self.tank_index(t)) {
+            // Out: beside the tank, wherever there is room.
+            let t = &self.tanks[i];
+            let mut spot = None;
+            for k in [0.5f32, -0.5, 1.0, 0.0, 0.25, -0.25, 0.75, -0.75] {
+                let a = t.yaw + k * std::f32::consts::PI;
+                let d = TANK_RADIUS + 0.9;
+                let q = Vec3::new(t.pos.x - a.sin() * d, 0.0, t.pos.z - a.cos() * d);
+                if !self.map.blocked(q, 0.5) {
+                    spot = Some(q);
+                    break;
+                }
+            }
+            let mut q = spot.unwrap_or(t.pos);
+            q.y = self.map.height(q.x, q.z);
+            self.unseat(id);
+            let p = self.players.get_mut(&id).unwrap();
+            p.pos = q;
+            p.vel = Vec3::ZERO;
+            if p.bot.is_none() {
+                self.send(
+                    Target::One(id),
+                    ServerMsg::Item {
+                        text: "戦車を降りました".into(),
+                    },
+                );
+            }
+            return;
+        }
+        let near = self
+            .tanks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.alive && t.driver.is_none())
+            .map(|(i, t)| (i, (t.pos - pos).length_xz()))
+            .filter(|(_, d)| *d < TANK_ENTER)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((i, _)) = near else { return };
+        let t = &mut self.tanks[i];
+        t.driver = Some(id);
+        t.speed = 0.0;
+        let (tid, tpos) = (t.id, t.pos);
+        let p = self.players.get_mut(&id).unwrap();
+        p.tank = Some(tid);
+        p.pos = tpos;
+        p.vel = Vec3::ZERO;
+        p.reload = None;
+        p.heal = None;
+        p.trigger = 0.0;
+        if p.bot.is_none() {
+            self.send(
+                Target::One(id),
+                ServerMsg::Item {
+                    text: "戦車に乗りました (k/j 前進・後退, h/l 旋回, v 砲を構える, f 砲撃, e 降りる)".into(),
+                },
+            );
+        }
+    }
+
+    /// Whether a tank's circle at `p` is free: no solid, no other tank.
+    fn tank_free(&self, idx: usize, p: Vec3) -> bool {
+        !self.map.blocked(p, TANK_RADIUS)
+            && !self
+                .tanks
+                .iter()
+                .enumerate()
+                .any(|(j, o)| j != idx && o.alive && (o.pos - p).length_xz() < 2.0 * TANK_RADIUS)
+    }
+
+    /// One tick of a tank with someone at the controls.
+    fn update_driver(&mut self, id: ClientId, idx: usize, dt: f32) {
+        let p = self.players.get_mut(&id).unwrap();
+        p.pitch = p.pitch.clamp(TANK_PITCH.0, TANK_PITCH.1);
+        let (mx, mz) = if p.input.ads {
+            (0.0, 0.0)
+        } else {
+            (p.input.mx as f32, p.input.mz as f32)
+        };
+        let (aim, pitch) = (p.yaw, p.pitch);
+        let wants_fire = p.trigger > 0.0 || p.input.fire;
+        let t = &mut self.tanks[idx];
+        t.aim = aim;
+        t.pitch = pitch;
+        t.yaw = wrap_angle(t.yaw - mx * TANK_TURN * dt);
+        let want = if mz > 0.0 {
+            TANK_SPEED
+        } else if mz < 0.0 {
+            -TANK_REVERSE
+        } else {
+            0.0
+        };
+        // Braking is quicker than getting going.
+        let rate = if want == 0.0 || want * t.speed < 0.0 {
+            TANK_ACCEL * 2.5
+        } else {
+            TANK_ACCEL
+        };
+        t.speed += (want - t.speed).clamp(-rate * dt, rate * dt);
+        let fwd = Vec3::new(-t.yaw.sin(), 0.0, -t.yaw.cos());
+        let delta = fwd * (t.speed * dt);
+        let before = t.pos;
+        let speed = t.speed;
+        // Sub-steps, sliding along whatever is in the way.
+        let steps = ((delta.length_xz() / 0.25).ceil() as usize).max(1);
+        let step = delta * (1.0 / steps as f32);
+        let mut q = before;
+        for _ in 0..steps {
+            let nx = Vec3::new(q.x + step.x, q.y, q.z);
+            if self.tank_free(idx, nx) {
+                q = nx;
+            }
+            let nz = Vec3::new(q.x, q.y, q.z + step.z);
+            if self.tank_free(idx, nz) {
+                q = nz;
+            }
+        }
+        q.y = self.map.height(q.x, q.z);
+        let moved = (q - before).length_xz();
+        let t = &mut self.tanks[idx];
+        t.pos = q;
+        if moved < delta.length_xz() * 0.5 {
+            // Ran into something.
+            t.speed *= 0.5;
+        }
+        let p = self.players.get_mut(&id).unwrap();
+        p.pos = q;
+        p.vel = if dt > 0.0 {
+            Vec3::new((q.x - before.x) / dt, 0.0, (q.z - before.z) / dt)
+        } else {
+            Vec3::ZERO
+        };
+        // Whoever is under the tracks.
+        if speed.abs() >= TANK_RAM_SPEED && moved > 0.0 {
+            let hit: Vec<ClientId> = self
+                .players
+                .values()
+                .filter(|o| o.id != id && o.alive && o.tank.is_none())
+                .filter(|o| {
+                    (o.pos - q).length_xz() < TANK_RADIUS + 0.3 && (o.pos.y - q.y).abs() < 2.5
+                })
+                .map(|o| o.id)
+                .collect();
+            for v in hit {
+                self.damage(v, id, TANK_RAM_DAMAGE, false, Cause::Tank, q);
+            }
+        }
+        if wants_fire {
+            self.fire_shell(id, idx);
+        }
+    }
+
+    fn fire_shell(&mut self, id: ClientId, idx: usize) {
+        let t = &mut self.tanks[idx];
+        if t.cooldown > 0.0 || !t.alive {
+            return;
+        }
+        t.cooldown = SHELL_RELOAD;
+        let (tid, tpos) = (t.id, t.pos);
+        let p = self.players.get_mut(&id).unwrap();
+        p.trigger = 0.0;
+        p.protect = 0.0;
+        let from = tpos + Vec3::new(0.0, TANK_EYE, 0.0);
+        let vel = Vec3::from_angles(p.yaw, p.pitch) * SHELL_SPEED;
+        let to = self.world_impact(from, vel, SHELL_SPEED * BULLET_LIFE);
+        self.shells.push(Shell {
+            owner: id,
+            tank: tid,
+            pos: from,
+            vel,
+            age: 0.0,
+        });
+        self.send(Target::All, ServerMsg::Shell { id, from, to, vel });
+        for p in self.players.values_mut() {
+            if p.id == id || !p.alive {
+                continue;
+            }
+            if let Some(b) = &mut p.bot
+                && b.target.is_none()
+                && p.pos.distance(from) < BOT_HEARING * 1.5
+            {
+                b.heard = Some((from, 5.0));
+            }
+        }
+    }
+
+    /// Whether a tank's hull stands on the line from `a` to `b` (bots do not
+    /// see through one). `skip`: tanks to leave out (the ones the two ends
+    /// sit in).
+    fn tank_between(&self, a: Vec3, b: Vec3, skip: [Option<u32>; 2]) -> bool {
+        let d = b - a;
+        let len = d.length();
+        if len < 1e-4 {
+            return false;
+        }
+        let dir = d * (1.0 / len);
+        let r = TANK_RADIUS * 0.85;
+        self.tanks
+            .iter()
+            .filter(|t| t.alive && !skip.contains(&Some(t.id)))
+            .any(|t| {
+                Aabb::new(
+                    t.pos + Vec3::new(-r, 0.0, -r),
+                    t.pos + Vec3::new(r, TANK_HEIGHT, r),
+                )
+                .ray(a, dir, len)
+                .is_some()
+            })
+    }
+
+    /// What a segment from `from` along `dir` (length `max`) meets first
+    /// among players and tanks: (distance, what). Drivers sit inside their
+    /// tank; `owner` and its own tank are passed through.
+    fn strike(
+        &self,
+        from: Vec3,
+        dir: Vec3,
+        max: f32,
+        owner: ClientId,
+        own_tank: Option<u32>,
+    ) -> Option<(f32, Struck)> {
+        let mut best = max;
+        let mut hit = None;
+        for p in self.players.values() {
+            if p.id == owner || !p.alive || p.tank.is_some() {
+                continue;
+            }
+            let sneak = p.input.sneak;
+            let head_c = p.pos + Vec3::new(0.0, if sneak { 1.22 } else { 1.67 }, 0.0);
+            if let Some(t) = ray_sphere(from, dir, head_c, HEAD_RADIUS, best)
+                && t < best
+            {
+                best = t;
+                hit = Some(Struck::Player(p.id, true));
+            }
+            let body = Aabb::new(
+                p.pos + Vec3::new(-0.33, 0.0, -0.33),
+                p.pos + Vec3::new(0.33, if sneak { 1.0 } else { 1.45 }, 0.33),
+            );
+            if let Some(t) = body.ray(from, dir, best)
+                && t < best
+            {
+                best = t;
+                hit = Some(Struck::Player(p.id, false));
+            }
+        }
+        for (i, k) in self.tanks.iter().enumerate() {
+            if !k.alive || Some(k.id) == own_tank || k.driver == Some(owner) {
+                continue;
+            }
+            let r = TANK_RADIUS * 0.85;
+            let hull = Aabb::new(
+                k.pos + Vec3::new(-r, 0.0, -r),
+                k.pos + Vec3::new(r, TANK_HEIGHT, r),
+            );
+            if let Some(t) = hull.ray(from, dir, best)
+                && t < best
+            {
+                best = t;
+                hit = Some(Struck::Tank(i));
+            }
+        }
+        hit.map(|h| (best, h))
+    }
+
+    fn update_shells(&mut self, dt: f32) {
+        let shells = std::mem::take(&mut self.shells);
+        let mut keep = Vec::with_capacity(shells.len());
+        for mut s in shells {
+            let next = s.pos + s.vel * dt + Vec3::new(0.0, -0.5 * GRAVITY * dt * dt, 0.0);
+            let d = next - s.pos;
+            let len = d.length();
+            if len < 1e-6 {
+                continue;
+            }
+            let dir = d * (1.0 / len);
+            let wall = self.map.raycast(s.pos, dir, len);
+            let reach = wall.unwrap_or(len).min(len);
+            let struck = self.strike(s.pos, dir, reach, s.owner, Some(s.tank));
+            if struck.is_none() && wall.is_none() {
+                s.pos = next;
+                s.vel.y -= GRAVITY * dt;
+                s.age += dt;
+                if s.age < BULLET_LIFE {
+                    keep.push(s);
+                }
+                continue;
+            }
+            let at = struck.map_or(reach, |(t, _)| t);
+            // Burst just short of what was hit (not inside it).
+            let pos = s.pos + dir * (at - 0.3).max(0.0);
+            match struck {
+                Some((_, Struck::Player(v, _))) => {
+                    self.damage(v, s.owner, SHELL_DAMAGE * 2.0, false, Cause::Tank, s.pos);
+                }
+                Some((_, Struck::Tank(i))) => {
+                    self.damage_tank(i, s.owner, SHELL_DIRECT, Cause::Tank, s.pos);
+                }
+                None => {}
+            }
+            self.blast(s.owner, pos, SHELL_RADIUS, SHELL_DAMAGE, Cause::Tank);
+        }
+        self.shells.extend(keep);
+    }
+
+    /// An explosion at `pos`: everyone in the open within `radius` (and in
+    /// line of sight) is hurt, less the farther away; tanks too.
+    fn blast(&mut self, owner: ClientId, pos: Vec3, radius: f32, max: f32, cause: Cause) {
+        self.send(Target::All, ServerMsg::Explode { pos });
+        let c = pos + Vec3::new(0.0, 0.3, 0.0);
+        let victims: Vec<(ClientId, f32)> = self
+            .players
+            .values()
+            .filter(|p| p.alive && p.tank.is_none())
+            .filter_map(|p| {
+                let chest = p.pos + Vec3::new(0.0, 1.0, 0.0);
+                let d = chest.distance(c);
+                (d < radius && self.map.line_of_sight(c, chest))
+                    .then(|| (p.id, max * (1.0 - d / radius)))
+            })
+            .collect();
+        for (v, d) in victims {
+            self.damage(v, owner, d, false, cause.clone(), pos);
+        }
+        let tanks: Vec<(usize, f32)> = self
+            .tanks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.alive)
+            .filter_map(|(i, t)| {
+                // From the hull's surface, not its centre.
+                let d = ((t.pos + Vec3::new(0.0, 1.2, 0.0)).distance(c) - TANK_RADIUS).max(0.0);
+                (d < radius).then(|| (i, max * (1.0 - d / radius)))
+            })
+            .collect();
+        for (i, d) in tanks {
+            self.damage_tank(i, owner, d, cause.clone(), pos);
+        }
+    }
+
+    fn damage_tank(&mut self, idx: usize, attacker: ClientId, dmg: f32, cause: Cause, from: Vec3) {
+        let t = &mut self.tanks[idx];
+        if !t.alive || dmg <= 0.0 {
+            return;
+        }
+        t.hp -= dmg;
+        let driver = t.driver;
+        let dead = t.hp <= 0.0;
+        let pos = t.pos;
+        // The attacker sees the hit land; the driver feels it.
+        let hit = ServerMsg::Hit {
+            attacker,
+            victim: driver.unwrap_or(0),
+            head: false,
+            dmg: r2(dmg),
+            from,
+        };
+        if driver != Some(attacker) {
+            self.send(Target::One(attacker), hit.clone());
+        }
+        if let Some(d) = driver {
+            self.send(Target::One(d), hit);
+            if let Some(b) = self.players.get_mut(&d).and_then(|p| p.bot.as_mut())
+                && attacker != d
+                && b.target.is_none()
+            {
+                b.target = Some(attacker);
+                b.reaction = 0.35;
+            }
+        }
+        if !dead {
+            return;
+        }
+        let t = &mut self.tanks[idx];
+        t.alive = false;
+        t.hp = 0.0;
+        t.respawn = TANK_RESPAWN;
+        t.driver = None;
+        t.speed = 0.0;
+        // The driver goes with it; then it blows up.
+        if let Some(d) = driver {
+            if let Some(p) = self.players.get_mut(&d) {
+                p.tank = None;
+                p.protect = 0.0;
+            }
+            self.damage(d, attacker, 10_000.0, false, cause.clone(), from);
+        }
+        self.blast(
+            attacker,
+            pos + Vec3::new(0.0, 1.0, 0.0),
+            TANK_BLAST_RADIUS,
+            TANK_BLAST_DAMAGE,
+            cause,
+        );
+    }
+
+    fn update_tanks(&mut self, dt: f32) {
+        for i in 0..self.tanks.len() {
+            let t = &mut self.tanks[i];
+            t.cooldown = (t.cooldown - dt).max(0.0);
+            if !t.alive {
+                t.respawn -= dt;
+                if t.respawn <= 0.0 {
+                    let home = t.home;
+                    // Not onto another tank left on the parking spot.
+                    if self.tank_free(i, home) {
+                        let t = &mut self.tanks[i];
+                        t.alive = true;
+                        t.hp = TANK_HP;
+                        t.pos = home;
+                        t.yaw = home.x.atan2(home.z);
+                        t.aim = t.yaw;
+                        t.pitch = 0.0;
+                        t.speed = 0.0;
+                        t.cooldown = 0.0;
+                    }
+                }
+                continue;
+            }
+            // A driver who is gone (left the game, fell) holds no tank.
+            let gone = t.driver.is_some_and(|d| {
+                !self
+                    .players
+                    .get(&d)
+                    .is_some_and(|p| p.alive && p.tank == Some(t.id))
+            });
+            let t = &mut self.tanks[i];
+            if gone {
+                t.driver = None;
+            }
+            if t.driver.is_none() {
+                t.speed = 0.0;
+            }
+        }
     }
 
     /// Messages produced since the last call.
@@ -497,6 +1263,7 @@ impl Room {
                 range: self.cfg.range,
                 spectator: spectate,
                 bot_skill: self.cfg.bot_skill,
+                ring: self.ring.is_some(),
             },
         );
         if spectate {
@@ -536,6 +1303,7 @@ impl Room {
     }
 
     pub fn leave(&mut self, id: ClientId) {
+        self.unseat(id);
         if let Some(p) = self.players.remove(&id) {
             self.roster_dirty = true;
             self.sys(format!("{} が退出しました", p.name));
@@ -575,6 +1343,7 @@ impl Room {
                 spectator: false,
                 out: false,
                 out_at: 0.0,
+                tank: None,
             },
         );
         self.roster_dirty = true;
@@ -594,6 +1363,7 @@ impl Room {
             .collect();
         while bots.len() > self.bots_wanted as usize {
             let id = bots.pop().unwrap();
+            self.unseat(id);
             self.players.remove(&id);
             self.roster_dirty = true;
         }
@@ -612,6 +1382,10 @@ impl Room {
                 err_timer: 0.0,
                 last_pos: Vec3::ZERO,
                 stuck_timer: 0.0,
+                stuck_n: 0,
+                no_tank: 0.0,
+                detour: 0.0,
+                throw_cd: 0.0,
                 heard: None,
                 dummy: self.map.targets.get(bots.len()).map(|t| (t.pos, t.strafe)),
             };
@@ -636,9 +1410,31 @@ impl Room {
         // A spawn point no one alive can see, as far from everybody as
         // possible, with a little randomness. (Only if every point is in
         // someone's sight is one of those taken: the farthest.)
-        let mut best = self.map.spawns[0];
+        self.unseat(id);
+        // With the ring on: only inside the circle it is heading for (when
+        // no spawn point is, any free spot there).
+        let mut points: Vec<Vec3> = self.map.spawns.clone();
+        if let Some(((cx, cz), r)) = self.safe_circle() {
+            let r = r * 0.9;
+            points.retain(|s| (s.x - cx).hypot(s.z - cz) < r);
+            let mut tries = 0;
+            while points.len() < 4 && tries < 200 {
+                tries += 1;
+                let a = self.rng.range(0.0, std::f32::consts::TAU);
+                let d = r * self.rng.range(0.0, 1.0).sqrt();
+                let mut q = Vec3::new(cx + a.cos() * d, 0.0, cz + a.sin() * d);
+                q.y = self.map.height(q.x, q.z);
+                if !self.map.blocked(q, 0.7) {
+                    points.push(q);
+                }
+            }
+            if points.is_empty() {
+                points = self.map.spawns.clone();
+            }
+        }
+        let mut best = points[0];
         let mut best_score = f32::MIN;
-        for s in &self.map.spawns {
+        for s in &points {
             let d = others
                 .iter()
                 .map(|o| o.distance(*s))
@@ -712,6 +1508,7 @@ impl Room {
                 p.reload = None;
                 p.heal = None;
                 let name = p.name.clone();
+                self.unseat(id);
                 self.roster_dirty = true;
                 self.sys(format!("{name} が観戦に回りました"));
             }
@@ -780,6 +1577,7 @@ impl Room {
                 }
             }
             ClientMsg::Pickup => self.pickup_gun(id),
+            ClientMsg::Use => self.use_key(id),
             ClientMsg::Chat { text } => {
                 let text = sanitize(&text, CHAT_MAX);
                 let p = self.players.get_mut(&id).unwrap();
@@ -819,7 +1617,7 @@ impl Room {
 
     fn start_reload(&mut self, id: ClientId) {
         let p = self.players.get_mut(&id).unwrap();
-        if !p.alive || p.reload.is_some() {
+        if !p.alive || p.reload.is_some() || p.tank.is_some() {
             return;
         }
         let Some(i) = p
@@ -842,7 +1640,7 @@ impl Room {
 
     fn throw(&mut self, id: ClientId, power: u32) {
         let p = self.players.get_mut(&id).unwrap();
-        if !p.alive || p.inv.grenades == 0 || self.intermission.is_some() {
+        if !p.alive || p.inv.grenades == 0 || self.intermission.is_some() || p.tank.is_some() {
             return;
         }
         p.inv.grenades -= 1;
@@ -863,7 +1661,7 @@ impl Room {
 
     fn pickup_gun(&mut self, id: ClientId) {
         let p = &self.players[&id];
-        if !p.alive {
+        if !p.alive || p.tank.is_some() {
             return;
         }
         let pos = p.pos;
@@ -940,7 +1738,10 @@ impl Room {
                 self.update_player(id, dt);
             }
             self.update_bullets(dt);
+            self.update_shells(dt);
             self.update_grenades(dt);
+            self.update_tanks(dt);
+            self.update_ring(dt);
         }
         self.update_pickups(dt);
 
@@ -1029,6 +1830,7 @@ impl Room {
         self.intermission = Some(INTERMISSION);
         self.grenades.clear();
         self.bullets.clear();
+        self.shells.clear();
         let ranking = self.roster();
         self.send(
             Target::All,
@@ -1051,6 +1853,7 @@ impl Room {
             p.out = false;
             p.out_at = 0.0;
         }
+        self.reset_field();
         for id in ids {
             if !self.players[&id].spectator {
                 self.spawn(id);
@@ -1091,6 +1894,15 @@ impl Room {
         p.cooldown = (p.cooldown - dt).max(0.0);
         p.trigger = (p.trigger - dt).max(0.0);
 
+        // At the controls of a tank: it moves, not you.
+        if let Some(tid) = p.tank {
+            match self.tanks.iter().position(|t| t.id == tid && t.alive) {
+                Some(idx) => return self.update_driver(id, idx, dt),
+                None => p.tank = None,
+            }
+        }
+        let p = self.players.get_mut(&id).unwrap();
+
         // Movement. VIEW mode (ads) cannot walk.
         let speed = if p.input.sneak {
             SNEAK_SPEED
@@ -1119,6 +1931,24 @@ impl Room {
         }
         let before = p.pos;
         p.pos = map.slide(p.pos, p.vel * dt);
+        // Tanks are in the way: out to the hull's edge.
+        for t in self.tanks.iter().filter(|t| t.alive) {
+            let dx = p.pos.x - t.pos.x;
+            let dz = p.pos.z - t.pos.z;
+            let d = dx.hypot(dz);
+            let min = TANK_RADIUS + 0.35;
+            if d < min && (p.pos.y - t.pos.y).abs() < TANK_HEIGHT {
+                let (ux, uz) = if d > 1e-3 {
+                    (dx / d, dz / d)
+                } else {
+                    (1.0, 0.0)
+                };
+                let q = Vec3::new(t.pos.x + ux * min, 0.0, t.pos.z + uz * min);
+                if !map.blocked(q, crate::map::PLAYER_RADIUS) {
+                    p.pos = Vec3::new(q.x, map.height(q.x, q.z), q.z);
+                }
+            }
+        }
         if dt > 0.0 {
             let real = (p.pos - before) * (1.0 / dt);
             p.vel = Vec3::new(real.x, 0.0, real.z);
@@ -1324,6 +2154,7 @@ impl Room {
         // (attacker, victim) -> damage, headshot, gun, origin: the pellets of
         // one shotgun blast landing in the same tick count as one hit.
         let mut hits: BTreeMap<(ClientId, ClientId), (f32, bool, Gun, Vec3)> = BTreeMap::new();
+        let mut tank_hits: BTreeMap<(ClientId, usize), (f32, Gun, Vec3)> = BTreeMap::new();
         let mut keep = Vec::with_capacity(self.bullets.len());
         let bullets = std::mem::take(&mut self.bullets);
         for mut b in bullets {
@@ -1336,39 +2167,25 @@ impl Room {
             }
             let dir = d * (1.0 / len);
             let wall = self.map.raycast(b.pos, dir, len).unwrap_or(f32::MAX);
-            let mut best = wall.min(len);
-            let mut hit = None;
-            for p in self.players.values() {
-                if p.id == b.owner || !p.alive {
+            match self.strike(b.pos, dir, wall.min(len), b.owner, None) {
+                Some((t, Struck::Player(victim, head))) => {
+                    let dist = b.traveled + t;
+                    let e = hits
+                        .entry((b.owner, victim))
+                        .or_insert((0.0, false, b.gun, b.origin));
+                    e.0 += b.gun.damage_at(dist, head);
+                    e.1 |= head;
                     continue;
                 }
-                let sneak = p.input.sneak;
-                let head_c = p.pos + Vec3::new(0.0, if sneak { 1.22 } else { 1.67 }, 0.0);
-                if let Some(t) = ray_sphere(b.pos, dir, head_c, HEAD_RADIUS, best)
-                    && t < best
-                {
-                    best = t;
-                    hit = Some((p.id, true));
+                Some((t, Struck::Tank(i))) => {
+                    // Armour: only a little gets through.
+                    let e = tank_hits
+                        .entry((b.owner, i))
+                        .or_insert((0.0, b.gun, b.origin));
+                    e.0 += b.gun.damage_at(b.traveled + t, false) * TANK_BULLET_FACTOR;
+                    continue;
                 }
-                let body = Aabb::new(
-                    p.pos + Vec3::new(-0.33, 0.0, -0.33),
-                    p.pos + Vec3::new(0.33, if sneak { 1.0 } else { 1.45 }, 0.33),
-                );
-                if let Some(t) = body.ray(b.pos, dir, best)
-                    && t < best
-                {
-                    best = t;
-                    hit = Some((p.id, false));
-                }
-            }
-            if let Some((victim, head)) = hit {
-                let dist = b.traveled + best;
-                let e = hits
-                    .entry((b.owner, victim))
-                    .or_insert((0.0, false, b.gun, b.origin));
-                e.0 += b.gun.damage_at(dist, head);
-                e.1 |= head;
-                continue;
+                None => {}
             }
             if wall <= len {
                 continue;
@@ -1384,6 +2201,9 @@ impl Room {
         self.bullets = keep;
         for ((attacker, victim), (d, head, gun, origin)) in hits {
             self.damage(victim, attacker, d, head, Cause::Gun(gun), origin);
+        }
+        for ((attacker, tank), (d, gun, origin)) in tank_hits {
+            self.damage_tank(tank, attacker, d, Cause::Gun(gun), origin);
         }
     }
 
@@ -1440,6 +2260,8 @@ impl Room {
             v.reload = None;
             v.heal = None;
             let pos = v.pos;
+            self.unseat(victim);
+            let v = &self.players[&victim];
             let held = v.inv.gun_index().map(|i| v.inv.guns[i]);
             if attacker != victim
                 && let Some(a) = self.players.get_mut(&attacker)
@@ -1489,7 +2311,23 @@ impl Room {
                 g.vel.x *= 0.7;
                 g.vel.z *= 0.7;
             }
-            let inside = |p: Vec3| self.map.solids.iter().any(|s| s.aabb.contains(p));
+            // Solids, and tanks (a grenade bounces off a hull).
+            let hulls: Vec<Aabb> = self
+                .tanks
+                .iter()
+                .filter(|t| t.alive)
+                .map(|t| {
+                    let r = TANK_RADIUS * 0.85;
+                    Aabb::new(
+                        t.pos + Vec3::new(-r, 0.0, -r),
+                        t.pos + Vec3::new(r, TANK_HEIGHT, r),
+                    )
+                })
+                .collect();
+            let inside = |p: Vec3| {
+                self.map.solids.iter().any(|s| s.aabb.contains(p))
+                    || hulls.iter().any(|h| h.contains(p))
+            };
             if inside(n) {
                 if inside(Vec3::new(n.x, g.pos.y, g.pos.z)) {
                     n.x = g.pos.x;
@@ -1508,22 +2346,7 @@ impl Room {
         }
         self.grenades.retain(|g| g.fuse > 0.0);
         for (owner, pos) in boom {
-            self.send(Target::All, ServerMsg::Explode { pos });
-            let c = pos + Vec3::new(0.0, 0.3, 0.0);
-            let victims: Vec<(ClientId, f32)> = self
-                .players
-                .values()
-                .filter(|p| p.alive)
-                .filter_map(|p| {
-                    let chest = p.pos + Vec3::new(0.0, 1.0, 0.0);
-                    let d = chest.distance(c);
-                    (d < GRENADE_RADIUS && self.map.line_of_sight(c, chest))
-                        .then(|| (p.id, GRENADE_DAMAGE * (1.0 - d / GRENADE_RADIUS)))
-                })
-                .collect();
-            for (v, d) in victims {
-                self.damage(v, owner, d, false, Cause::Grenade, pos);
-            }
+            self.blast(owner, pos, GRENADE_RADIUS, GRENADE_DAMAGE, Cause::Grenade);
         }
     }
 
@@ -1562,9 +2385,10 @@ impl Room {
                 alive: p.alive,
                 sneak: p.input.sneak,
                 ads: p.input.ads,
-                mv: p.vel.length_xz() > 0.5,
+                mv: p.vel.length_xz() > 0.5 && p.tank.is_none(),
                 gun: p.inv.held_gun(),
                 hp: None,
+                tank: p.tank,
             })
             .collect();
         // Those watching also see everyone's health.
@@ -1585,6 +2409,43 @@ impl Room {
                 z: r2(g.pos.z),
             })
             .collect();
+        let tanks: Vec<TankState> = self
+            .tanks
+            .iter()
+            .filter(|t| t.alive)
+            .map(|t| TankState {
+                id: t.id,
+                x: r2(t.pos.x),
+                y: r2(t.pos.y),
+                z: r2(t.pos.z),
+                yaw: r2(t.yaw),
+                aim: r2(t.aim),
+                pitch: r2(t.pitch),
+                hp: t.hp.max(0.0).ceil(),
+                driver: t.driver,
+                reload: if t.cooldown > 0.0 {
+                    r2(1.0 - t.cooldown / SHELL_RELOAD)
+                } else {
+                    -1.0
+                },
+            })
+            .collect();
+        let ring = self.ring.as_ref().map(|r| RingState {
+            x: r2(r.c.0),
+            z: r2(r.c.1),
+            r: r2(r.r),
+            nx: r2(r.to_c.0),
+            nz: r2(r.to_c.1),
+            nr: r2(r.to_r),
+            t: if r.stage < RING_RADII.len() {
+                r.timer.max(0.0).ceil()
+            } else {
+                -1.0
+            },
+            shrinking: r.shrinking,
+            dps: RING_DPS[r.stage.min(RING_DPS.len() - 1)],
+            stage: r.stage as u32,
+        });
         let humans: Vec<ClientId> = self
             .players
             .values()
@@ -1603,6 +2464,8 @@ impl Room {
                         grenades: grenades.clone(),
                         me: None,
                         watching: true,
+                        tanks: tanks.clone(),
+                        ring: ring.clone(),
                     },
                 ));
                 continue;
@@ -1634,6 +2497,8 @@ impl Room {
                     grenades: grenades.clone(),
                     me: Some(me),
                     watching: false,
+                    tanks: tanks.clone(),
+                    ring: ring.clone(),
                 },
             ));
         }
@@ -1684,14 +2549,55 @@ impl Room {
         }
         let eye = me.pos + Vec3::new(0.0, 1.6, 0.0);
         let skill = bot_skill(self.cfg.bot_skill);
-        let muzzle = me
-            .inv
-            .held_gun()
-            .map_or(880.0, |g| g.stats().muzzle_velocity);
+        // In a tank: its hull's heading, and shells instead of bullets.
+        let hull = me
+            .tank
+            .and_then(|t| self.tank_index(t))
+            .map(|i| self.tanks[i].yaw);
+        let driving = hull.is_some();
+        let muzzle = if driving {
+            SHELL_SPEED
+        } else {
+            me.inv
+                .held_gun()
+                .map_or(880.0, |g| g.stats().muzzle_velocity)
+        };
+        // The ring: where to be, and whether it is time to move.
+        let safe = self.safe_circle();
+        let from_centre = |c: (f32, f32)| (me.pos.x - c.0).hypot(me.pos.z - c.1);
+        let outside_next = safe.is_some_and(|(c, r)| from_centre(c) > r - 4.0);
+        let outside_now = self
+            .ring
+            .as_ref()
+            .is_some_and(|r| from_centre(r.c) > r.r - 2.0);
+        let ring_goal = safe.map(|(c, _)| Vec3::new(c.0, 0.0, c.1));
+        // An empty tank close by is worth taking.
+        let near_tank = if driving || me.bot.as_ref().unwrap().no_tank > 0.0 {
+            None
+        } else {
+            self.tanks
+                .iter()
+                .filter(|t| t.alive && t.driver.is_none())
+                .map(|t| (t.pos, (t.pos - me.pos).length_xz()))
+                .filter(|(_, d)| *d < skill.tank_reach)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+        };
+        // Tanks nobody drives, close enough to hide behind.
+        let cover_tanks: Vec<Vec3> = if skill.tactics && !driving {
+            self.tanks
+                .iter()
+                .filter(|t| t.alive && t.driver.is_none())
+                .map(|t| t.pos)
+                .filter(|t| (*t - me.pos).length_xz() < 25.0)
+                .collect()
+        } else {
+            Vec::new()
+        };
         // Nearest visible enemy within its sight; the nearest running one
         // close by is heard even without a line of sight.
         let mut seen: Option<(ClientId, Vec3, f32)> = None;
         let mut seen_vel = Vec3::ZERO;
+        let mut seen_in_tank = false;
         let mut steps: Option<(Vec3, f32)> = None;
         for o in self.players.values() {
             if o.id == id || !o.alive {
@@ -1709,9 +2615,12 @@ impl Room {
             if d > skill.sight || seen.is_some_and(|s| s.2 < d) {
                 continue;
             }
-            if self.map.line_of_sight(eye, chest) {
+            if self.map.line_of_sight(eye, chest)
+                && !self.tank_between(eye, chest, [me.tank, o.tank])
+            {
                 seen = Some((o.id, chest, d));
                 seen_vel = o.vel;
+                seen_in_tank = o.tank.is_some();
             }
         }
         // Hurt with no medkit on it: a medkit lying nearby is worth a detour.
@@ -1727,15 +2636,58 @@ impl Room {
             None
         };
         let wp = me.bot.as_ref().unwrap().waypoint;
-        let need_wp = me.bot.as_ref().unwrap().wander_timer <= 0.0 || me.pos.distance(wp) < 3.0;
+        let need_wp = me.bot.as_ref().unwrap().wander_timer <= 0.0
+            || me.pos.distance(wp) < if driving { 6.0 } else { 3.0 }
+            || safe.is_some_and(|(c, r)| (wp.x - c.0).hypot(wp.z - c.1) > r);
         let new_wp = if need_wp {
             let mut p = self.map.spawns[self.rng.below(self.map.spawns.len())];
             p.x += self.rng.range(-8.0, 8.0);
             p.z += self.rng.range(-8.0, 8.0);
+            // Now and then: to a tank nobody is in.
+            let free: Vec<Vec3> = self
+                .tanks
+                .iter()
+                .filter(|t| t.alive && t.driver.is_none())
+                .map(|t| t.pos)
+                .collect();
+            if !driving
+                && !free.is_empty()
+                && me.bot.as_ref().unwrap().no_tank <= 0.0
+                && self.rng.chance(skill.tank_chance)
+            {
+                p = free[self.rng.below(free.len())];
+            }
+            if let Some((c, r)) = safe
+                && (p.x - c.0).hypot(p.z - c.1) > r * 0.85
+            {
+                // Somewhere inside the ring instead.
+                let a = self.rng.range(0.0, std::f32::consts::TAU);
+                let d = r * 0.85 * self.rng.range(0.0, 1.0).sqrt();
+                p = Vec3::new(c.0 + a.cos() * d, 0.0, c.1 + a.sin() * d);
+                p.y = self.map.height(p.x, p.z);
+            }
             Some(p)
         } else {
             None
         };
+        // Outside the ring nothing matters more than getting back in.
+        let seen = if outside_now { None } else { seen };
+        // Steering a tank toward a heading: turn the hull, drive when it
+        // roughly points there.
+        let drive = |hull: f32, want: f32| -> (i8, i8) {
+            let d = wrap_angle(want - hull);
+            let mx = if d.abs() < 0.12 {
+                0
+            } else if d > 0.0 {
+                -1
+            } else {
+                1
+            };
+            (mx, if d.abs() < 0.9 { 1 } else { 0 })
+        };
+        let mut want_use = false;
+        let mut want_reload = false;
+        let mut want_throw = None;
         let err = (self.rng.range(-1.0, 1.0), self.rng.range(-1.0, 1.0));
         let p = self.players.get_mut(&id).unwrap();
         let pos = p.pos;
@@ -1749,10 +2701,30 @@ impl Room {
         if b.stuck_timer > 2.0 {
             if pos.distance(b.last_pos) < 1.0 {
                 b.wander_timer = 0.0;
+                b.stuck_n = b.stuck_n.saturating_add(1);
+                // Something is in the way of where it was heading (there is
+                // no path finding): try by another waypoint for a while.
+                if seen.is_none() {
+                    b.detour = 4.0;
+                    if !driving {
+                        b.no_tank = 20.0;
+                    }
+                }
+            } else {
+                b.stuck_n = 0;
             }
             b.stuck_timer = 0.0;
             b.last_pos = pos;
+            // A tank that will not come free is left behind.
+            if driving && b.stuck_n >= 3 && seen.is_none() {
+                b.stuck_n = 0;
+                b.no_tank = 25.0;
+                want_use = true;
+            }
         }
+        b.no_tank = (b.no_tank - dt).max(0.0);
+        b.detour = (b.detour - dt).max(0.0);
+        b.throw_cd = (b.throw_cd - dt).max(0.0);
         b.err_timer -= dt;
         if b.err_timer <= 0.0 {
             b.err_timer = 0.6;
@@ -1791,7 +2763,14 @@ impl Room {
                 b.reaction -= dt;
                 // Strong bots aim where the target will be when the bullet
                 // arrives, and over the drop.
-                let aim_at = if skill.lead {
+                let aim_at = if driving {
+                    // A shell: at the feet (the blast does the rest), over
+                    // its drop.
+                    let t = dist / muzzle;
+                    chest
+                        + Vec3::new(0.0, 0.5 * GRAVITY * t * t - 0.8, 0.0)
+                        + if skill.lead { seen_vel * t } else { Vec3::ZERO }
+                } else if skill.lead {
                     let t = dist / muzzle;
                     chest + seen_vel * t + Vec3::new(0.0, 0.5 * GRAVITY * t * t, 0.0)
                 } else {
@@ -1806,7 +2785,80 @@ impl Room {
                 p.yaw = wrap_angle(p.yaw + dy.clamp(-step, step));
                 p.pitch += (want_pitch - p.pitch).clamp(-step, step);
                 let aimed = dy.abs() < 0.06;
-                if dist > 90.0 && !aimed {
+                // With its head (strong bots, on foot, the enemy not on top
+                // of it): a tank standing by is armour to get into; hurt or
+                // out of rounds, its far side is cover.
+                let enemy = chest;
+                let fall_back = if !skill.tactics || driving || dist < 8.0 {
+                    None
+                } else if let Some((t, d)) =
+                    near_tank.filter(|(_, d)| *d < 15.0 || (*d < 45.0 && *d < dist * 0.5))
+                {
+                    want_use = d < TANK_ENTER - 0.6;
+                    Some(t)
+                } else if p.hp < 55.0 || p.reload.is_some() {
+                    cover_tanks
+                        .iter()
+                        .map(|t| {
+                            let away = Vec3::new(t.x - enemy.x, 0.0, t.z - enemy.z).normalize();
+                            *t + away * (TANK_RADIUS + 1.2)
+                        })
+                        .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)))
+                } else {
+                    None
+                };
+                // Bullets barely scratch a tank: a grenade under it does.
+                if skill.tactics
+                    && !driving
+                    && seen_in_tank
+                    && ready
+                    && p.inv.grenades > 0
+                    && b.throw_cd <= 0.0
+                    && dy.abs() < 0.15
+                    && (8.0..32.0).contains(&dist)
+                {
+                    // Thrown about 14° above the line of sight, a grenade
+                    // lands at some 60% of the way and rolls the rest: the
+                    // speed for that, as a power 1..=5.
+                    let v = (dist * 10.5).sqrt();
+                    want_throw = Some((((v - 6.0) / 3.5).round() as u32).clamp(1, MAX_THROW));
+                    b.throw_cd = 3.5;
+                }
+                if let Some(goal) = fall_back {
+                    let d = goal - pos;
+                    if d.length_xz() > 0.8 {
+                        let want = (-d.x).atan2(-d.z);
+                        let dy = wrap_angle(want - p.yaw);
+                        let step = 6.0 * dt;
+                        p.yaw = wrap_angle(p.yaw + dy.clamp(-step, step));
+                        p.input = InputState {
+                            mz: if dy.abs() < 0.8 { 1 } else { 0 },
+                            ..Default::default()
+                        };
+                    } else {
+                        // There (and still in sight): down, and shoot back.
+                        p.input = InputState {
+                            sneak: true,
+                            ads: true,
+                            zoom: 1,
+                            fire: ready && aimed,
+                            ..Default::default()
+                        };
+                        if ready && aimed && p.cooldown <= 0.0 {
+                            p.trigger = 0.1;
+                        }
+                    }
+                } else if let Some(h) = hull
+                    && (dist < 14.0 || (dist > 90.0 && !aimed))
+                {
+                    // Too close for the gun (its own blast): run them over.
+                    let (mx, mz) = drive(h, want_yaw);
+                    p.input = InputState {
+                        mx,
+                        mz,
+                        ..Default::default()
+                    };
+                } else if dist > 90.0 && !aimed {
                     p.input = InputState {
                         mz: 1,
                         ..Default::default()
@@ -1827,20 +2879,51 @@ impl Room {
                 b.target = None;
                 // Investigate what was heard, otherwise fetch a medkit when
                 // hurt, otherwise wander.
-                let goal = b.heard.map(|(p, _)| p).or(medkit).unwrap_or(b.waypoint);
+                let tank_goal = near_tank.filter(|_| p.hp > 30.0).map(|(t, d)| {
+                    want_use = d < TANK_ENTER - 0.6;
+                    t
+                });
+                let goal = match ring_goal {
+                    _ if b.detour > 0.0 => b.waypoint,
+                    Some(c) if outside_next => c,
+                    // Strong bots take the tank before looking into a noise.
+                    _ if skill.tactics && tank_goal.is_some() => tank_goal.unwrap(),
+                    _ => b
+                        .heard
+                        .map(|(p, _)| p)
+                        .or(medkit)
+                        .or(tank_goal)
+                        .unwrap_or(b.waypoint),
+                };
                 let d = goal - pos;
                 let want_yaw = (-d.x).atan2(-d.z);
                 let dy = wrap_angle(want_yaw - p.yaw);
                 let step = 2.5 * dt;
                 p.yaw = wrap_angle(p.yaw + dy.clamp(-step, step));
                 p.pitch *= 0.9;
+                let (mx, mut mz) = match hull {
+                    Some(h) => drive(h, want_yaw),
+                    None => (0, if dy.abs() < 0.6 { 1 } else { 0 }),
+                };
+                // Strong bots stay down where they are (out of sight) until
+                // the medkit has done its work.
+                let hold = skill.tactics
+                    && !driving
+                    && !outside_next
+                    && p.hp < BOT_HEAL_BELOW
+                    && p.inv.medkits > 0;
+                if hold {
+                    mz = 0;
+                }
                 p.input = InputState {
-                    mz: if dy.abs() < 0.6 { 1 } else { 0 },
+                    mx,
+                    mz,
+                    sneak: hold,
                     ..Default::default()
                 };
                 // Hurt and out of sight: use a medkit (walking on). Then back
                 // to the gun.
-                let heal = p.hp < BOT_HEAL_BELOW && p.inv.medkits > 0;
+                let heal = !driving && p.hp < BOT_HEAL_BELOW && p.inv.medkits > 0;
                 if heal && p.heal.is_none() && p.reload.is_none() {
                     if p.inv.sel != Slot::Medkit {
                         p.inv.select(Slot::Medkit);
@@ -1855,9 +2938,18 @@ impl Room {
                     .gun_index()
                     .is_some_and(|i| p.inv.guns[i].ammo < p.inv.guns[i].gun.stats().mag / 2);
                 if empty && p.reload.is_none() && p.heal.is_none() && !heal {
-                    self.start_reload(id);
+                    want_reload = true;
                 }
             }
+        }
+        if want_reload {
+            self.start_reload(id);
+        }
+        if want_use {
+            self.use_key(id);
+        }
+        if let Some(power) = want_throw {
+            self.throw(id, power);
         }
     }
 
@@ -2079,6 +3171,7 @@ mod tests {
             pickups: Vec::new(),
             targets: Vec::new(),
             labels: Vec::new(),
+            tanks: Vec::new(),
             top: Default::default(),
         };
         let mut r = Room::with_map(Config::default(), map);
@@ -2410,6 +3503,7 @@ mod tests {
             pickups: Vec::new(),
             targets: Vec::new(),
             labels: Vec::new(),
+            tanks: Vec::new(),
             top: Default::default(),
         };
         Room::with_map(Config::default(), map)
@@ -2470,5 +3564,543 @@ mod tests {
             matches!(p.inv.sel, Slot::Gun0 | Slot::Gun1),
             "back to the gun"
         );
+    }
+    /// A flat field with one tank parked at (20, 0), ring off.
+    fn tank_room() -> (Room, ClientId, ClientId) {
+        use crate::map::GRID;
+        let half = crate::map::HALF;
+        let map = Map {
+            seed: 0,
+            half,
+            grid: GRID,
+            cell: 2.0 * half / (GRID - 1) as f32,
+            heights: vec![0.0; GRID * GRID],
+            solids: Vec::new(),
+            trees: Vec::new(),
+            spawns: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(50.0, 0.0, 50.0)],
+            pickups: Vec::new(),
+            targets: Vec::new(),
+            labels: Vec::new(),
+            tanks: vec![Vec3::new(20.0, 0.0, 0.0)],
+            top: Default::default(),
+        };
+        let cfg = Config {
+            ring: false,
+            ..Default::default()
+        };
+        let mut r = Room::with_map(cfg, map);
+        let a = r.join("a", None, PROTOCOL, false).unwrap();
+        let b = r.join("b", None, PROTOCOL, false).unwrap();
+        (r, a, b)
+    }
+
+    fn drive(mx: i8, mz: i8, yaw: f32, pitch: f32) -> ClientMsg {
+        ClientMsg::Input {
+            mx,
+            mz,
+            sneak: false,
+            yaw,
+            pitch,
+            ads: false,
+            zoom: 0,
+            fire: false,
+            instant: false,
+        }
+    }
+
+    #[test]
+    fn tank_is_entered_driven_and_left() {
+        let (mut r, a, _b) = tank_room();
+        // Too far away: nothing happens.
+        r.teleport(a, Vec3::new(0.0, 0.0, 0.0), 0.0);
+        r.handle(a, ClientMsg::Use);
+        assert!(r.players[&a].tank.is_none());
+        r.teleport(a, Vec3::new(17.0, 0.0, 0.0), 0.0);
+        r.handle(a, ClientMsg::Use);
+        assert_eq!(r.players[&a].tank, Some(0));
+        assert_eq!(r.tanks[0].driver, Some(a));
+        // Forward: the tank (and its driver) move along the hull's heading.
+        let start = r.tanks[0].pos;
+        let fwd = Vec3::new(-r.tanks[0].yaw.sin(), 0.0, -r.tanks[0].yaw.cos());
+        r.handle(a, drive(0, 1, 0.0, 0.0));
+        for _ in 0..120 {
+            r.tick(1.0 / 60.0);
+        }
+        let moved = r.tanks[0].pos - start;
+        assert!(moved.length_xz() > 6.0, "moved {}", moved.length_xz());
+        assert!(moved.normalize().dot(fwd) > 0.99);
+        assert_eq!(r.player_pos(a).unwrap(), r.tanks[0].pos);
+        // h/l turn the hull.
+        let yaw = r.tanks[0].yaw;
+        r.handle(a, drive(-1, 0, 0.0, 0.0));
+        for _ in 0..30 {
+            r.tick(1.0 / 60.0);
+        }
+        assert!(wrap_angle(r.tanks[0].yaw - yaw) > 0.3);
+        // Out: beside the tank, which stays.
+        r.handle(a, ClientMsg::Use);
+        assert!(r.players[&a].tank.is_none());
+        assert_eq!(r.tanks[0].driver, None);
+        let d = (r.player_pos(a).unwrap() - r.tanks[0].pos).length_xz();
+        assert!(d > TANK_RADIUS && d < TANK_RADIUS + 1.5, "d {d}");
+    }
+
+    #[test]
+    fn tank_shell_kills_and_armour_holds_against_bullets() {
+        let (mut r, a, b) = tank_room();
+        r.teleport(a, Vec3::new(17.0, 0.0, 0.0), 0.0);
+        r.handle(a, ClientMsg::Use);
+        // b stands 60 m down -Z from the tank; a aims at the feet.
+        r.teleport(b, Vec3::new(20.0, 0.0, -60.0), std::f32::consts::PI);
+        let pitch =
+            (-(TANK_EYE - 0.3) / 60.0f32).atan() + (drop_at(60.0, SHELL_SPEED) / 60.0).atan();
+        r.handle(a, drive(0, 0, 0.0, pitch));
+        r.handle(a, ClientMsg::Trigger);
+        r.drain();
+        let mut killed = false;
+        let mut shell = false;
+        for _ in 0..120 {
+            r.tick(1.0 / 60.0);
+            for (_, m) in r.drain() {
+                match m {
+                    ServerMsg::Shell { id, .. } => shell |= id == a,
+                    ServerMsg::Kill {
+                        killer,
+                        victim,
+                        cause,
+                        ..
+                    } => killed |= killer == a && victim == b && cause == Cause::Tank,
+                    _ => {}
+                }
+            }
+        }
+        assert!(shell && killed, "shell {shell} killed {killed}");
+        assert_eq!(r.player_kills(a), Some(1));
+        // The gun needs time to load: a trigger before that does nothing.
+        assert!(r.tanks[0].cooldown > 0.0);
+        r.handle(a, ClientMsg::Trigger);
+        r.tick(1.0 / 60.0);
+        assert!(r.shells.is_empty());
+        for _ in 0..(SHELL_RELOAD * 60.0) as usize {
+            r.tick(1.0 / 60.0);
+        }
+        r.handle(a, ClientMsg::Trigger);
+        r.tick(1.0 / 60.0);
+        assert_eq!(r.shells.len(), 1);
+
+        // Bullets: the driver is safe inside, the armour takes a little.
+        r.players.get_mut(&b).unwrap().respawn = 0.0;
+        r.tick(1.0 / 60.0);
+        r.teleport(b, Vec3::new(20.0, 0.0, -20.0), std::f32::consts::PI);
+        r.handle(
+            b,
+            ClientMsg::Input {
+                mx: 0,
+                mz: 0,
+                sneak: false,
+                yaw: std::f32::consts::PI,
+                pitch: 0.0,
+                ads: true,
+                zoom: 1,
+                fire: true,
+                instant: false,
+            },
+        );
+        let hp = r.tanks[0].hp;
+        for _ in 0..60 {
+            r.tick(1.0 / 60.0);
+        }
+        assert_eq!(r.player_hp(a), Some(MAX_HP));
+        assert!(r.tanks[0].hp < hp && r.tanks[0].hp > hp - 100.0);
+    }
+
+    #[test]
+    fn destroyed_tank_takes_its_driver_and_comes_back() {
+        let (mut r, a, b) = tank_room();
+        r.teleport(a, Vec3::new(17.0, 0.0, 0.0), 0.0);
+        r.handle(a, ClientMsg::Use);
+        r.teleport(b, Vec3::new(20.0, 0.0, 80.0), 0.0);
+        r.drain();
+        r.damage_tank(0, b, TANK_HP + 1.0, Cause::Grenade, Vec3::ZERO);
+        assert!(!r.tanks[0].alive);
+        assert!(!r.players[&a].alive && r.players[&a].tank.is_none());
+        assert_eq!(r.player_kills(b), Some(1));
+        assert!(
+            r.drain()
+                .iter()
+                .any(|(_, m)| matches!(m, ServerMsg::Explode { .. }))
+        );
+        for _ in 0..((TANK_RESPAWN + 1.0) * 60.0) as usize {
+            r.tick(1.0 / 60.0);
+        }
+        let t = &r.tanks[0];
+        assert!(t.alive && t.hp == TANK_HP && t.driver.is_none());
+        assert_eq!(t.pos, t.home);
+    }
+
+    #[test]
+    fn tank_runs_people_over_and_blocks_walkers() {
+        let (mut r, a, b) = tank_room();
+        r.teleport(a, Vec3::new(17.0, 0.0, 0.0), 0.0);
+        r.handle(a, ClientMsg::Use);
+        // Straight ahead of the hull, 12 m away.
+        let t = &r.tanks[0];
+        let fwd = Vec3::new(-t.yaw.sin(), 0.0, -t.yaw.cos());
+        let spot = t.pos + fwd * 12.0;
+        r.teleport(b, spot, 0.0);
+        r.handle(a, drive(0, 1, 0.0, 0.0));
+        let mut cause = None;
+        for _ in 0..240 {
+            r.tick(1.0 / 60.0);
+            for (_, m) in r.drain() {
+                if let ServerMsg::Kill {
+                    victim, cause: c, ..
+                } = m
+                    && victim == b
+                {
+                    cause = Some(c);
+                }
+            }
+        }
+        assert_eq!(cause, Some(Cause::Tank));
+        // Walking into a parked tank: stopped at its hull.
+        r.handle(a, drive(0, 0, 0.0, 0.0));
+        r.handle(a, ClientMsg::Use);
+        let tank = r.tanks[0].pos;
+        r.teleport(a, tank + Vec3::new(0.0, 0.0, 6.0), 0.0);
+        r.handle(a, drive(0, 1, 0.0, 0.0));
+        for _ in 0..120 {
+            r.tick(1.0 / 60.0);
+        }
+        let d = (r.player_pos(a).unwrap() - tank).length_xz();
+        assert!((TANK_RADIUS + 0.3..TANK_RADIUS + 1.0).contains(&d), "d {d}");
+    }
+
+    #[test]
+    fn ring_shrinks_and_hurts_outside() {
+        let (mut r, a, b) = flat_room();
+        let half = r.map.half;
+        let unit = r.ring.as_ref().unwrap().unit;
+        assert!((r.ring.as_ref().unwrap().r - half * RING_START).abs() < 0.01);
+        r.teleport(a, Vec3::new(half - 5.0, 0.0, half - 5.0), 0.0);
+        // Until the first shrink starts, the whole field is inside.
+        for _ in 0..(unit * 60.0) as usize - 60 {
+            r.tick(1.0 / 60.0);
+        }
+        assert_eq!(r.player_hp(a), Some(MAX_HP));
+        // After the first stage: its circle, and the corner is outside.
+        for _ in 0..(unit * 60.0) as usize + 120 {
+            r.tick(1.0 / 60.0);
+        }
+        let ring = r.ring.clone().unwrap();
+        assert_eq!(ring.stage, 1);
+        assert!((ring.r - half * RING_RADII[0]).abs() < 0.01);
+        assert!(ring.to_r < ring.r);
+        assert!(ring.c.0.abs() <= half && ring.c.1.abs() <= half);
+        let hp = r.player_hp(a).unwrap();
+        assert!(hp < MAX_HP, "hp {hp}");
+        // Inside, nothing is lost.
+        r.teleport(b, Vec3::new(ring.c.0, 0.0, ring.c.1), 0.0);
+        let hb = r.player_hp(b).unwrap();
+        r.drain();
+        let mut died = false;
+        for _ in 0..(60.0 * 60.0) as usize {
+            r.tick(1.0 / 60.0);
+            for (_, m) in r.drain() {
+                if let ServerMsg::Kill {
+                    killer,
+                    victim,
+                    cause,
+                    ..
+                } = m
+                {
+                    died |= victim == a && killer == a && cause == Cause::Ring;
+                }
+            }
+            if died {
+                break;
+            }
+            // Keep the one outside from wandering back with a respawn.
+            assert!(r.players[&a].alive);
+        }
+        assert!(died);
+        assert_eq!(r.player_hp(b), Some(hb));
+        // Respawns land inside the circle the ring is heading for.
+        for _ in 0..(RESPAWN_TIME * 60.0) as usize + 5 {
+            r.tick(1.0 / 60.0);
+        }
+        let (c, rad) = r.safe_circle().unwrap();
+        let p = r.player_pos(a).unwrap();
+        assert!(r.players[&a].alive);
+        assert!((p.x - c.0).hypot(p.z - c.1) <= rad);
+    }
+
+    #[test]
+    fn ring_goes_through_every_stage_and_bots_stay_inside() {
+        let mut r = Room::new(Config {
+            seed: 11,
+            bots: 6,
+            time_limit: 150.0,
+            frag_limit: u32::MAX,
+            ..Default::default()
+        });
+        let mut ring_deaths = 0;
+        for _ in 0..(140.0 * 60.0) as usize {
+            r.tick(1.0 / 60.0);
+            for (_, m) in r.drain() {
+                if let ServerMsg::Kill { cause, .. } = m
+                    && cause == Cause::Ring
+                {
+                    ring_deaths += 1;
+                }
+            }
+        }
+        let ring = r.ring.clone().unwrap();
+        assert_eq!(ring.stage, RING_RADII.len());
+        assert!((ring.r - r.map.half * RING_RADII[4]).abs() < 0.01);
+        assert!(ring_deaths <= 3, "ring deaths {ring_deaths}");
+    }
+
+    #[test]
+    fn no_ring_and_no_tanks_when_switched_off() {
+        let r = Room::new(Config {
+            seed: 3,
+            ring: false,
+            tanks: false,
+            ..Default::default()
+        });
+        assert!(r.ring.is_none() && r.tanks.is_empty());
+        let r = Room::new(Config {
+            seed: 3,
+            ..Default::default()
+        });
+        assert!(r.ring.is_some());
+        assert_eq!(r.tanks.len(), r.map.tanks.len());
+        assert!(!r.map.tanks.is_empty());
+        // The firing range: a tank to try, no ring.
+        let r = Room::new(Config {
+            range: true,
+            ..Default::default()
+        });
+        assert!(r.ring.is_none());
+        assert_eq!(r.tanks.len(), 1);
+    }
+
+    #[test]
+    fn bots_take_tanks() {
+        // One bot alone on a flat field, a tank parked 20 m from where it
+        // starts: it gets in and drives.
+        use crate::map::GRID;
+        let half = crate::map::HALF;
+        let map = Map {
+            seed: 0,
+            half,
+            grid: GRID,
+            cell: 2.0 * half / (GRID - 1) as f32,
+            heights: vec![0.0; GRID * GRID],
+            solids: Vec::new(),
+            trees: Vec::new(),
+            spawns: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(50.0, 0.0, 50.0)],
+            pickups: Vec::new(),
+            targets: Vec::new(),
+            labels: Vec::new(),
+            tanks: vec![Vec3::new(20.0, 0.0, 0.0), Vec3::new(50.0, 0.0, 30.0)],
+            top: Default::default(),
+        };
+        let mut r = Room::with_map(
+            Config {
+                bots: 1,
+                ring: false,
+                ..Default::default()
+            },
+            map,
+        );
+        let mut drove = None;
+        let mut far = 0.0f32;
+        for _ in 0..(90.0 * 60.0) as usize {
+            r.tick(1.0 / 60.0);
+            r.drain();
+            if let Some(t) = r.tanks.iter().find(|t| t.driver.is_some()) {
+                drove = Some(t.id);
+                far = far.max((t.pos - t.home).length_xz());
+            }
+        }
+        assert!(drove.is_some());
+        assert!(far > 10.0, "far {far}");
+    }
+
+    /// Bots on a generated field, for a few minutes: nobody is left stuck
+    /// in a tank, and the match goes on.
+    #[test]
+    fn bots_with_tanks_on_a_real_field() {
+        let mut r = Room::new(Config {
+            seed: 6,
+            bots: 4,
+            frag_limit: u32::MAX,
+            ..Default::default()
+        });
+        let mut drivers = 0u32;
+        let mut shells = 0;
+        for i in 0..(300.0 * 60.0) as usize {
+            r.tick(1.0 / 60.0);
+            for (_, m) in r.drain() {
+                if matches!(m, ServerMsg::Shell { .. }) {
+                    shells += 1;
+                }
+            }
+            if i % 60 == 0 {
+                drivers += r.tanks.iter().filter(|t| t.driver.is_some()).count() as u32;
+            }
+            for t in &r.tanks {
+                if let Some(d) = t.driver {
+                    assert_eq!(r.players[&d].tank, Some(t.id));
+                }
+            }
+        }
+        let _ = (drivers, shells);
+    }
+    /// A flat field, one bot of the given skill, a tank parked at (20, 0).
+    fn bot_and_tank(skill: u8) -> (Room, ClientId, ClientId) {
+        use crate::map::GRID;
+        let half = crate::map::HALF;
+        let map = Map {
+            seed: 0,
+            half,
+            grid: GRID,
+            cell: 2.0 * half / (GRID - 1) as f32,
+            heights: vec![0.0; GRID * GRID],
+            solids: Vec::new(),
+            trees: Vec::new(),
+            spawns: vec![Vec3::new(0.0, 0.0, 0.0), Vec3::new(50.0, 0.0, 50.0)],
+            pickups: Vec::new(),
+            targets: Vec::new(),
+            labels: Vec::new(),
+            tanks: vec![Vec3::new(20.0, 0.0, 0.0)],
+            top: Default::default(),
+        };
+        let mut r = Room::with_map(
+            Config {
+                bots: 1,
+                bot_skill: skill,
+                ring: false,
+                ..Default::default()
+            },
+            map,
+        );
+        let bot = *r.players.keys().next().unwrap();
+        let a = r.join("a", None, PROTOCOL, false).unwrap();
+        (r, bot, a)
+    }
+
+    #[test]
+    fn strong_bots_hide_behind_a_tank_when_hurt() {
+        // The enemy stands 40 m down -Z from the tank; the bot, hurt, a few
+        // metres to the tank's side, in the open.
+        let run = |skill: u8| {
+            let (mut r, bot, a) = bot_and_tank(skill);
+            r.teleport(a, Vec3::new(20.0, 0.0, -40.0), std::f32::consts::PI);
+            r.teleport(bot, Vec3::new(28.0, 0.0, 6.0), 0.0);
+            let p = r.players.get_mut(&bot).unwrap();
+            p.hp = 40.0;
+            p.inv.medkits = 0;
+            // Not into it: behind it.
+            p.bot.as_mut().unwrap().no_tank = 1.0e6;
+            r.players.get_mut(&a).unwrap().protect = 1.0e6;
+            let mut hidden = 0;
+            for _ in 0..(8.0 * 60.0) as usize {
+                r.tick(1.0 / 60.0);
+                r.players.get_mut(&bot).unwrap().hp = 40.0;
+                let eye = r.player_pos(a).unwrap() + Vec3::new(0.0, 1.6, 0.0);
+                let chest = r.player_pos(bot).unwrap() + Vec3::new(0.0, 1.2, 0.0);
+                if r.tank_between(eye, chest, [None, None]) {
+                    hidden += 1;
+                }
+            }
+            assert!(r.players[&bot].tank.is_none());
+            hidden
+        };
+        let strong = run(5);
+        assert!(strong > 3 * 60, "hidden for {strong} ticks");
+        assert_eq!(run(3), 0);
+    }
+
+    #[test]
+    fn strong_bots_get_into_a_tank_next_to_a_fight() {
+        let run = |skill: u8| {
+            let (mut r, bot, a) = bot_and_tank(skill);
+            r.teleport(a, Vec3::new(20.0, 0.0, -60.0), std::f32::consts::PI);
+            r.teleport(bot, Vec3::new(29.0, 0.0, 6.0), 0.0);
+            r.players.get_mut(&a).unwrap().protect = 1.0e6;
+            for _ in 0..(6.0 * 60.0) as usize {
+                r.tick(1.0 / 60.0);
+                if r.players[&bot].tank.is_some() {
+                    return true;
+                }
+            }
+            false
+        };
+        assert!(run(4));
+        assert!(!run(2));
+    }
+
+    #[test]
+    fn strong_bots_throw_grenades_at_tanks() {
+        let run = |skill: u8| {
+            let (mut r, bot, a) = bot_and_tank(skill);
+            r.teleport(a, Vec3::new(17.0, 0.0, 0.0), 0.0);
+            r.handle(a, ClientMsg::Use);
+            assert!(r.players[&a].tank.is_some());
+            r.teleport(bot, Vec3::new(20.0, 0.0, 22.0), 0.0);
+            r.players.get_mut(&bot).unwrap().inv.grenades = 3;
+            let mut booms = 0;
+            for _ in 0..(12.0 * 60.0) as usize {
+                r.tick(1.0 / 60.0);
+                for (_, m) in r.drain() {
+                    if let ServerMsg::Explode { pos } = m {
+                        booms += 1;
+                        let _ = pos;
+                    }
+                }
+            }
+            (booms, TANK_HP - r.tanks[0].hp)
+        };
+        let (booms, dmg) = run(5);
+        assert!(booms >= 2, "booms {booms}");
+        // More than the bullets alone would have done.
+        let (weak_booms, weak_dmg) = run(3);
+        assert_eq!(weak_booms, 0);
+        assert!(dmg > weak_dmg + 60.0, "{dmg} vs {weak_dmg}");
+    }
+
+    #[test]
+    fn stronger_bots_take_tanks_more() {
+        // How often a bot gets into a tank, over a few fields.
+        let boardings = |skill: u8| {
+            let mut total = 0;
+            for seed in [5, 6, 7, 8] {
+                let mut r = Room::new(Config {
+                    seed,
+                    bots: 6,
+                    bot_skill: skill,
+                    frag_limit: u32::MAX,
+                    ..Default::default()
+                });
+                let mut was = vec![false; r.tanks.len()];
+                for _ in 0..(180.0 * 60.0) as usize {
+                    r.tick(1.0 / 60.0);
+                    r.drain();
+                    for (i, t) in r.tanks.iter().enumerate() {
+                        let now = t.driver.is_some();
+                        if now && !was[i] {
+                            total += 1;
+                        }
+                        was[i] = now;
+                    }
+                }
+            }
+            total
+        };
+        let (weak, strong) = (boardings(2), boardings(5));
+        assert!(strong > weak, "strong {strong} weak {weak}");
     }
 }

@@ -1,10 +1,29 @@
-// Synthesized sounds (no audio files). Positional with a PannerNode.
+// Sounds. Gunfire, steps and the like are synthesized (no audio files),
+// positional with a PannerNode. Three moments play a sound file instead:
+// spawning, being killed and the end of a match (see EVENT_SOUNDS).
+
+/// Event sounds: files in web/assets/sounds/, named <event>.wav (or .mp3 /
+/// .ogg). They are not shipped with the game: drop your own in. Without a
+/// file the moment passes in silence.
+export const EVENT_SOUNDS = {
+  startup: 'スポーン時 (起動音)',
+  error: 'キルされた時 (エラー音)',
+  shutdown: '試合終了時 (システム終了音)',
+};
+const SOUND_EXTS = ['wav', 'mp3', 'ogg'];
 
 export class Sound {
   constructor(settings) {
     this.s = settings;
     this.ctx = null;
     this.noise = null;
+    // Event sounds: name -> AudioBuffer (decoded), 'missing', or a promise
+    // while loading.
+    this.samples = new Map();
+    this.base = new URL('../assets/sounds/', import.meta.url);
+    // What to play once its file has loaded (asked for before that).
+    this.queued = null;
+    this.playing = null;
   }
 
   /// Browsers allow audio only after a user gesture; call on a key press.
@@ -22,6 +41,89 @@ export class Sound {
     this.noise = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = this.noise.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    this.loadSamples();
+  }
+
+  /// Fetches and decodes one event sound; tries each extension in turn.
+  async loadSample(name) {
+    for (const ext of SOUND_EXTS) {
+      try {
+        const res = await fetch(new URL(`${name}.${ext}`, this.base));
+        if (!res.ok) continue;
+        // A host that answers every path with a page is no sound.
+        const type = res.headers.get('content-type') || '';
+        if (type.startsWith('text/')) continue;
+        const data = await res.arrayBuffer();
+        return await this.ctx.decodeAudioData(data);
+      } catch {
+        // Not there, or not audio: the next extension.
+      }
+    }
+    return 'missing';
+  }
+
+  loadSamples() {
+    for (const name of Object.keys(EVENT_SOUNDS)) {
+      if (this.samples.has(name)) continue;
+      const job = this.loadSample(name).then((buf) => {
+        this.samples.set(name, buf);
+        if (this.queued && this.queued.name === name && performance.now() - this.queued.at < 1500) {
+          this.queued = null;
+          this.event(name);
+        }
+        return buf;
+      });
+      this.samples.set(name, job);
+    }
+  }
+
+  /// For each event sound: 'file' (loaded), 'none' (no file: silent) or
+  /// '?' (not loaded yet).
+  sampleStatus() {
+    const out = {};
+    for (const name of Object.keys(EVENT_SOUNDS)) {
+      const v = this.samples.get(name);
+      out[name] = v === 'missing' ? 'none' : v && typeof v.then !== 'function' ? 'file' : '?';
+    }
+    return out;
+  }
+
+  /// Plays an event sound (startup / error / shutdown), not positional.
+  /// One at a time: a new one cuts the last one off.
+  event(name) {
+    if (!this.ctx) return;
+    const buf = this.samples.get(name);
+    if (!buf || typeof buf.then === 'function') {
+      // Still loading: play it when it arrives (if that is soon).
+      this.queued = { name, at: performance.now() };
+      return;
+    }
+    this.queued = null;
+    this.stopEvent();
+    // No file: nothing plays.
+    if (buf === 'missing') return;
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    const g = this.ctx.createGain();
+    g.gain.value = 0.9;
+    src.connect(g).connect(this.master);
+    src.start();
+    this.playing = { src, g };
+    src.onended = () => {
+      if (this.playing && this.playing.src === src) this.playing = null;
+    };
+  }
+
+  stopEvent() {
+    const p = this.playing;
+    if (!p) return;
+    this.playing = null;
+    try {
+      p.g.gain.setTargetAtTime(0, this.ctx.currentTime, 0.03);
+      p.src.stop(this.ctx.currentTime + 0.15);
+    } catch {
+      // Already stopped.
+    }
   }
 
   listener(x, y, z, yaw) {
@@ -101,8 +203,19 @@ export class Sound {
     this.tone({ pos, freq: 140, to: 50, dur: p[1], gain: p[2] * 0.5, type: 'sine' });
   }
 
+  /// A tank gun.
+  cannon(pos) {
+    this.burst({ pos, freq: 500, dur: 0.6, gain: 1.3 });
+    this.tone({ pos, freq: 110, to: 35, dur: 0.55, gain: 0.9, type: 'sine' });
+  }
+
   footstep(pos, quiet) {
     this.burst({ pos, freq: 300, dur: 0.07, gain: quiet ? 0.08 : 0.35, q: 1.2 });
+  }
+
+  /// A tank's engine and tracks, once per "step" while it moves.
+  rumble(pos) {
+    this.burst({ pos, freq: 160, dur: 0.16, gain: pos ? 0.5 : 0.12, q: 0.8 });
   }
 
   explosion(pos) {
@@ -116,6 +229,11 @@ export class Sound {
 
   hurt() {
     this.tone({ freq: 220, to: 120, dur: 0.15, gain: 0.3, type: 'sawtooth' });
+  }
+
+  /// Outside the ring: a low tick with each bit of damage.
+  ringTick() {
+    this.tone({ freq: 150, to: 90, dur: 0.12, gain: 0.22, type: 'triangle' });
   }
 
   click() {

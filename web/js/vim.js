@@ -5,8 +5,11 @@
 //              f fire/use, {n}dd grenade, r reload, y pick up, gt swap gun,
 //              {n}, {n}. turn, ~ about-face, * spot, v VIEW, s inventory,
 //              m map, i/I chat, : command (any other key does nothing)
+//              e get into / out of a tank (in one: k/j drive, h/l turn)
 //   VIEW       hjkl look (Shift = fast), {n}hjkl n steps, f fire, {n}dd
-//              throw, r reload, v scope, Esc back
+//              throw, r reload, v scope, Esc back. Held hjkl turn at one
+//              steady speed at the first stage, and speed up only at the
+//              second (v again: the scope)
 //   INVENTORY  j/k select, gg/G, {n}, Enter/Esc/s close
 //   MAP        Esc/m/q close
 //   SPECTATE   watching: a automatic camera on/off, n/N next/previous
@@ -252,6 +255,11 @@ export class Vim {
         this.count = '';
         this.call('pickup');
         break;
+      case 'e':
+        // Into the tank next to you, or out of the one you drive.
+        this.count = '';
+        this.call('use');
+        break;
       case 'v':
         this.setMode('view');
         break;
@@ -312,6 +320,10 @@ export class Vim {
       case 'v':
         this.count = '';
         this.call('zoom');
+        break;
+      case 'e':
+        this.count = '';
+        this.call('use');
         break;
       case '*':
         this.count = '';
@@ -593,7 +605,9 @@ export class Vim {
 }
 
 /// Look speed from held keys: an immediate step on press, then (after
-/// aimdelay) continuous turning that accelerates up to maxspeed.
+/// aimdelay) continuous turning: slow (sensitivity) at first and, only
+/// where the caller lets it accelerate, faster after accelafter up to
+/// maxspeed.
 export class Aim {
   constructor(settings) {
     this.s = settings;
@@ -630,8 +644,9 @@ export class Aim {
     this.held.clear();
   }
 
-  /// Degrees to turn this frame.
-  update(dt, zoom = 1) {
+  /// Degrees to turn this frame. accelerate = false (the first stage of
+  /// VIEW): the speed stays at sensitivity however long the key is held.
+  update(dt, zoom = 1, accelerate = true) {
     let yaw = 0;
     let pitch = 0;
     const delay = this.s.get('aimdelay') / 1000;
@@ -644,8 +659,9 @@ export class Aim {
       // speed grows by accel up to maxspeed.
       const accel = this.s.get('accel');
       const t = Math.max(0, h.t - delay - this.s.get('accelafter') / 1000);
-      const v =
-        accel === Infinity && h.t - delay > this.s.get('accelafter') / 1000
+      const v = !accelerate
+        ? this.s.get('sensitivity')
+        : accel === Infinity && h.t - delay > this.s.get('accelafter') / 1000
           ? this.s.get('maxspeed')
           : accel === Infinity
             ? this.s.get('sensitivity')
