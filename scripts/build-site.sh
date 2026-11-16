@@ -42,6 +42,13 @@ for d, _, names in os.walk(root):
         p = os.path.relpath(os.path.join(d, n), root).replace(os.sep, "/")
         if p.startswith(".") or p == "manifest.json":
             continue
+        # Hosts refuse a manifest with a path outside [A-Za-z0-9._-/] (see
+        # safe_path in crates/vimfps/src/webclient.rs): a stray file name
+        # (say, a sound with spaces in it) must not take the whole client down.
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", p):
+            print(f"::warning::{p}: not published (use only A-Z a-z 0-9 . _ - in file names)")
+            os.remove(os.path.join(d, n))
+            continue
         files.append(p)
 files.sort()
 json.dump({"version": version, "protocol": protocol, "files": files}, open(f"{root}/manifest.json", "w"), indent=1)

@@ -3,10 +3,11 @@
 import { Settings, OPTIONS, SMOOTH_GROUP } from './settings.js';
 import { Vim, Aim, MODES } from './vim.js';
 import { WsConnection, LocalConnection, parseServerUrl, PROTOCOL } from './net.js';
-import { World, wantVelocity, eyeHeight, GUNS, ACCEL, RUN_SPEED, SNEAK_SPEED, wrapAngle, bearing } from './world.js';
+import { World, wantVelocity, eyeHeight, GUNS, ACCEL, RUN_SPEED, SNEAK_SPEED, wrapAngle, bearing, TANK, pushOutOfTanks } from './world.js';
 import { TouchPad } from './touch.js';
 import { Director } from './director.js';
-import { Sound } from './audio.js';
+import { Sound, EVENT_SOUNDS } from './audio.js';
+import { TEXTURE_SLOTS, MAX_TEXTURE_BYTES, TextureStore, slotOf, parseSize, loadImage, fetchPack } from './textures.js';
 import { VERSION } from './version.js';
 
 const $ = (id) => document.getElementById(id);
@@ -82,6 +83,13 @@ const game = {
   bsodPending: false,
   range: false,
   respawnMode: true,
+  // Tanks on the field (latest snapshot), the one you drive (its id) and
+  // where it is drawn (smoothed between snapshots).
+  tanks: [],
+  myTank: null,
+  tankView: null,
+  // The ring: {x, z, r, nx, nz, nr, t, shrinking, dps, stage} or null.
+  ring: null,
 };
 
 function resetGame() {
@@ -112,7 +120,13 @@ function resetGame() {
     range: false,
     respawnMode: true,
     sky: null,
+    tanks: [],
+    myTank: null,
+    tankView: null,
+    ring: null,
   });
+  tankSteps.clear();
+  for (const id of ['ringwarn', 'prompt']) show(id, false);
   showPip(null);
   game.roster = new Map();
   game.steps = new Map();
@@ -121,6 +135,9 @@ function resetGame() {
   netStats.last = null;
   game.held = { fwd: false, back: false, left: false, right: false, up: false, down: false, tiltUp: false, tiltDown: false };
 }
+
+// Distance each tank has rolled since its last engine sound (by id).
+const tankSteps = new Map();
 
 // ---------------------------------------------------------------- helpers
 
@@ -224,7 +241,8 @@ const HELP = [
   '  f         撃つ / 選んだアイテムを使う     v         スコープ切り替え',
   '  {n}dd     グレネード (n=1〜5 で強さ)      f / {n}dd / r / *',
   '  r         リロード                       Esc       NORMAL へ',
-  '  y         足元の銃を拾う (最大 2 丁)',
+  '  y         足元の銃を拾う (最大 2 丁)         長押しの加速はスコープ (v 2 回目) だけ。1 段階目はずっと等速',
+  '  e         戦車に乗る / 降りる (近くで)',
   '  gt        銃を持ち替え                  INVENTORY (s)',
   '  *         照準の近くの敵をマーク (6 秒)     j / k     選ぶ (gg 先頭, G 末尾, 数字)',
   '  s         インベントリ                     Enter/Esc 閉じる → f で使う',
@@ -234,6 +252,10 @@ const HELP = [
   '',
   '索敵: 画面上のコンパスに、銃声 (赤 ●)・近くの足音 (橙 ●)・マークした敵 (黄 ▼) の方向が出ます。',
   '      見えている敵の頭上には ▼ が付きます。スニーク中の足音はコンパスに出ません。',
+  '',
+  '戦車: 近くで e で乗り込む。k / j 前進・後退、h / l 車体を旋回 (砲塔も一緒に回る)、v で砲を構えて hjkl で狙う (構え中は走れない)、',
+  '      f で砲撃 (装填 3 秒、着弾で爆発)、e で降りる。銃弾はほとんど効かない (15%)。グレネードと砲弾が有効。壊されると中の人も倒れる。',
+  'リング: オレンジ色の壁の外にいると体力が減ります (段階が進むほど速く)。マップ (m) に今の円 (赤) と次の円 (白) が出ます。',
   '',
   'コマンド',
   '  :spec                武器・移動などの数値 (弾速・ダメージ・連射速度…)',
@@ -254,6 +276,8 @@ const HELP = [
   '  :custom              カスタムマッチ   :botskill 1〜5 bot の強さ (練習のみ)',
   '  :net                 通信統計 (ping など)  :set netstat  常に右上に表示',
   '  :set nonameplates    頭上の名前を消す :set nohpbars  頭上の体力ゲージを消す',
+  '  :texture             自分の画像を地面・壁などに貼る (:texture だけで使い方と一覧)',
+  '  :sounds              起動音・エラー音・終了音のファイルの状態',
   '',
   'SPECTATE (観戦中)      a  自動カメラ (3D の中継視点。選手を自動で切り替え。もう一度押すと選手の視点)  :auto でも',
   '                       n / N  次 / 前の選手    o  自由視点 (k/j 前後, h/l 旋回, K/J 上下, u/d 見上げる・見下ろす, Shift で速く)',
@@ -302,6 +326,17 @@ function specLines(sp) {
   L.push(`グレネード: 信管 ${sp.grenade_fuse} 秒、半径 ${sp.grenade_radius} m、最大 ${sp.grenade_damage} ダメージ (距離で減少・壁で遮断、最大 ${sp.max_grenades} 個)`);
   L.push(`  {n}dd の初速: ${sp.throw_speeds.map((v, i) => `${i + 1}dd=${v}m/s`).join(' ')}`);
   L.push(`復活: ${sp.respawn} 秒後 · 復活直後 ${sp.protect} 秒は無敵 (撃つと解除)`);
+  if (sp.tank_hp) {
+    L.push('');
+    L.push(`戦車: HP ${sp.tank_hp} · 前進 ${sp.tank_speed} m/s / 後退 ${sp.tank_reverse} m/s · 旋回 ${sp.tank_turn}°/秒 · 壊されて ${sp.tank_respawn} 秒後に元の場所へ戻る`);
+    L.push(`  砲弾: 初速 ${sp.shell_speed} m/s (重力で落ちる) · 装填 ${sp.shell_reload} 秒 · 爆発半径 ${sp.shell_radius} m、最大 ${sp.shell_damage} ダメージ (直撃は即死)`);
+    L.push(`  装甲: 銃弾は ${Math.round(sp.tank_bullet_factor * 100)}% だけ通る · グレネードと砲弾の爆発はそのまま · 中の人は無傷 (壊されると一緒に倒れる) · 走っている戦車にひかれると即死`);
+  }
+  if (sp.ring_radii && sp.ring_radii.length) {
+    L.push('');
+    L.push(`リング: 半径 ${sp.ring_radii.join(' → ')} m と ${sp.ring_radii.length} 段階で縮む (待ち時間と縮む時間は試合時間の 8%、10〜60 秒)`);
+    L.push(`  外にいる間のダメージ: 毎秒 ${sp.ring_dps.join(' → ')} (段階ごと)。戦車の中でも受ける`);
+  }
   return L;
 }
 
@@ -497,6 +532,15 @@ function runCommand(line) {
     case 'custom':
       openCustom();
       break;
+    case 'tex':
+    case 'texture':
+    case 'textures':
+      textureCommand(args.trim());
+      break;
+    case 'sound':
+    case 'sounds':
+      showSounds();
+      break;
     case 'fs':
     case 'fullscreen':
       fullscreen();
@@ -522,6 +566,197 @@ async function fullscreen() {
   } catch (e) {
     balloon('フルスクリーンにできません', String(e.message || e), 'err');
   }
+}
+
+// ---------------------------------------------------------------- textures and sounds (your own assets)
+
+const texStore = new TextureStore(window.indexedDB);
+// slot -> { image, size, from: 'browser' | 'pack', name }
+const texState = new Map();
+const texPackBase = new URL('../assets/textures/', import.meta.url);
+
+/// Everything in texState onto the world (once there is a renderer).
+function applyTextures() {
+  if (!renderer) return;
+  for (const slot of Object.keys(TEXTURE_SLOTS)) {
+    const t = texState.get(slot);
+    const have = renderer.textures.get(slot);
+    const size = t ? t.size : null;
+    if ((t ? t.image : null) === (have ? have.tex.image : null) && (!t || have.size === size)) continue;
+    renderer.setTexture(slot, t ? t.image : null, size);
+  }
+}
+
+/// At start-up: the pack served with the game, then (over it) what this
+/// browser has stored.
+async function loadTextures() {
+  for (const e of await fetchPack(texPackBase)) {
+    try {
+      texState.set(e.slot, { image: await loadImage(e.url), size: e.size || TEXTURE_SLOTS[e.slot].size, from: 'pack', name: e.url.split('/').pop() });
+    } catch {
+      console.warn(`texture pack: ${e.url} could not be loaded`);
+    }
+  }
+  try {
+    for (const [slot, rec] of await texStore.all()) {
+      try {
+        texState.set(slot, { image: await loadImage(rec.blob), size: rec.size || TEXTURE_SLOTS[slot].size, from: 'browser', name: rec.name || '' });
+      } catch {
+        // A stored file that no longer decodes: skip it.
+      }
+    }
+  } catch {
+    // No storage (private mode): the pack only.
+  }
+  applyTextures();
+}
+
+/// Takes image files for slots: [[slot, File]]. Stored in this browser.
+async function addTextures(pairs) {
+  const done = [];
+  const failed = [];
+  for (const [slot, file] of pairs) {
+    try {
+      if (file.size > MAX_TEXTURE_BYTES) throw new Error(`大きすぎます (${Math.round(file.size / 1048576)} MB、上限 ${MAX_TEXTURE_BYTES / 1048576} MB)`);
+      const image = await loadImage(file);
+      const size = (texState.get(slot) && texState.get(slot).size) || TEXTURE_SLOTS[slot].size;
+      texState.set(slot, { image, size, from: 'browser', name: file.name || '' });
+      done.push(`${slot} ← ${file.name || '画像'}`);
+      try {
+        await texStore.put(slot, { blob: file, size, name: file.name || '' });
+      } catch (e) {
+        failed.push(`${slot}: 保存できません (このページを閉じるまでは使えます): ${e.message || e}`);
+      }
+    } catch (e) {
+      failed.push(`${file.name || slot}: ${e.message || e}`);
+    }
+  }
+  applyTextures();
+  if (done.length) balloon('テクスチャを貼りました', done.join(' · '));
+  if (failed.length) balloon('テクスチャを読めません', failed.join(' · '), 'err');
+}
+
+/// Files dropped or picked without naming a slot: matched by file name
+/// (ground.png, wall-brick.jpg ...).
+function addTexturesByName(files) {
+  const pairs = [];
+  const unknown = [];
+  for (const f of files) {
+    const slot = slotOf(f.name);
+    if (slot) pairs.push([slot, f]);
+    else unknown.push(f.name);
+  }
+  if (unknown.length) balloon('どこに貼る画像か分かりません', `${unknown.join(', ')} — ファイル名を ${Object.keys(TEXTURE_SLOTS).join(' / ')} で始めてください`, 'err');
+  if (pairs.length) addTextures(pairs);
+}
+
+/// Opens the system's file chooser (the one place a pointer is needed).
+function pickFiles(multiple, onFiles) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.multiple = multiple;
+  input.style.display = 'none';
+  input.addEventListener('change', () => {
+    const files = [...(input.files || [])];
+    input.remove();
+    if (files.length) onFiles(files);
+  });
+  document.body.appendChild(input);
+  input.click();
+}
+
+function textureLines() {
+  const L = ['自分の画像を、地形はそのままに面へ貼ります (このブラウザーに保存されます)。', ''];
+  for (const [slot, o] of Object.entries(TEXTURE_SLOTS)) {
+    const t = texState.get(slot);
+    const state = !t ? '—' : `${t.from === 'pack' ? '同梱パック' : 'このブラウザー'}: ${t.name || '画像'} (${t.image.naturalWidth}×${t.image.naturalHeight}${o.size ? `、1 枚 ${t.size} m` : ''})`;
+    L.push(`  ${slot.padEnd(7)} ${o.label.padEnd(12)} ${state}`);
+  }
+  L.push('');
+  L.push('  :texture ground            画像ファイルを選んで地面に貼る (ground の所は上の名前)');
+  L.push('  :texture load              複数のファイルをまとめて選ぶ (ファイル名の先頭で貼る場所を決める: ground.png, wall-brick.jpg …)');
+  L.push('  :texture ground URL        URL の画像を貼る (その画像が他サイトからの読み込みを許可している場合)');
+  L.push('  :texture ground size 12    1 枚の画像が覆う大きさ (メートル)。小さいほど細かく繰り返す');
+  L.push('  :texture ground none       その面を元の色に戻す        :texture reset   すべて元に戻す');
+  L.push('  画像ファイルをこのページへドラッグ & ドロップしても貼れます (ファイル名で場所を決めます)。');
+  L.push('');
+  L.push('  サーバーごと配る場合: web/assets/textures/ に画像と pack.json を置きます ({"ground": "grass.png", "wall": {"file": "brick.jpg", "size": 3}})。');
+  return L;
+}
+
+async function textureCommand(args) {
+  const [a, b, c] = args.split(/\s+/);
+  if (!a || a === 'list' || a === 'ls') return showMsg(':texture — テクスチャ', textureLines());
+  if (a === 'load' || a === 'open') return pickFiles(true, addTexturesByName);
+  if (a === 'reset' || a === 'clear') {
+    for (const [slot, t] of [...texState]) if (t.from === 'browser') texState.delete(slot);
+    try {
+      await texStore.clear();
+    } catch {
+      // Nothing stored.
+    }
+    applyTextures();
+    return balloon('テクスチャを元に戻しました', '同梱パックの分は次に開いたときに戻ります');
+  }
+  if (!TEXTURE_SLOTS[a]) return balloon(`E: 貼る場所が分かりません: ${a}`, Object.keys(TEXTURE_SLOTS).join(' / '), 'err');
+  if (!b) return pickFiles(false, (files) => addTextures([[a, files[0]]]));
+  if (b === 'none' || b === 'off' || b === '-') {
+    texState.delete(a);
+    try {
+      await texStore.remove(a);
+    } catch {
+      // Nothing stored.
+    }
+    applyTextures();
+    return balloon(`${a}: 元の色に戻しました`);
+  }
+  if (b === 'size' || parseSize(b) != null) {
+    const size = parseSize(b === 'size' ? c : b);
+    const t = texState.get(a);
+    if (size == null) return balloon('E: 大きさ (メートル) は 0.1〜500 で', '', 'err');
+    if (!t) return balloon(`E: ${a} にはまだ画像がありません`, `:texture ${a} で選んでください`, 'err');
+    t.size = size;
+    try {
+      const rec = (await texStore.all()).find(([s]) => s === a);
+      if (rec) await texStore.put(a, { ...rec[1], size });
+    } catch {
+      // Not stored: for this page only.
+    }
+    applyTextures();
+    return balloon(`${a}: 1 枚 ${size} m`);
+  }
+  // A URL.
+  try {
+    const res = await fetch(new URL(b, window.location.href));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    await addTextures([[a, new File([blob], b.split(/[\\/?#]/).filter(Boolean).pop() || 'image', { type: blob.type })]]);
+  } catch (e) {
+    balloon('画像を取得できません', `${b}: ${e.message || e}`, 'err');
+  }
+  return undefined;
+}
+
+// Image files dropped on the page become textures.
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const files = [...((e.dataTransfer && e.dataTransfer.files) || [])];
+  if (files.length) addTexturesByName(files);
+});
+
+/// :sounds — the three event sounds and whether their files are there.
+function showSounds() {
+  sound.wake();
+  const st = sound.sampleStatus();
+  const word = { file: 'ファイルを再生', synth: 'ファイルなし (代わりの合成音)', '?': '確認中 (キーを押してからもう一度)' };
+  const L = ['次の 3 つの場面で音声ファイルを鳴らします。ファイルは同梱していません: web/assets/sounds/ に置いてください。', ''];
+  for (const [name, when] of Object.entries(EVENT_SOUNDS)) L.push(`  ${`${name}.wav`.padEnd(13)} ${when.padEnd(22)} ${word[st[name]]}`);
+  L.push('');
+  L.push('  .wav の代わりに .mp3 / .ogg でも読みます (startup.mp3 など)。ファイル名は半角英数字のこの名前のままにしてください。');
+  L.push('  音量は :set volume=70。ファイルが無い間は短い合成音が鳴ります。');
+  showMsg(':sounds — 効果音のファイル', L);
 }
 
 // ---------------------------------------------------------------- chat
@@ -643,6 +878,51 @@ function drawMap() {
     ctx.arc(tx(sh.x), tx(sh.z), 7, 0, Math.PI * 2);
     ctx.stroke();
   }
+  // Tanks: a square, with a line where the gun points.
+  for (const t of game.tanks) {
+    const mine = t.id === game.myTank;
+    ctx.save();
+    ctx.translate(tx(mine ? game.pos.x : t.x), tx(mine ? game.pos.z : t.z));
+    ctx.rotate(-t.yaw);
+    ctx.fillStyle = t.driver != null ? '#1f3d12' : '#55632f';
+    ctx.strokeStyle = mine ? '#fff' : '#000';
+    ctx.lineWidth = 1.5;
+    ctx.fillRect(-5, -6.5, 10, 13);
+    ctx.strokeRect(-5, -6.5, 10, 13);
+    ctx.restore();
+    const aim = mine ? game.yaw : t.aim;
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(tx(t.x), tx(t.z));
+    ctx.lineTo(tx(t.x) - Math.sin(aim) * 11, tx(t.z) - Math.cos(aim) * 11);
+    ctx.stroke();
+  }
+  // The ring: now (red), and where it is going (white, dashed).
+  const ring = game.ring;
+  if (ring) {
+    ctx.save();
+    // Outside the circle, the field is dimmed.
+    ctx.fillStyle = 'rgba(255, 70, 20, 0.22)';
+    ctx.beginPath();
+    ctx.rect(0, 0, W, W);
+    ctx.arc(tx(ring.x), tx(ring.z), ring.r * k, 0, Math.PI * 2, true);
+    ctx.fill('evenodd');
+    ctx.strokeStyle = '#ff4a1a';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(tx(ring.x), tx(ring.z), ring.r * k, 0, Math.PI * 2);
+    ctx.stroke();
+    if (ring.t >= 0) {
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 5]);
+      ctx.beginPath();
+      ctx.arc(tx(ring.nx), tx(ring.nz), ring.nr * k, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
   // Watching: everyone, with names (the one followed in yellow).
   if (game.watching) {
     const snap = game.snaps[game.snaps.length - 1];
@@ -669,13 +949,43 @@ function drawMap() {
       ctx.strokeText(label, tx(p.x) + 7, tx(p.z) - 6);
       ctx.fillText(label, tx(p.x) + 7, tx(p.z) - 6);
     }
-    if (game.free || game.sky) {
-      // Where the camera is.
-      const c = game.sky || game.free;
+    // Your own view: where the camera is, and the wedge it looks along
+    // (whichever camera it is: a player's eyes, automatic, free, the sky).
+    const cx = tx(game.pos.x);
+    const cz = tx(game.pos.z);
+    const aspect = window.innerWidth / Math.max(1, window.innerHeight);
+    const halfFov = Math.atan(Math.tan((game.fov * DEG) / 2) * aspect);
+    // Looking down, the view reaches less far across the ground.
+    const reach = 46 * Math.max(0.35, Math.cos(game.camPitch || 0));
+    const dir = -game.yaw - Math.PI / 2;
+    ctx.fillStyle = 'rgba(255, 212, 0, 0.28)';
+    ctx.strokeStyle = '#ffd400';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cz);
+    ctx.arc(cx, cz, reach, dir - halfFov, dir + halfFov);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#ffd400';
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cx, cz, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    if (game.sky) {
+      // From the sky: the spot in the middle of the screen.
       ctx.strokeStyle = '#ffd400';
       ctx.lineWidth = 2;
-      ctx.strokeRect(tx(c.x) - 6, tx(c.z) - 6, 12, 12);
+      ctx.strokeRect(tx(game.sky.x) - 6, tx(game.sky.z) - 6, 12, 12);
     }
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#000';
+    ctx.fillStyle = '#ffd400';
+    ctx.strokeText('視点', cx + 7, cz + 14);
+    ctx.fillText('視点', cx + 7, cz + 14);
     return;
   }
   // You: a triangle pointing where you look.
@@ -856,6 +1166,7 @@ async function onWelcome(m) {
   if (!ok) return leave();
   if (game.conn !== conn) return;
   renderer.buildMap(m.map);
+  applyTextures();
   renderer.setPickups(lastPickups);
   show('title', false);
   show('hud');
@@ -866,7 +1177,7 @@ async function onWelcome(m) {
   else
     balloon(
       game.practice ? (game.offlineName || offlineName({})).long : `${serverInfo ? serverInfo.name : 'サーバー'} に${m.spectator ? '観戦で' : ''}参加しました`,
-      `${Math.round(m.time_limit / 60)} 分 · ${m.respawn === false ? '復活なし (最後の 1 人が勝ち)' : m.frag_limit > 1e6 ? 'キル数の上限なし' : `${m.frag_limit} キル先取`} · bot の強さ ${m.bot_skill || 3} · :help で操作説明`,
+      `${Math.round(m.time_limit / 60)} 分 · ${m.respawn === false ? '復活なし (最後の 1 人が勝ち)' : m.frag_limit > 1e6 ? 'キル数の上限なし' : `${m.frag_limit} キル先取`} · bot の強さ ${m.bot_skill || 3}${m.ring ? ' · リングあり' : ''} · :help で操作説明`,
     );
   if (m.version !== VERSION) balloon('バージョンが違います', `サーバー v${m.version} / このページ v${VERSION}`, 'err');
 }
@@ -905,8 +1216,17 @@ function onMessage(m) {
       }
       break;
     }
+    case 'shell': {
+      const mine = m.id === game.myId;
+      if (!mine) game.shots.push({ x: m.from.x, z: m.from.z, id: m.id, t: performance.now() });
+      if (game.director) game.director.note('shot', m.id);
+      if (renderer) renderer.shell(m.from, m.to, m.vel, game.specs && game.specs.gravity);
+      sound.cannon(mine ? null : m.from);
+      if (mine && settings.get('bob')) game.kick = 0.12;
+      break;
+    }
     case 'hit':
-      if (game.director) game.director.note('hit', m.attacker, m.victim);
+      if (game.director && m.victim) game.director.note('hit', m.attacker, m.victim);
       if (m.attacker === game.myId && m.victim !== game.myId) {
         const hm = $('hitmarker');
         hm.classList.toggle('head', m.head);
@@ -920,22 +1240,27 @@ function onMessage(m) {
       }
       if (m.victim === game.myId) {
         damageArc(m.from);
-        sound.hurt();
+        // Outside the ring (you "hit" yourself): a tick, and the arc points
+        // back to the middle of the circle.
+        if (m.attacker === m.victim && ringOutside() > 0) sound.ringTick();
+        else sound.hurt();
       }
       break;
     case 'kill': {
-      const how = m.cause === 'grenade' ? 'グレネード' : gunName(m.cause.gun);
+      const ring = m.cause === 'ring';
+      const how = m.cause === 'grenade' ? 'グレネード' : m.cause === 'tank' ? '戦車' : ring ? 'リングの外' : gunName(m.cause && m.cause.gun);
       const self = m.killer === m.victim;
       const dist = !self && m.dist ? ` · ${m.dist >= 10 ? Math.round(m.dist) : m.dist.toFixed(1)} m` : '';
       const mine = m.killer === game.myId && !self;
       balloon(
-        self ? `${nameOf(m.victim)} は自爆しました` : mine ? `キル: ${nameOf(m.victim)}` : `${nameOf(m.killer)} ▶ ${nameOf(m.victim)}`,
+        ring ? `${nameOf(m.victim)} はリングの外で倒れました` : self ? `${nameOf(m.victim)} は自爆しました` : mine ? `キル: ${nameOf(m.victim)}` : `${nameOf(m.killer)} ▶ ${nameOf(m.victim)}`,
         `${how}${m.head ? ' · ヘッドショット' : ''}${dist}`,
         'kill',
       );
       if (m.victim === game.myId && !game.watching) {
         game.alive = false;
-        showBsod(self ? null : nameOf(m.killer), `${how}${m.head ? ' · ヘッドショット' : ''}${dist}`);
+        sound.event('error');
+        showBsod(self ? null : nameOf(m.killer), `${how}${m.head ? ' · ヘッドショット' : ''}${dist}`, m.cause);
         if (vim.mode === 'view' || vim.mode === 'inventory' || vim.mode === 'map') vim.setMode('normal');
         if (!game.respawnMode) {
           // Out of the round: after the stop screen, watch through the
@@ -984,12 +1309,16 @@ function onMessage(m) {
       game.alive = true;
       game.timed = null;
       game.turnLeft = 0;
+      game.myTank = null;
+      game.tankView = null;
       hideDeath();
       if (game.watching) stopWatching();
       resetControls(false);
+      sound.event('startup');
       break;
     case 'match_end':
       showResult(m);
+      sound.event('shutdown');
       break;
     case 'match_start':
       show('resultwin', false);
@@ -1060,16 +1389,17 @@ function bsodCode(name) {
   return bytes.map((b) => `0x${b.toString(16).toUpperCase().padStart(8, '0')}`).join(', ');
 }
 
-function showBsod(killer, how) {
-  bsodState = { killer, how, at: performance.now() };
+function showBsod(killer, how, cause = null) {
+  bsodState = { killer, how, cause, at: performance.now() };
   renderBsod(null);
   show('boot', false);
   show('bsod');
 }
 
 function renderBsod(left) {
-  const { killer, how } = bsodState;
-  const id = (killer ? `KILLED_BY_${killer}` : 'SELF_DESTRUCT').toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+  const { killer, how, cause } = bsodState;
+  const ring = cause === 'ring';
+  const id = (killer ? `KILLED_BY_${killer}` : ring ? 'OUT_OF_RING' : 'SELF_DESTRUCT').toUpperCase().replace(/[^A-Z0-9_]/g, '_');
   const count = left == null ? '' : ` ${Math.max(0, Math.ceil(left - BOOT_TIME))}`;
   const lines = [
     '<span class="hl"> vim-fps </span>',
@@ -1078,10 +1408,10 @@ function renderBsod(left) {
     '',
     esc(id),
     '',
-    killer ? `倒した相手: ${esc(killer)}` : '原因: 自分のグレネード',
+    killer ? `倒した相手: ${esc(killer)}` : ring ? '原因: リングの外にいた' : cause === 'tank' ? '原因: 自分の砲撃' : '原因: 自分のグレネード',
     `詳細: ${esc(how)}`,
     '',
-    'このエラーが続く場合は、遮蔽物に隠れるか、先に撃ってください。',
+    ring ? 'このエラーが続く場合は、マップ (m) で円を確かめ、早めに中へ入ってください。' : 'このエラーが続く場合は、遮蔽物に隠れるか、先に撃ってください。',
     '',
     `自動的に再起動します…${count}`,
     '',
@@ -1148,11 +1478,24 @@ function onSnap(m) {
   game.grenades = m.grenades;
   const now = performance.now();
   const players = new Map(m.players.map((p) => [p.id, p]));
-  game.snaps.push({ t: now, players });
+  const tanks = new Map((m.tanks || []).map((t) => [t.id, t]));
+  // Engines: a rumble for every couple of metres a tank rolls.
+  for (const t of tanks.values()) {
+    const was = game.tanks.find((o) => o.id === t.id);
+    const acc = (tankSteps.get(t.id) || 0) + (was ? Math.hypot(t.x - was.x, t.z - was.z) : 0);
+    if (acc > 2.2) {
+      sound.rumble(t.driver === game.myId && !game.watching ? null : { x: t.x, y: t.y + 1, z: t.z });
+      tankSteps.set(t.id, 0);
+    } else tankSteps.set(t.id, acc);
+  }
+  game.tanks = m.tanks || [];
+  game.ring = m.ring || null;
+  game.snaps.push({ t: now, players, tanks });
   netStats.snaps.push(now);
   if (netStats.snaps.length > 60) netStats.snaps.shift();
   if (game.snaps.length > 12) game.snaps.shift();
   const mine = players.get(game.myId);
+  game.myTank = mine && mine.alive && mine.tank != null && !m.watching ? mine.tank : null;
   if (mine) {
     if (mine.alive && !game.alive && game.me && game.me.respawn === 0) {
       game.alive = true;
@@ -1259,6 +1602,9 @@ const vim = new Vim(settings, {
   },
   pickup() {
     if (game.conn) game.conn.send({ t: 'pickup' });
+  },
+  use() {
+    if (game.conn && game.alive) game.conn.send({ t: 'use' });
   },
   swapGun() {
     const inv = game.me && game.me.inv;
@@ -1465,10 +1811,9 @@ function sendInput(now) {
   }
 }
 
-function interpolated(now) {
+/// The two snapshots around "100 ms ago" and how far between them that is.
+function snapPair(now) {
   const snaps = game.snaps;
-  if (!snaps.length) return new Map();
-  if (!settings.get('interp') || snaps.length < 2) return snaps[snaps.length - 1].players;
   const t = now - 100;
   let a = snaps[0];
   let b = snaps[snaps.length - 1];
@@ -1480,6 +1825,65 @@ function interpolated(now) {
     }
   }
   const k = b.t > a.t ? Math.max(0, Math.min(1, (t - a.t) / (b.t - a.t))) : 1;
+  return { a, b, k };
+}
+
+/// Tanks as drawn: between snapshots, like the players.
+function interpolatedTanks(now) {
+  const snaps = game.snaps;
+  if (!snaps.length) return [];
+  if (!settings.get('interp') || snaps.length < 2) return [...snaps[snaps.length - 1].tanks.values()];
+  const { a, b, k } = snapPair(now);
+  const out = [];
+  for (const tb of b.tanks.values()) {
+    const ta = a.tanks.get(tb.id);
+    if (!ta) {
+      out.push(tb);
+      continue;
+    }
+    out.push({
+      ...tb,
+      x: ta.x + (tb.x - ta.x) * k,
+      y: ta.y + (tb.y - ta.y) * k,
+      z: ta.z + (tb.z - ta.z) * k,
+      yaw: ta.yaw + wrapAngle(tb.yaw - ta.yaw) * k,
+      aim: ta.aim + wrapAngle(tb.aim - ta.aim) * k,
+      pitch: ta.pitch + (tb.pitch - ta.pitch) * k,
+    });
+  }
+  return out;
+}
+
+/// What a tank's name plate says.
+function tankLabel(t) {
+  return t.driver != null ? `戦車 · ${nameOf(t.driver)}` : '戦車';
+}
+
+/// The tank you drive (latest snapshot), or null.
+function myTank() {
+  if (game.myTank == null) return null;
+  return game.tanks.find((t) => t.id === game.myTank) || null;
+}
+
+/// An empty tank close enough to get into.
+function tankInReach() {
+  if (!game.alive || game.myTank != null || game.watching) return null;
+  return game.tanks.find((t) => t.driver == null && Math.hypot(t.x - game.pos.x, t.z - game.pos.z) < TANK.enter) || null;
+}
+
+/// How far outside the ring you are (metres; negative inside, -Infinity
+/// without a ring).
+function ringOutside() {
+  const r = game.ring;
+  if (!r) return -Infinity;
+  return Math.hypot(game.pos.x - r.x, game.pos.z - r.z) - r.r;
+}
+
+function interpolated(now) {
+  const snaps = game.snaps;
+  if (!snaps.length) return new Map();
+  if (!settings.get('interp') || snaps.length < 2) return snaps[snaps.length - 1].players;
+  const { a, b, k } = snapPair(now);
   const out = new Map();
   for (const [id, pb] of b.players) {
     const pa = a.players.get(id);
@@ -1501,6 +1905,7 @@ function interpolated(now) {
 function targetFov() {
   const base = settings.get('fov');
   if (!game.ads) return base;
+  if (game.myTank != null) return game.zoom === 2 ? TANK.scope : TANK.ads;
   const inv = game.me && game.me.inv;
   const gi = inv ? (inv.sel === 'gun1' ? 1 : 0) : 0;
   const gun = inv && inv.guns[gi] ? GUNS[inv.guns[gi].gun] : GUNS.ar;
@@ -1527,7 +1932,9 @@ function frame(now) {
     watchFrame(now, dt);
   } else if (game.conn && game.map && renderer) {
     // Look (VIEW) and quick turns.
-    if (vim.mode === 'view') applyLook(aim.update(dt, zoomFactor()));
+    // Held hjkl: one steady speed at the first stage, speeding up only at
+    // the second (the scope).
+    if (vim.mode === 'view') applyLook(aim.update(dt, zoomFactor(), game.zoom === 2));
     if (game.turnLeft) {
       const step = settings.get('turnanim') ? Math.min(Math.abs(game.turnLeft), 12 * dt) * Math.sign(game.turnLeft) : game.turnLeft;
       game.yaw = wrapAngle(game.yaw + step);
@@ -1539,6 +1946,23 @@ function frame(now) {
       game.timed.left -= dt;
       if (game.timed.left <= 0) game.timed = null;
     }
+    // In a tank: the server drives it; follow it smoothly, and turn with
+    // the hull (the turret rides on it).
+    const tank = myTank();
+    if (tank) {
+      let tv = game.tankView;
+      if (!tv || tv.id !== tank.id) tv = game.tankView = { id: tank.id, x: tank.x, y: tank.y, z: tank.z, yaw: tank.yaw };
+      const k = settings.get('interp') ? 1 - Math.exp(-dt * 14) : 1;
+      tv.x += (tank.x - tv.x) * k;
+      tv.z += (tank.z - tv.z) * k;
+      const turn = wrapAngle(tank.yaw - tv.yaw) * k;
+      tv.yaw = wrapAngle(tv.yaw + turn);
+      tv.y = game.world.height(tv.x, tv.z);
+      game.yaw = wrapAngle(game.yaw + turn);
+      game.pitch = Math.max(TANK.pitch[0], Math.min(TANK.pitch[1], game.pitch));
+      game.pos = { x: tv.x, y: tv.y, z: tv.z };
+      game.vel = { x: 0, z: 0 };
+    } else game.tankView = null;
     // Own movement, predicted with the server's rules.
     const { mx, mz } = moveAxes();
     const want = game.ads ? { x: 0, z: 0 } : wantVelocity(mx, mz, game.yaw, game.sneak);
@@ -1550,9 +1974,9 @@ function frame(now) {
       const max = ACCEL * dt;
       game.vel = l <= max ? { x: want.x, z: want.z } : { x: game.vel.x + (dx / l) * max, z: game.vel.z + (dz / l) * max };
     }
-    if (game.alive && game.intermission == null) {
+    if (game.alive && game.intermission == null && !tank) {
       const before = { ...game.pos };
-      game.pos = game.world.slide(game.pos, game.vel.x * dt, game.vel.z * dt);
+      game.pos = pushOutOfTanks(game.world, game.world.slide(game.pos, game.vel.x * dt, game.vel.z * dt), game.tanks);
       const moved = Math.hypot(game.pos.x - before.x, game.pos.z - before.z);
       if (moved > 0) {
         game.myStep += moved;
@@ -1575,14 +1999,14 @@ function frame(now) {
       game.fov = tf;
       game.adsK = game.ads ? 1 : 0;
     }
-    const gun = heldGun();
+    const gun = tank ? null : heldGun();
     const sel = game.me && game.me.inv.sel;
-    renderer.setHeld(sel === 'medkit' || sel === 'grenade' ? sel : gun ? gun.gun : null);
+    renderer.setHeld(tank ? null : sel === 'medkit' || sel === 'grenade' ? sel : gun ? gun.gun : null);
     // The SR looks through its scope at both stages (low / high power).
     const scoped = game.ads && gun && gun.gun === 'sr' && game.adsK > 0.5;
     show('scope', scoped);
     if (scoped) updateHoldover();
-    const style = game.ads && game.adsK > 0.6 && !scoped ? renderer.adsStyle() : null;
+    const style = game.ads && game.adsK > 0.6 && !scoped && !tank ? renderer.adsStyle() : null;
     $('crosshair').dataset.mode = style ? `ads-${style}` : vim.mode === 'view' ? 'view' : vim.mode === 'normal' ? 'normal' : 'other';
     const bobOn = settings.get('bob');
     if (bobOn) game.kick = Math.max(0, game.kick - dt * 0.6);
@@ -1595,22 +2019,30 @@ function frame(now) {
       if (id === game.myId) continue;
       renderer.setPlayer(id, p, nameOf(id), markOf(id, p, now));
     }
+    // Tanks: your own where you see it (no lag), turret on your aim.
+    renderer.setTanks(
+      interpolatedTanks(now).map((t) => (tank && t.id === tank.id ? { ...t, ...game.tankView, aim: game.yaw, pitch: game.pitch } : t)),
+      game.specs && game.specs.tank_hp,
+      tank ? tank.id : null,
+      tankLabel,
+    );
+    renderer.setRing(game.ring);
     renderer.updateEffects(dt);
-    const eye = eyeHeight(game.sneak);
+    const eye = tank ? TANK.eye : eyeHeight(game.sneak);
     const cam = {
       x: game.pos.x,
-      y: game.pos.y + eye + (bobOn && !game.ads ? Math.abs(Math.sin(game.bob)) * 0.04 : 0),
+      y: game.pos.y + eye + (bobOn && !game.ads && !tank ? Math.abs(Math.sin(game.bob)) * 0.04 : 0),
       z: game.pos.z,
       yaw: game.yaw,
       pitch: game.pitch,
       fov: game.fov,
     };
-    renderer.render(cam, { ads: game.adsK, hide: scoped || !game.alive, bob: bobY, kick: game.kick });
+    renderer.render(cam, { ads: game.adsK, hide: scoped || !game.alive || !!tank, bob: bobY, kick: game.kick });
     sound.listener(cam.x, cam.y, cam.z, game.yaw);
     if (vim.mode === 'map') drawMap();
   }
+  touch.setScene(touchScene());
   if (game.conn && game.map && renderer) {
-
     pingTimer += dt;
     if (pingTimer > 1) {
       pingTimer = 0;
@@ -1715,11 +2147,13 @@ const CUSTOM_ROWS = [
   { key: 'rule', label: 'ルール', values: ['ffa', 'last'], fmt: (v) => (v === 'ffa' ? '個人戦 (復活あり)' : '復活なし (最後の 1 人が勝ち)') },
   { key: 'time', label: '時間', values: [3, 5, 10, 15, 20, 30, 60], fmt: (v) => `${v} 分` },
   { key: 'frags', label: '終了キル数', values: [0, 5, 10, 15, 25, 50], fmt: (v) => (v ? `${v} キル` : 'なし (時間まで)') },
+  { key: 'ring', label: 'リング', values: ['on', 'off'], fmt: (v) => (v === 'on' ? 'あり (縮む円の外はダメージ)' : 'なし') },
+  { key: 'tanks', label: '戦車', values: ['on', 'off'], fmt: (v) => (v === 'on' ? 'あり (3 両)' : 'なし') },
   { key: 'seed', label: 'マップ', values: null, fmt: (v) => (v ? `シード ${v}` : 'ランダム') },
   { key: 'start', label: '▶ 開始', values: null, fmt: () => 'Enter' },
 ];
 const CUSTOM_KEY = 'vimfps.custom.v1';
-let custom = { bots: 5, skill: 3, rule: 'ffa', time: 10, frags: 25, seed: 0, row: 0 };
+let custom = { bots: 5, skill: 3, rule: 'ffa', time: 10, frags: 25, ring: 'on', tanks: 'on', seed: 0, row: 0 };
 try {
   Object.assign(custom, JSON.parse((storage && storage.getItem(CUSTOM_KEY)) || '{}'));
 } catch {
@@ -1778,6 +2212,8 @@ function customSubmit() {
     skill: custom.skill,
     time: custom.time * 60,
     frags: custom.rule === 'last' ? 0 : custom.frags,
+    noRing: custom.ring === 'off',
+    noTanks: custom.tanks === 'off',
     seed,
   });
 }
@@ -1964,6 +2400,21 @@ function watchFrame(now, dt) {
     const mark = auto ? (p.alive && id === auto.subject ? 'spotted' : null) : game.sky ? (p.alive ? 'seen' : null) : markOf(id, p, now);
     renderer.setPlayer(id, p, nameOf(id), mark);
   }
+  renderer.setTanks(interpolatedTanks(now), game.specs && game.specs.tank_hp, null, tankLabel);
+  renderer.setRing(game.ring);
+  // A player's eyes: on foot, or from the top of the tank they drive.
+  const eyesOf = (t) => {
+    const gun = t.gun && GUNS[t.gun];
+    const inTank = t.tank != null;
+    return {
+      x: t.x,
+      y: t.y + (inTank ? TANK.eye : eyeHeight(t.sneak)),
+      z: t.z,
+      yaw: t.yaw,
+      pitch: t.pitch,
+      fov: !t.ads ? settings.get('fov') : inTank ? TANK.ads : gun ? gun.ads : settings.get('fov'),
+    };
+  };
   let cam;
   let vm = { ads: 0, hide: true, bob: 0, kick: 0 };
   let scoped = false;
@@ -1974,12 +2425,7 @@ function watchFrame(now, dt) {
     const rect = target && target.alive ? pipRect() : null;
     if (rect) {
       // The wipe: what the followed player sees.
-      const gun = target.gun && GUNS[target.gun];
-      inset = {
-        cam: { x: target.x, y: target.y + eyeHeight(target.sneak), z: target.z, yaw: target.yaw, pitch: target.pitch, fov: target.ads && gun ? gun.ads : settings.get('fov') },
-        rect,
-        hide: target.id,
-      };
+      inset = { cam: eyesOf(target), rect, hide: target.id };
     }
     showPip(rect, target ? nameOf(target.id) : '');
   } else if (game.sky) {
@@ -2034,23 +2480,18 @@ function watchFrame(now, dt) {
     renderer.setHeld(null);
   } else {
     renderer.hidePlayer(target.id);
-    const gun = target.gun && GUNS[target.gun];
-    scoped = target.ads && target.gun === 'sr';
-    cam = {
-      x: target.x,
-      y: target.y + eyeHeight(target.sneak),
-      z: target.z,
-      yaw: target.yaw,
-      pitch: target.pitch,
-      fov: target.ads && gun ? gun.ads : settings.get('fov'),
-    };
-    renderer.setHeld(target.gun || null);
-    vm = { ads: target.ads ? 1 : 0, hide: scoped, bob: 0, kick: 0 };
+    const inTank = target.tank != null;
+    scoped = target.ads && target.gun === 'sr' && !inTank;
+    cam = eyesOf(target);
+    renderer.setHeld(inTank ? null : target.gun || null);
+    vm = { ads: target.ads ? 1 : 0, hide: scoped || inTank, bob: 0, kick: 0 };
   }
   if (!auto) showPip(null);
   show('scope', scoped);
   $('crosshair').dataset.mode = auto ? 'none' : game.free ? 'other' : target && target.ads ? 'view' : 'normal';
-  // The compass, markers and sound follow the camera.
+  // The compass, markers and sound follow the camera. (Where the camera
+  // is and looks is also what the map shows as your own view.)
+  game.camPitch = cam.pitch;
   game.pos = { x: cam.x, y: cam.y - 1.6, z: cam.z };
   game.yaw = cam.yaw;
   game.pitch = cam.pitch;
@@ -2091,7 +2532,7 @@ function updateWatchHud() {
         `<span>${rr ? `${rr.kills} キル / ${rr.deaths} デス` : ''}</span></div></div>`;
     }
   }
-  setText($('tb-weapon'), t && t.gun ? gunName(t.gun) : '観戦中');
+  setText($('tb-weapon'), t && t.tank != null ? '戦車' : t && t.gun ? gunName(t.gun) : '観戦中');
   setText($('tb-items'), t ? nameOf(t.id) : '—');
   const hp = t && t.hp != null ? Math.max(0, t.hp) : 0;
   $('hp-fill').style.width = `${hp}%`;
@@ -2104,7 +2545,30 @@ function updateWatchHud() {
   show('progress', false);
   const rows = [...game.roster.values()].filter((x) => !x.spectator);
   const alive = rows.filter((x) => !x.out).length;
-  setText($('rank'), game.respawnMode ? `観戦中 · ${rows.length} 人` : `残り ${alive} 人 / ${rows.length} 人`);
+  setText($('rank'), (game.respawnMode ? `観戦中 · ${rows.length} 人` : `残り ${alive} 人 / ${rows.length} 人`) + ringLine());
+  show('ringwarn', false);
+  show('prompt', false);
+}
+
+/// The ring's state, as a second line under the rank.
+function ringLine() {
+  const r = game.ring;
+  if (!r) return '';
+  const n = (game.specs && game.specs.ring_radii && game.specs.ring_radii.length) || 5;
+  if (r.t < 0) return `\nリング: 最終 (半径 ${Math.round(r.r)} m)`;
+  return r.shrinking ? `\nリング縮小中 ${r.stage + 1}/${n} · あと ${fmtTime(r.t)}` : `\nリング ${r.stage + 1}/${n} · 縮小まで ${fmtTime(r.t)}`;
+}
+
+/// Which on-screen keys fit what is going on (touch.js: SCENES).
+function touchScene() {
+  const m = vim.mode;
+  if (m === 'insert' || m === 'command') return 'typing';
+  if (['menu', 'msg', 'form', 'inventory', 'map'].includes(m)) return m;
+  if (!game.conn || !game.map) return 'menu';
+  if (m === 'spectate') return game.free || game.sky ? 'fly' : 'watch';
+  if (game.intermission != null || !game.alive) return 'wait';
+  if (game.myTank != null) return 'tank';
+  return tankInReach() ? 'boarding' : 'combat';
 }
 
 /// Bullet-drop marks on the SR reticle: where to put a target 100–400 m away
@@ -2181,6 +2645,8 @@ function updateCompass(now) {
     html += `<b class="${cls}${edge ? ' edge' : ''}" style="left:${left}%">${label}</b>`;
   };
   for (const sh of game.shots) dot(sh.x - game.pos.x, sh.z - game.pos.z, 'shot');
+  // Outside the ring: which way its middle is.
+  if (game.ring && !game.watching && ringOutside() > 0) dot(game.ring.x - game.pos.x, game.ring.z - game.pos.z, 'ring', '◆');
   const snap = game.snaps[game.snaps.length - 1];
   if (snap) {
     for (const [id, p] of snap.players) {
@@ -2203,12 +2669,14 @@ function updateHud() {
   }
   const gun = heldGun();
   const sel = me.inv.sel;
+  const tank = myTank();
   let weapon = '素手';
-  if (sel === 'medkit') weapon = `回復キット × ${me.inv.medkits}`;
+  if (tank) weapon = tank.reload >= 0 ? `戦車砲  装填中 ${Math.round(tank.reload * 100)}%` : '戦車砲  装填済み';
+  else if (sel === 'medkit') weapon = `回復キット × ${me.inv.medkits}`;
   else if (sel === 'grenade') weapon = `グレネード × ${me.inv.grenades}`;
   else if (gun) weapon = `${gunName(gun.gun)}  ${gun.ammo} / ${gun.reserve}`;
   setText($('tb-weapon'), weapon);
-  setText($('tb-items'), `+${me.inv.medkits}  G${me.inv.grenades}${game.sneak ? '  スニーク' : ''}`);
+  setText($('tb-items'), tank ? `戦車 HP ${Math.max(0, tank.hp)}` : `+${me.inv.medkits}  G${me.inv.grenades}${game.sneak ? '  スニーク' : ''}`);
   const hp = Math.max(0, me.hp);
   $('hp-fill').style.width = `${hp}%`;
   $('hp-fill').classList.toggle('low', hp <= 30);
@@ -2220,7 +2688,7 @@ function updateHud() {
   if (game.intermission != null) setText($('result-next'), `${Math.ceil(game.intermission)} 秒後に次の試合`);
 
   // Reload / heal progress.
-  const prog = me.reload >= 0 ? ['リロード', me.reload] : me.heal >= 0 ? ['回復中', me.heal] : null;
+  const prog = tank ? (tank.reload >= 0 ? ['砲弾を装填中', tank.reload] : null) : me.reload >= 0 ? ['リロード', me.reload] : me.heal >= 0 ? ['回復中', me.heal] : null;
   show('progress', !!prog && game.alive);
   if (prog) {
     setText($('progress-title'), prog[0]);
@@ -2228,15 +2696,26 @@ function updateHud() {
   }
   if (!game.alive && game.respawnMode) updateDeath(me.respawn);
 
+  // Outside the ring: a warning that cannot be missed.
+  const out = game.alive ? ringOutside() : -1;
+  show('ringwarn', out > 0);
+  if (out > 0) setText($('ringwarn-text'), `リングの外にいます — 円の中へ ${Math.ceil(out)} m (毎秒 −${game.ring.dps} HP)`);
+  // What e would do here.
+  const reach = tankInReach();
+  const hint = tank ? (vim.mode === 'view' ? '' : 'e: 戦車を降りる · v: 砲を構える') : reach ? 'e: 戦車に乗る' : '';
+  show('prompt', !!hint && game.alive && game.intermission == null && (vim.mode === 'normal' || vim.mode === 'view'));
+  setText($('prompt'), hint);
+
   // Rank (top right).
   if (game.range) {
     setText($('rank'), '射撃訓練場 · :q で終了');
     return;
   }
+  const ringText = ringLine();
   const rows = [...game.roster.values()].filter((r) => !r.spectator);
   const idx = rows.findIndex((x) => x.id === game.myId);
   const top = rows[0];
-  setText($('rank'), idx >= 0 ? `${idx + 1} 位 / ${rows.length} 人${top ? ` · 1 位 ${top.name} ${top.kills}` : ''}` : '');
+  setText($('rank'), (idx >= 0 ? `${idx + 1} 位 / ${rows.length} 人${top ? ` · 1 位 ${top.name} ${top.kills}` : ''}` : '') + ringText);
 }
 
 // ---------------------------------------------------------------- boot
@@ -2301,10 +2780,11 @@ for (const [id, fn] of Object.entries(CLOSERS)) {
 }
 
 // ?debug: expose the state for automated browser tests (nothing else changes).
-if (new URLSearchParams(location.search).has('debug')) window.vimfps = { game, settings, onMessage: (m) => onMessage(m) };
+if (new URLSearchParams(location.search).has('debug')) window.vimfps = { game, settings, onMessage: (m) => onMessage(m), startPractice, addTextures, touch: () => touch.scene, sound };
 
 async function boot() {
   showTitle();
+  loadTextures();
   try {
     // Static hosting (GitHub Pages, file://) has no host to join.
     if (location.protocol === 'file:' || location.hostname.endsWith('github.io')) throw new Error('static');

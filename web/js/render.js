@@ -13,6 +13,40 @@ const COLORS = {
   fence: 0x6f7a80,
 };
 
+/// Surfaces a user texture can go on (textures.js): the solids by kind,
+/// the ground, tree crowns, tanks. (`sky` is the scene's background.)
+const TILED = ['ground', 'wall', 'roof', 'rock', 'cover', 'crate', 'trunk', 'fence'];
+
+/// Texture coordinates from where a surface is in the world, so an image
+/// tiles at one size whatever the size of the box it is on (the boxes are
+/// instances of one unit cube). `flat`: always from above (the ground).
+function worldUv(mat, flat) {
+  mat.userData.texSize = { value: 4 };
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.texSize = mat.userData.texSize;
+    shader.vertexShader = shader.vertexShader.replace('#include <common>', '#include <common>\nuniform float texSize;').replace(
+      '#include <uv_vertex>',
+      `#include <uv_vertex>
+#ifdef USE_MAP
+{
+  vec4 wp = vec4( position, 1.0 );
+  #ifdef USE_INSTANCING
+  wp = instanceMatrix * wp;
+  #endif
+  wp = modelMatrix * wp;
+  vec3 an = abs( normal );
+  vec2 wuv = ${flat ? 'wp.xz' : '( an.y > 0.5 ? wp.xz : ( an.x > 0.5 ? wp.zy : wp.xy ) )'};
+  vMapUv = wuv / texSize;
+}
+#endif`,
+    );
+  };
+  mat.customProgramCacheKey = () => (flat ? 'world-uv-flat' : 'world-uv-box');
+  return mat;
+}
+
+const TANK_COLOR = 0x5b6b3a;
+
 const PICKUP_STYLE = {
   ar: [0x2f6fd6, 'AR'],
   smg: [0x2f6fd6, 'SMG'],
@@ -144,7 +178,26 @@ export class Renderer {
     this.players = new Map();
     this.pickups = new Map();
     this.grenades = new Map();
+    this.tanks = new Map();
     this.effects = [];
+    this.sky = this.scene.background;
+    // Materials a texture can go on, and the textures set (slot -> {tex, size}).
+    this.mats = {};
+    this.textures = new Map();
+    for (const kind of TILED) {
+      const flat = kind === 'ground';
+      this.mats[kind] = worldUv(new THREE.MeshLambertMaterial(flat ? { vertexColors: true } : { color: COLORS[kind] }), flat);
+    }
+    this.mats.leaves = new THREE.MeshLambertMaterial({ color: 0x2f7a35 });
+    this.mats.tank = new THREE.MeshLambertMaterial({ color: TANK_COLOR });
+    // The ring: a wall of light around the circle.
+    this.ring = new THREE.Mesh(
+      new THREE.CylinderGeometry(1, 1, 1, 128, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0xff5a2a, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false, fog: false }),
+    );
+    this.ring.visible = false;
+    this.ring.renderOrder = 5;
+    this.scene.add(this.ring);
     this.buildViewmodel();
     this.resize();
     window.addEventListener('resize', () => this.resize());
@@ -166,6 +219,9 @@ export class Renderer {
     this.pickups.clear();
     for (const g of this.grenades.values()) this.scene.remove(g);
     this.grenades.clear();
+    for (const t of this.tanks.values()) this.scene.remove(t.group);
+    this.tanks.clear();
+    this.ring.visible = false;
     for (const e of this.effects) this.scene.remove(e.obj);
     this.effects = [];
   }
@@ -219,7 +275,7 @@ export class Renderer {
     }
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.computeVertexNormals();
-    const terrain = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+    const terrain = new THREE.Mesh(geo, this.mats.ground);
     this.mapGroup.add(terrain);
 
     // Solids and tree crowns: instanced, one mesh per kind and 100 m tile
@@ -228,7 +284,6 @@ export class Renderer {
     const TILE = 100;
     const tile = (x, z) => `${Math.floor((x + map.half) / TILE)},${Math.floor((z + map.half) / TILE)}`;
     const box = new THREE.BoxGeometry(1, 1, 1);
-    const solidMats = {};
     const byKind = new Map();
     for (const s of map.solids) {
       const kind = COLORS[s.kind] !== undefined ? s.kind : 'wall';
@@ -242,8 +297,7 @@ export class Renderer {
     const sc = new THREE.Vector3();
     for (const [key, list] of byKind) {
       const kind = key.split('|')[0];
-      solidMats[kind] = solidMats[kind] || new THREE.MeshLambertMaterial({ color: COLORS[kind] });
-      const inst = new THREE.InstancedMesh(box, solidMats[kind], list.length);
+      const inst = new THREE.InstancedMesh(box, this.mats[kind], list.length);
       list.forEach((s, i) => {
         v.set((s.min.x + s.max.x) / 2, (s.min.y + s.max.y) / 2, (s.min.z + s.max.z) / 2);
         sc.set(s.max.x - s.min.x, s.max.y - s.min.y, s.max.z - s.min.z);
@@ -259,7 +313,7 @@ export class Renderer {
       s.position.set(l.pos.x, this.groundAt(map, l.pos.x, l.pos.z) + l.pos.y, l.pos.z);
       this.mapGroup.add(s);
     }
-    const leaves = new THREE.MeshLambertMaterial({ color: 0x2f7a35 });
+    const leaves = this.mats.leaves;
     const cone = new THREE.ConeGeometry(1, 1, 7);
     const treeTiles = new Map();
     for (const t of map.trees) {
@@ -276,6 +330,139 @@ export class Renderer {
       crowns.computeBoundingSphere();
       this.mapGroup.add(crowns);
     }
+  }
+
+  /// Puts an image on a surface (a slot of textures.js), or with image =
+  /// null takes it off again. `size`: metres one copy covers.
+  setTexture(slot, image, size) {
+    const old = this.textures.get(slot);
+    if (old) {
+      old.tex.dispose();
+      this.textures.delete(slot);
+    }
+    if (image) {
+      const tex = new THREE.Texture(image);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.needsUpdate = true;
+      if (slot === 'sky') tex.mapping = THREE.EquirectangularReflectionMapping;
+      else {
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+      }
+      this.textures.set(slot, { tex, size });
+    }
+    this.applyTexture(slot);
+  }
+
+  applyTexture(slot) {
+    const t = this.textures.get(slot);
+    if (slot === 'sky') {
+      this.scene.background = t ? t.tex : this.sky;
+      return;
+    }
+    const mat = this.mats[slot];
+    if (!mat) return;
+    mat.map = t ? t.tex : null;
+    if (slot === 'ground') {
+      // The image replaces the height colours (they would tint it green).
+      mat.vertexColors = !t;
+    } else {
+      const plain = { leaves: 0x2f7a35, tank: TANK_COLOR }[slot] ?? COLORS[slot];
+      mat.color.setHex(t ? 0xffffff : plain);
+    }
+    if (mat.userData.texSize) mat.userData.texSize.value = (t && t.size) || 4;
+    else if (t) {
+      // Ordinary texture coordinates (tree crowns, tanks): repeat instead.
+      const n = slot === 'leaves' ? 3 : 1;
+      t.tex.repeat.set(n, n);
+    }
+    mat.needsUpdate = true;
+  }
+
+  /// Tanks on the field: [{id, x, y, z, yaw, aim, pitch, hp, driver}].
+  /// `mine`: the tank you drive (its name plate is not shown). `label(t)`
+  /// gives the text over a tank.
+  setTanks(list, maxHp, mine, label) {
+    const seen = new Set();
+    for (const t of list) {
+      seen.add(t.id);
+      let m = this.tanks.get(t.id);
+      if (!m) {
+        m = this.buildTank();
+        this.scene.add(m.group);
+        this.tanks.set(t.id, m);
+      }
+      m.group.position.set(t.x, t.y, t.z);
+      m.hull.rotation.y = t.yaw;
+      m.turret.rotation.y = t.aim;
+      m.gun.rotation.x = t.pitch;
+      const own = t.id === mine;
+      // From inside, only the gun is in view (the hull would fill it).
+      m.hull.visible = !own;
+      m.body.visible = !own;
+      drawPlate(m.plate, label(t), (t.hp / (maxHp || 400)) * 100, this.s.get('nameplates') && !own, this.s.get('hpbars') && !own);
+      const ls = this.labelScale || 1;
+      m.plate.scale.set(3.2 * ls, ((3.2 * 76) / 256) * ls, 1);
+    }
+    for (const [id, m] of this.tanks) {
+      if (!seen.has(id)) {
+        this.scene.remove(m.group);
+        this.tanks.delete(id);
+      }
+    }
+  }
+
+  buildTank() {
+    const body = this.mats.tank;
+    const dark = new THREE.MeshLambertMaterial({ color: 0x2c3122 });
+    const B = (w, h, d, mat, x, y, z) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+      m.position.set(x, y, z);
+      return m;
+    };
+    const group = new THREE.Group();
+    // The hull points along -Z, as players do.
+    const hull = new THREE.Group();
+    hull.add(B(2.6, 0.9, 4.2, body, 0, 0.95, 0), B(0.7, 0.9, 4.5, dark, -1.45, 0.45, 0), B(0.7, 0.9, 4.5, dark, 1.45, 0.45, 0));
+    hull.add(B(2.6, 0.35, 0.9, body, 0, 0.75, -2.3));
+    const turret = new THREE.Group();
+    const turretBody = new THREE.Group();
+    turretBody.add(B(2.0, 0.7, 2.3, body, 0, 1.75, 0.1), B(0.7, 0.2, 0.7, dark, 0.45, 2.2, 0.5));
+    turret.add(turretBody);
+    const gun = new THREE.Group();
+    gun.position.set(0, 1.8, -0.9);
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 3.2, 12), dark);
+    barrel.rotation.x = Math.PI / 2;
+    barrel.position.z = -1.6;
+    const brake = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.19, 0.4, 12), dark);
+    brake.rotation.x = Math.PI / 2;
+    brake.position.z = -3.2;
+    gun.add(barrel, brake);
+    turret.add(gun);
+    const plate = makePlate();
+    plate.position.y = 3.5;
+    group.add(hull, turret, plate);
+    return { group, hull, turret, body: turretBody, gun, plate };
+  }
+
+  /// The ring's wall: {x, z, r}, or null for none.
+  setRing(ring) {
+    this.ring.visible = !!ring;
+    if (!ring) return;
+    this.ring.position.set(ring.x, 30, ring.z);
+    this.ring.scale.set(ring.r, 160, ring.r);
+  }
+
+  /// A tank shell: a glowing ball flying its arc until it reaches `to`.
+  shell(from, to, vel, gravity = 9.81) {
+    const speedXZ = Math.hypot(vel.x, vel.z);
+    const speed = Math.hypot(vel.x, vel.y, vel.z);
+    if (speed < 1) return;
+    const flight = speedXZ > 1 ? Math.hypot(to.x - from.x, to.z - from.z) / speedXZ : Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z) / speed;
+    const m = new THREE.Mesh(new THREE.SphereGeometry(0.22, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffb040, fog: false }));
+    m.position.set(from.x, from.y, from.z);
+    this.scene.add(m);
+    this.effects.push({ obj: m, t: 0, life: Math.max(0.03, flight), kind: 'shell', from, vel, g: gravity });
   }
 
   groundAt(map, x, z) {
@@ -464,7 +651,8 @@ export class Renderer {
     if (mark) p.marker.material.color.setHex(mark === 'spotted' ? 0xffd400 : 0xff3030);
     const len = { ar: 0.6, smg: 0.4, sg: 0.65, sr: 0.9 }[st.gun] || 0.5;
     p.gun.scale.z = len / 0.6;
-    p.group.visible = st.alive;
+    // Inside a tank there is no body to see.
+    p.group.visible = st.alive && st.tank == null;
     p.group.position.set(st.x, st.y, st.z);
     p.group.rotation.y = st.yaw;
     const sneak = st.sneak;
@@ -585,6 +773,10 @@ export class Renderer {
         pos.setXYZ(0, a[0], a[1], a[2]);
         pos.setXYZ(1, b[0], b[1], b[2]);
         pos.needsUpdate = true;
+      }
+      if (e.kind === 'shell') {
+        const tt = Math.min(e.t, e.life);
+        e.obj.position.set(e.from.x + e.vel.x * tt, e.from.y + e.vel.y * tt - 0.5 * e.g * tt * tt, e.from.z + e.vel.z * tt);
       }
       if (e.kind === 'rise') {
         e.obj.position.y = e.y + e.t * 1.2;

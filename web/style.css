@@ -109,7 +109,7 @@ body.uianim #dmgdir .arc { animation: fade 0.7s ease-out forwards; }
 body.uianim #chatlog div.old { opacity: 0.0; transition: opacity 1s; }
 body:not(.uianim) #chatlog div.old { display: none; }
 
-#rank { position: absolute; right: 12px; top: 10px; z-index: 3; background: rgba(0,0,0,0.35); color: #fff; padding: 6px 10px; border-radius: 4px; font-size: 13px; line-height: 1.5; text-align: right; }
+#rank { white-space: pre-line; position: absolute; right: 12px; top: 10px; z-index: 3; background: rgba(0,0,0,0.35); color: #fff; padding: 6px 10px; border-radius: 4px; font-size: 13px; line-height: 1.5; text-align: right; }
 #fps { position: absolute; left: 12px; top: 10px; color: #fff; text-shadow: 0 0 2px #000; font-family: var(--mono); z-index: 3; }
 
 /* notification balloons, above the tray */
@@ -210,7 +210,7 @@ body.uianim #boot .boot-bar i { animation: bootbar 1.2s linear infinite; }
 #watchbar { position: absolute; left: 50%; top: 50px; transform: translateX(-50%); z-index: 3; max-width: calc(100vw - 24px);
   background: #ffffe1; color: #000; border: 1px solid #000; border-radius: 6px; padding: 4px 12px; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #start[data-mode="SPECTATE"] { background: linear-gradient(180deg, #6fc6d8 0%, #2b8aa8 15%, #1d6f8a 85%, #134e63 100%); }
-@media (max-width: 640px) { #watchbar { top: 84px; font-size: 11px; white-space: normal; } }
+@media (max-width: 640px) { #watchbar { top: 102px; font-size: 11px; white-space: normal; } }
 
 #followcard { left: 12px; top: 10px; width: 260px; z-index: 3; }
 #followcard .body { padding: 6px 8px; }
@@ -244,11 +244,24 @@ body.uianim #boot .boot-bar i { animation: bootbar 1.2s linear infinite; }
 #compass .hdg { position: absolute; left: 50%; top: 18px; transform: translateX(-50%); font: 700 10px var(--mono); background: rgba(0,0,0,0.4); padding: 0 3px; }
 #compass::after { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #ffd400; }
 
+/* ---------- the ring, tanks ---------- */
+#ringwarn { position: absolute; inset: 0; z-index: 2; pointer-events: none; box-shadow: inset 0 0 140px 30px rgba(255, 70, 20, 0.55); }
+#ringwarn span { position: absolute; left: 50%; top: 24%; transform: translateX(-50%); max-width: calc(100vw - 24px); padding: 6px 14px; border-radius: 4px;
+  background: rgba(150, 20, 0, 0.82); color: #fff; font-weight: 700; font-size: 15px; text-align: center; }
+body.uianim #ringwarn { animation: ringpulse 1s ease-in-out infinite alternate; }
+@keyframes ringpulse { from { opacity: 0.7; } to { opacity: 1; } }
+#prompt { position: absolute; left: 50%; bottom: 58px; transform: translateX(-50%); z-index: 3; padding: 4px 12px; border-radius: 4px;
+  background: rgba(0, 0, 0, 0.5); color: #fff; font-size: 13px; white-space: nowrap; pointer-events: none; }
+#compass b.ring { background: transparent; color: #ff7a3a; font-size: 13px; text-shadow: 0 0 2px #000; }
+
 /* ---------- touch pad (phones, tablets) ---------- */
 #touchpad { position: absolute; left: 0; right: 0; bottom: 40px; z-index: 35; pointer-events: none; display: flex; justify-content: space-between; align-items: flex-end; padding: 0 10px; }
 #touchpad .pad { display: grid; gap: 6px; pointer-events: auto; }
-#touchpad .pad.left { grid-template-columns: repeat(3, 56px); }
-#touchpad .pad.right { grid-template-columns: repeat(3, 50px); }
+#touchpad .pad.left { grid-template-columns: repeat(var(--cols, 3), 56px); }
+#touchpad .pad.right { grid-template-columns: repeat(var(--cols, 3), 50px); }
+/* A key with a word under it (what it does in this scene). */
+#touchpad button.hinted { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; padding: 0; line-height: 1.05; }
+#touchpad button small { font: 600 9px var(--font); opacity: 0.9; white-space: nowrap; }
 #touchpad button { height: 46px; border-radius: 8px; border: 1px solid #0b45b8; color: #fff; font: 700 16px var(--mono); touch-action: none; user-select: none; -webkit-user-select: none;
   background: linear-gradient(180deg, rgba(74,140,247,0.75), rgba(29,95,214,0.75)); }
 #touchpad .pad.left button { height: 56px; font-size: 20px; }
@@ -259,10 +272,11 @@ body.uianim #boot .boot-bar i { animation: bootbar 1.2s linear infinite; }
 body.touch #chatlog { bottom: 220px; }
 body.touch #balloons { bottom: 380px; }
 @media (max-width: 640px) {
-  #compass { width: calc(100vw - 24px); top: 44px; }
+  #compass { width: calc(100vw - 24px); top: 62px; }
   #rank { font-size: 11px; top: 6px; }
-  #touchpad .pad.left { grid-template-columns: repeat(3, 48px); }
-  #touchpad .pad.right { grid-template-columns: repeat(3, 42px); }
+  #touchpad .pad.left { grid-template-columns: repeat(var(--cols, 3), 48px); }
+  #touchpad .pad.right { grid-template-columns: repeat(var(--cols, 3), 42px); }
+  #touchpad button small { font-size: 8px; }
   #touchpad button { height: 40px; font-size: 14px; }
   #touchpad .pad.left button { height: 48px; }
 }
