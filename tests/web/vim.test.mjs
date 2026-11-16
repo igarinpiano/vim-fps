@@ -259,3 +259,14 @@ test('spectate: u/d tilt the view while held (Shift too)', () => {
   ]);
   assert.equal(only(log, 'throw').length, 0, 'd does not throw while watching');
 });
+
+test('spectate: a toggles the automatic camera', () => {
+  const { log, down, vim } = setup();
+  vim.mode = 'spectate';
+  down('a');
+  down('2');
+  down('a');
+  assert.equal(only(log, 'autocam').length, 2);
+  assert.equal(only(log, 'follow').length, 0);
+  assert.equal(vim.mode, 'spectate');
+});
