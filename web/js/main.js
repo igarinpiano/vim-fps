@@ -5,6 +5,7 @@ import { Vim, Aim, MODES } from './vim.js';
 import { WsConnection, LocalConnection, parseServerUrl, PROTOCOL } from './net.js';
 import { World, wantVelocity, eyeHeight, GUNS, ACCEL, RUN_SPEED, SNEAK_SPEED, wrapAngle, bearing } from './world.js';
 import { TouchPad } from './touch.js';
+import { Director } from './director.js';
 import { Sound } from './audio.js';
 import { VERSION } from './version.js';
 
@@ -75,6 +76,9 @@ const game = {
   watching: false,
   follow: null,
   free: null,
+  // The automatic camera (director.js) is on, and its director.
+  auto: false,
+  director: null,
   bsodPending: false,
   range: false,
   respawnMode: true,
@@ -102,11 +106,14 @@ function resetGame() {
     watching: false,
     follow: null,
     free: null,
+    auto: false,
+    director: null,
     bsodPending: false,
     range: false,
     respawnMode: true,
     sky: null,
   });
+  showPip(null);
   game.roster = new Map();
   game.steps = new Map();
   netStats.rtts = [];
@@ -201,6 +208,7 @@ function closeMsg() {
   const back = msgReturn || (game.map ? 'normal' : 'menu');
   if (back === 'menu') show('title');
   vim.setMode(back);
+  syncMode();
 }
 
 const HELP = [
@@ -247,7 +255,8 @@ const HELP = [
   '  :net                 通信統計 (ping など)  :set netstat  常に右上に表示',
   '  :set nonameplates    頭上の名前を消す :set nohpbars  頭上の体力ゲージを消す',
   '',
-  'SPECTATE (観戦中)      n / N  次 / 前の選手    o  自由視点 (k/j 前後, h/l 旋回, K/J 上下, u/d 見上げる・見下ろす, Shift で速く)',
+  'SPECTATE (観戦中)      a  自動カメラ (3D の中継視点。選手を自動で切り替え。もう一度押すと選手の視点)  :auto でも',
+  '                       n / N  次 / 前の選手    o  自由視点 (k/j 前後, h/l 旋回, K/J 上下, u/d 見上げる・見下ろす, Shift で速く)',
   '                       O  空から (hjkl 移動, K/J 高さ, u/d 見下ろす角度, , . 回転)    m  全員が載ったマップ',
   '  復活なしの試合で倒されると、倒した相手の視点で観戦します (:set nokillcam で自由視点)',
   '',
@@ -358,6 +367,7 @@ function closeCommand() {
   show('cmdwin', false);
   $('cmdinput').blur();
   if (vim.mode === 'command') vim.setMode(cmdReturn);
+  syncMode();
 }
 
 $('cmdinput').addEventListener('keydown', (e) => {
@@ -459,10 +469,16 @@ function runCommand(line) {
       const r = [...game.roster.values()].find((x) => x.name === args.trim());
       if (r && game.watching) {
         game.free = null;
+        game.sky = null;
         game.follow = r.id;
+        if (game.auto) director().force(r.id);
       } else balloon(`E: ${game.watching ? '見つかりません' : '観戦中だけ使えます'}: ${args}`, '', 'err');
       break;
     }
+    case 'auto':
+      if (game.watching) setAuto(!game.auto);
+      else balloon('E: 観戦中だけ使えます: auto', '', 'err');
+      break;
     case 'range':
       startPractice(0, { range: true });
       break;
@@ -528,7 +544,7 @@ function submitChat() {
 function closeChat() {
   show('chatwin', false);
   $('chatinput').blur();
-  if (vim.mode === 'insert') vim.setMode('normal');
+  if (vim.mode === 'insert') vim.setMode(game.watching ? 'spectate' : 'normal');
 }
 
 $('chatinput').addEventListener('keydown', (e) => {
@@ -880,6 +896,7 @@ function onMessage(m) {
     case 'shot': {
       const mine = m.id === game.myId;
       if (!mine) game.shots.push({ x: m.from.x, z: m.from.z, id: m.id, t: performance.now() });
+      if (game.director) game.director.note('shot', m.id);
       if (renderer) renderer.tracer(m.from, m.to, mine, m.vel, game.specs && game.specs.gravity);
       sound.shot(m.gun, mine ? null : m.from);
       if (mine) {
@@ -889,6 +906,7 @@ function onMessage(m) {
       break;
     }
     case 'hit':
+      if (game.director) game.director.note('hit', m.attacker, m.victim);
       if (m.attacker === game.myId && m.victim !== game.myId) {
         const hm = $('hitmarker');
         hm.classList.toggle('head', m.head);
@@ -924,18 +942,21 @@ function onMessage(m) {
           // killer's eyes (or a free camera with :set nokillcam).
           game.bsodPending = true;
           const killer = self ? null : m.killer;
+          const conn = game.conn;
           setTimeout(() => {
+            if (game.conn !== conn) return;
             game.bsodPending = false;
-            if (!game.conn || game.alive) return;
+            if (game.alive) return;
             hideDeath();
             startWatching(settings.get('killcam') ? killer : 'free');
           }, 1600);
         }
       }
-      if (game.watching && m.victim === game.follow) {
+      if (game.director) game.director.note('kill', m.killer, m.victim);
+      if (game.watching && !game.auto && m.victim === game.follow) {
         // Whom we watched fell: follow the one who got them.
         setTimeout(() => {
-          if (game.watching && game.follow === m.victim) game.follow = m.killer !== m.victim ? m.killer : null;
+          if (game.watching && !game.auto && game.follow === m.victim) game.follow = m.killer !== m.victim ? m.killer : null;
         }, 1200);
       }
       break;
@@ -965,12 +986,14 @@ function onMessage(m) {
       game.turnLeft = 0;
       hideDeath();
       if (game.watching) stopWatching();
+      resetControls(false);
       break;
     case 'match_end':
       showResult(m);
       break;
     case 'match_start':
       show('resultwin', false);
+      resetControls(true);
       balloon('新しい試合が始まりました');
       break;
     case 'pong': {
@@ -989,6 +1012,39 @@ function onMessage(m) {
 }
 
 let hitTimer = null;
+
+/// A fresh start (a respawn, a new match): nothing carries over from the
+/// life before — not VIEW (aiming), not an open inventory or map, and for a
+/// new match not sneaking either (the touch pad's Shift is a toggle).
+function resetControls(newMatch) {
+  if (['view', 'inventory', 'map'].includes(vim.mode) && !game.watching) vim.setMode('normal');
+  // Typing a command or reading a message: do not come back to VIEW.
+  if (['view', 'inventory', 'map'].includes(cmdReturn)) cmdReturn = 'normal';
+  if (['view', 'inventory', 'map'].includes(msgReturn)) msgReturn = 'normal';
+  game.ads = false;
+  game.zoom = 0;
+  game.fire = false;
+  game.timed = null;
+  game.turnLeft = 0;
+  aim.clear();
+  if (newMatch) {
+    touch.releaseShift();
+    game.shiftDown = false;
+  }
+  game.sneak = game.shiftDown;
+  syncMode();
+}
+
+/// Keep the key mode in step with what is on screen: watching is always
+/// SPECTATE (never NORMAL or VIEW, whatever window was open when it began),
+/// and playing is never SPECTATE.
+function syncMode() {
+  if (!game.conn || !game.map) return;
+  const m = vim.mode;
+  if (game.watching) {
+    if (m === 'normal' || m === 'view' || m === 'inventory') vim.setMode('spectate');
+  } else if (m === 'spectate') vim.setMode('normal');
+}
 
 // ---------------------------------------------------------------- death screen
 
@@ -1212,9 +1268,20 @@ const vim = new Vim(settings, {
     game.conn.send({ t: 'select', slot });
   },
   follow(n) {
-    followNext(n);
+    if (game.auto) {
+      // The automatic camera stays on: tell it whom to show.
+      const list = alivePlayers();
+      if (!list.length) return;
+      const i = list.findIndex((p) => p.id === game.follow);
+      const k = i < 0 ? 0 : (((i + n) % list.length) + list.length) % list.length;
+      director().force(list[k].id);
+    } else followNext(n);
+  },
+  autocam() {
+    setAuto(!game.auto);
   },
   skycam() {
+    game.auto = false;
     if (game.sky) {
       game.sky = null;
       followNext(1);
@@ -1225,6 +1292,7 @@ const vim = new Vim(settings, {
   formSubmit: () => customSubmit(),
   formCancel: () => customCancel(),
   freecam() {
+    game.auto = false;
     if (game.free) {
       game.free = null;
       followNext(1);
@@ -1454,6 +1522,7 @@ let pingTimer = 0;
 function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
+  syncMode();
   if (game.conn && game.map && renderer && game.watching) {
     watchFrame(now, dt);
   } else if (game.conn && game.map && renderer) {
@@ -1737,6 +1806,10 @@ function startWatching(who) {
   game.zoom = 0;
   game.fire = false;
   game.held = { fwd: false, back: false, left: false, right: false, up: false, down: false, tiltUp: false, tiltDown: false };
+  // Watching by choice starts with the automatic camera; out of a round,
+  // with the killer's eyes (a turns the automatic camera on).
+  game.auto = who == null && settings.get('autocam');
+  if (game.director) game.director.reset();
   if (who === 'free') {
     game.follow = null;
     startFree();
@@ -1748,8 +1821,58 @@ function startWatching(who) {
   if (['normal', 'view', 'inventory', 'map'].includes(vim.mode)) vim.setMode('spectate');
 }
 
+function director() {
+  if (!game.director || game.director.world !== game.world) game.director = new Director(game.world);
+  return game.director;
+}
+
+/// The automatic camera on or off. On: it pulls back from the view on
+/// screen. Off: the eyes of whoever it was showing.
+function setAuto(on) {
+  game.auto = on;
+  if (!on) return;
+  const d = director();
+  d.reset();
+  d.start({ x: game.pos.x, y: game.pos.y + 1.6, z: game.pos.z, yaw: game.yaw, pitch: game.pitch, fov: game.fov });
+  if (game.follow != null && !game.free && !game.sky) d.force(game.follow);
+  game.free = null;
+  game.sky = null;
+  game.autoFree = false;
+}
+
+/// The wipe (the followed player's own view, small, bottom right) while the
+/// automatic camera is on: only where there is room for it.
+function pipRect() {
+  if (!settings.get('autopip') || touch.active || vim.mode === 'map') return null;
+  const W = window.innerWidth;
+  const H = window.innerHeight;
+  if (W < 900 || H < 540) return null;
+  const w = Math.round(Math.max(280, Math.min(440, W * 0.26)));
+  const h = Math.round((w * 9) / 16);
+  return { x: W - w - 14, y: H - h - 54, w, h };
+}
+
+let pipKey = '';
+function showPip(rect, name = '') {
+  const key = rect ? `${rect.x},${rect.y},${rect.w},${rect.h}` : '';
+  if (rect) setText($('pip-name'), `${name} の視点`);
+  if (key === pipKey) return;
+  pipKey = key;
+  const el = $('pip');
+  show('pip', !!rect);
+  // Balloons stack above the wipe instead of over it.
+  document.body.style.setProperty('--pip', rect ? `${rect.h + 14}px` : '0px');
+  if (!rect) return;
+  el.style.left = `${rect.x}px`;
+  el.style.top = `${rect.y}px`;
+  el.style.width = `${rect.w}px`;
+  el.style.height = `${rect.h}px`;
+}
+
 function stopWatching() {
   show('followcard', false);
+  showPip(null);
+  game.auto = false;
   game.watching = false;
   game.follow = null;
   game.free = null;
@@ -1801,17 +1924,30 @@ function startFree() {
   game.free = { x: game.pos.x, y: game.pos.y + 8, z: game.pos.z, yaw: game.yaw, pitch: -0.35 };
 }
 
-/// One frame while watching: the camera is the followed player's eyes, or
-/// the free camera.
+/// One frame while watching: the automatic camera, the followed player's
+/// eyes, or the free camera.
 function watchFrame(now, dt) {
   const view = interpolated(now);
+  let auto = null;
+  if (game.auto) {
+    const alive = [...view.values()].filter((p) => p.alive && p.id !== game.myId);
+    auto = director().update(now / 1000, dt, alive);
+    if (auto) {
+      game.free = null;
+      game.sky = null;
+      game.autoFree = false;
+      if (auto.subject != null) game.follow = auto.subject;
+    }
+  }
   let target = game.follow != null ? view.get(game.follow) : null;
-  if (game.autoFree && alivePlayers().length) {
+  if (auto) {
+    // The director decides whom to show.
+  } else if (game.autoFree && alivePlayers().length) {
     // Somebody to watch appeared: leave the stand-in overview.
     game.autoFree = false;
     game.free = null;
   }
-  if (!game.free && !game.sky && (!target || !target.alive)) {
+  if (!auto && !game.free && !game.sky && (!target || !target.alive)) {
     followNext(1);
     target = game.follow != null ? view.get(game.follow) : null;
     if (!target) {
@@ -1824,12 +1960,29 @@ function watchFrame(now, dt) {
   renderer.labelScale = game.sky ? Math.max(1, game.sky.h / 22) : 1;
   for (const [id, p] of view) {
     if (id === game.myId) continue;
-    renderer.setPlayer(id, p, nameOf(id), game.sky ? (p.alive ? 'seen' : null) : markOf(id, p, now));
+    // The automatic camera marks the one it follows (yellow ▼).
+    const mark = auto ? (p.alive && id === auto.subject ? 'spotted' : null) : game.sky ? (p.alive ? 'seen' : null) : markOf(id, p, now);
+    renderer.setPlayer(id, p, nameOf(id), mark);
   }
   let cam;
   let vm = { ads: 0, hide: true, bob: 0, kick: 0 };
   let scoped = false;
-  if (game.sky) {
+  let inset = null;
+  if (auto) {
+    cam = auto.cam;
+    renderer.setHeld(null);
+    const rect = target && target.alive ? pipRect() : null;
+    if (rect) {
+      // The wipe: what the followed player sees.
+      const gun = target.gun && GUNS[target.gun];
+      inset = {
+        cam: { x: target.x, y: target.y + eyeHeight(target.sneak), z: target.z, yaw: target.yaw, pitch: target.pitch, fov: target.ads && gun ? gun.ads : settings.get('fov') },
+        rect,
+        hide: target.id,
+      };
+    }
+    showPip(rect, target ? nameOf(target.id) : '');
+  } else if (game.sky) {
     const k = game.sky;
     if (game.turnLeft) {
       k.yaw = wrapAngle(k.yaw + game.turnLeft);
@@ -1894,15 +2047,16 @@ function watchFrame(now, dt) {
     renderer.setHeld(target.gun || null);
     vm = { ads: target.ads ? 1 : 0, hide: scoped, bob: 0, kick: 0 };
   }
+  if (!auto) showPip(null);
   show('scope', scoped);
-  $('crosshair').dataset.mode = game.free ? 'other' : target && target.ads ? 'view' : 'normal';
+  $('crosshair').dataset.mode = auto ? 'none' : game.free ? 'other' : target && target.ads ? 'view' : 'normal';
   // The compass, markers and sound follow the camera.
   game.pos = { x: cam.x, y: cam.y - 1.6, z: cam.z };
   game.yaw = cam.yaw;
   game.pitch = cam.pitch;
   game.fov = cam.fov;
   renderer.updateEffects(dt);
-  renderer.render(cam, vm);
+  renderer.render(cam, vm, inset);
   sound.listener(cam.x, cam.y, cam.z, cam.yaw);
   if (vim.mode === 'map') drawMap();
 }
@@ -1913,9 +2067,12 @@ function updateWatchHud() {
   const r = game.roster.get(game.myId);
   const voluntary = r && r.spectator;
   let line;
-  if (game.sky) line = '空からの視点 — hjkl 移動 · K/J 高さ · u/d 角度 · Shift で速く · , . 回転 · m マップ · n で選手を追う';
-  else if (game.free || !t) line = '自由視点 — k/j 前後 · h/l 旋回 · K/J 上下 · u/d 見上げる・見下ろす · Shift で速く · O 空から · n で選手を追う';
-  else line = `${nameOf(t.id)} を観戦中 — n / N 切り替え · o 自由視点 · O 空から · m マップ`;
+  if (game.auto && t && !game.free) {
+    const rival = game.director && game.director.rival != null && t.alive ? ` vs ${nameOf(game.director.rival)}` : '';
+    line = `自動カメラ: ${nameOf(t.id)}${rival} — a 選手の視点 · n / N 選手を切り替え · o 自由視点 · O 空から · m マップ`;
+  } else if (game.sky) line = '空からの視点 — hjkl 移動 · K/J 高さ · u/d 角度 · Shift で速く · , . 回転 · m マップ · n で選手を追う';
+  else if (game.free || !t) line = '自由視点 — k/j 前後 · h/l 旋回 · K/J 上下 · u/d 見上げる・見下ろす · Shift で速く · O 空から · n で選手を追う · a 自動カメラ';
+  else line = `${nameOf(t.id)} を観戦中 — a 自動カメラ · n / N 切り替え · o 自由視点 · O 空から · m マップ`;
   const tail = voluntary ? ' · :play で参加' : !game.respawnMode ? ' · 次のラウンドまで観戦' : '';
   setText($('watchbar'), line + tail);
   // The followed player's card.

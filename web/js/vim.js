@@ -9,7 +9,8 @@
 //              throw, r reload, v scope, Esc back
 //   INVENTORY  j/k select, gg/G, {n}, Enter/Esc/s close
 //   MAP        Esc/m/q close
-//   SPECTATE   watching: n/N next/previous player, o free camera (hjkl
+//   SPECTATE   watching: a automatic camera on/off, n/N next/previous
+//              player, o free camera (hjkl
 //              move, H/L faster, K/J up/down, , . turn), O view from the
 //              sky (hjkl pan, K/J height), m map of everyone, i chat
 //   CUSTOM     custom match form: j/k row, h/l value (H/L by 5), Enter
@@ -383,6 +384,12 @@ export class Vim {
         break;
       case 'N':
         this.call('follow', -this.takeCount(1));
+        break;
+      case 'a':
+      case 'A':
+        // The automatic (broadcast) camera, or back to the player's eyes.
+        this.count = '';
+        this.call('autocam');
         break;
       case 'o':
         this.count = '';

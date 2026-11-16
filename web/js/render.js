@@ -132,6 +132,9 @@ export class Renderer {
     this.camera = new THREE.PerspectiveCamera(80, 1, 0.05, 600);
     this.camera.rotation.order = 'YXZ';
     this.scene.add(this.camera);
+    // The small second view (the wipe while watching with the automatic camera).
+    this.insetCamera = new THREE.PerspectiveCamera(80, 16 / 9, 0.05, 600);
+    this.insetCamera.rotation.order = 'YXZ';
     this.scene.add(new THREE.HemisphereLight(0xdff0ff, 0x6b8a4a, 1.6));
     const sun = new THREE.DirectionalLight(0xffffff, 1.6);
     sun.position.set(60, 100, 30);
@@ -608,7 +611,10 @@ export class Renderer {
   }
 
   /// cam: {x,y,z,yaw,pitch,fov}, vm: {ads 0..1, hide, bob, kick}
-  render(cam, vm) {
+  /// inset (optional): a second, small view drawn over the first —
+  /// {cam, rect: {x, y, w, h} in CSS pixels from the top left, hide: the id
+  /// of the player whose eyes it looks through}.
+  render(cam, vm, inset = null) {
     // The fog starts farther away the higher the camera (the sky view).
     const lift = Math.max(0, cam.lift || 0);
     this.scene.fog.near = 70 + lift;
@@ -630,5 +636,36 @@ export class Renderer {
     this.viewmodel.position.z += vm.kick;
     this.viewmodel.rotation.z = (1 - ads) * 0.04;
     this.renderer.render(this.scene, this.camera);
+    if (inset) this.renderInset(inset);
+  }
+
+  renderInset({ cam, rect, hide }) {
+    const r = this.renderer;
+    const c = this.insetCamera;
+    c.position.set(cam.x, cam.y, cam.z);
+    c.rotation.set(cam.pitch, cam.yaw, 0);
+    c.fov = cam.fov;
+    c.aspect = rect.w / rect.h;
+    c.updateProjectionMatrix();
+    const body = hide != null ? this.players.get(hide) : null;
+    const shown = body && body.group.visible;
+    if (body) body.group.visible = false;
+    const vm = this.viewmodel.visible;
+    this.viewmodel.visible = false;
+    // The canvas may be shown at another size than it is drawn at.
+    const el = r.domElement;
+    const size = r.getSize(this.insetSize || (this.insetSize = new THREE.Vector2()));
+    const kx = size.x / (el.clientWidth || size.x);
+    const ky = size.y / (el.clientHeight || size.y);
+    const x = rect.x * kx;
+    const y = size.y - (rect.y + rect.h) * ky;
+    r.setScissorTest(true);
+    r.setViewport(x, y, rect.w * kx, rect.h * ky);
+    r.setScissor(x, y, rect.w * kx, rect.h * ky);
+    r.render(this.scene, c);
+    r.setScissorTest(false);
+    r.setViewport(0, 0, size.x, size.y);
+    if (body) body.group.visible = shown;
+    this.viewmodel.visible = vm;
   }
 }

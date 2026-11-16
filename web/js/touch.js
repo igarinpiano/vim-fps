@@ -63,6 +63,15 @@ export class TouchPad {
     document.body.classList.toggle('touch', this.active);
   }
 
+  /// Turn the Shift toggle off (a new match starts without sneaking).
+  releaseShift() {
+    if (!this.shiftOn) return;
+    this.shiftOn = false;
+    const b = this.root.querySelector('button[data-key="Shift"]');
+    if (b) b.classList.remove('on');
+    this.send(this.ev('up', 'Shift'));
+  }
+
   ev(type, key) {
     const code = `Touch-${key}`;
     return { type, key, code, shift: this.shiftOn, ctrl: false, repeat: false };
