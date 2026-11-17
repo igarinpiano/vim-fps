@@ -1,0 +1,11 @@
+{
+  "name": "xp",
+  "textures": {},
+  "sounds": {
+    "startup": "sounds/startup.wav",
+    "error": "sounds/error.wav",
+    "error2": "sounds/error2.wav",
+    "shutdown": "sounds/shutdown.wav"
+  },
+  "ui": {}
+}

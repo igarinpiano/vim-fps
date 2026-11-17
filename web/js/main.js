@@ -8,6 +8,9 @@ import { TouchPad } from './touch.js';
 import { Director } from './director.js';
 import { Sound, EVENT_SOUNDS } from './audio.js';
 import { TEXTURE_SLOTS, MAX_TEXTURE_BYTES, TextureStore, slotOf, parseSize, loadImage, fetchPack } from './textures.js';
+import { Profile } from './profile.js';
+import { parseRc, applyRc, buildRc, customCommand, tokenize, isRcName, CUSTOM_DEFAULTS, RC_NAME, DOC_URL } from './rc.js';
+import { SkinStore, skinLayer, skinName, readBundle, readZip, writeZip, filesFromDrop, UI_VARS } from './skin.js';
 import { VERSION } from './version.js';
 
 const $ = (id) => document.getElementById(id);
@@ -22,7 +25,10 @@ const storage = (() => {
     return null;
   }
 })();
-const settings = new Settings(storage);
+// Everything kept between visits (one localStorage key); its text form is
+// .vimfpsrc (:mkvimrc / :source).
+const profile = new Profile(storage);
+const settings = new Settings(profile.section('set'));
 const sound = new Sound(settings);
 const aim = new Aim(settings);
 let renderer = null;
@@ -279,6 +285,8 @@ const HELP = [
   '  :set nonameplates    頭上の名前を消す :set nohpbars  頭上の体力ゲージを消す',
   '  :texture             自分の画像を地面・壁などに貼る (:texture だけで使い方と一覧)',
   '  :sounds              起動音・エラー音・終了音のファイルの状態',
+  '  :skin                スキン (テクスチャ・効果音・UI の色をまとめたもの)',
+  '  :mkvimrc             設定を .vimfpsrc に書き出す  :source  .vimfpsrc を読み込む (:help config)',
   '',
   'SPECTATE (観戦中)      a  自動カメラ (3D の中継視点。選手を自動で切り替え。もう一度押すと選手の視点)  :auto でも',
   '                       n / N  次 / 前の選手    o  自由視点 (k/j 前後, h/l 旋回, K/J 上下, u/d 見上げる・見下ろす, Shift で速く)',
@@ -479,7 +487,8 @@ function runCommand(line) {
       break;
     case 'h':
     case 'help':
-      showMsg(':help', HELP);
+      if (/^(config|rc|vimfpsrc|\.vimfpsrc|skin|skins|mkvimrc|source)$/.test(args.trim())) showMsg(':help config', CONFIG_HELP);
+      else showMsg(':help', HELP);
       break;
     case 'ls':
     case 'score':
@@ -531,7 +540,33 @@ function runCommand(line) {
       else balloon('E: :botskill は練習モードだけで使えます', '', 'err');
       break;
     case 'custom':
-      openCustom();
+      if (args.trim()) {
+        const e = customCommand(tokenize(args), custom);
+        if (e) balloon(e, '', 'err');
+        else {
+          saveCustom();
+          balloon('カスタムマッチの設定を変えました', args.trim());
+        }
+      } else openCustom();
+      break;
+    case 'so':
+    case 'source':
+      sourceCommand(args.trim());
+      break;
+    case 'mkv':
+    case 'mkvimrc':
+      mkvimrc(false);
+      break;
+    case 'mkv!':
+    case 'mkvimrc!':
+      mkvimrc(true);
+      break;
+    case 'skin':
+    case 'skins':
+      skinCommand(args.trim());
+      break;
+    case 'host':
+      showMsg(':host — vimfps host の設定', hostLines());
       break;
     case 'tex':
     case 'texture':
@@ -569,12 +604,40 @@ async function fullscreen() {
   }
 }
 
-// ---------------------------------------------------------------- textures and sounds (your own assets)
+// ---------------------------------------------------------------- skins, textures and sounds (your own assets)
+//
+// The look and sound come from a stack of skins (skin.js), each over the one
+// before: the one served with the game (web/assets/skin.json), the host's
+// (`vimfps host --skin`), yours (`:skin`), then single textures (`:texture`).
 
 const texStore = new TextureStore(window.indexedDB);
-// slot -> { image, size, from: 'browser' | 'pack', name }
+const skinStore = new SkinStore(window.indexedDB);
+const siteBase = new URL('../assets/', import.meta.url);
+// slot -> { image, size, from, name }: what is on the world now.
 const texState = new Map();
-const texPackBase = new URL('../assets/textures/', import.meta.url);
+// slot -> { blob, size, name }: `:texture` (kept in this browser).
+const texOverrides = new Map();
+// The layers: null when there is none.
+const skins = { site: null, host: null, mine: null };
+// Your skins when this browser cannot keep them (no IndexedDB): name -> record.
+const sessionSkins = new Map();
+const imageCache = new Map();
+let lookGen = 0;
+let uiApplied = [];
+const FROM = { site: '同梱', host: 'ホスト', mine: 'スキン', browser: ':texture' };
+
+function cachedImage(src) {
+  if (!imageCache.has(src)) {
+    imageCache.set(
+      src,
+      loadImage(src).catch((e) => {
+        imageCache.delete(src);
+        throw e;
+      }),
+    );
+  }
+  return imageCache.get(src);
+}
 
 /// Everything in texState onto the world (once there is a renderer).
 function applyTextures() {
@@ -588,43 +651,221 @@ function applyTextures() {
   }
 }
 
-/// At start-up: the pack served with the game, then (over it) what this
-/// browser has stored.
-async function loadTextures() {
-  for (const e of await fetchPack(texPackBase)) {
+/// The layers merged, item by item: { textures, sounds, ui } with `from`
+/// (site / host / mine) on each.
+function mergedSkin() {
+  const out = { textures: {}, sounds: {}, ui: {}, from: { sounds: {}, ui: {} } };
+  for (const key of ['site', 'host', 'mine']) {
+    const layer = skins[key];
+    if (!layer) continue;
+    for (const [slot, t] of Object.entries(layer.textures)) out.textures[slot] = { ...t, from: key };
+    for (const [ev, src] of Object.entries(layer.sounds)) {
+      out.sounds[ev] = src;
+      out.from.sounds[ev] = key;
+    }
+    for (const [k, v] of Object.entries(layer.ui)) {
+      out.ui[k] = v;
+      out.from.ui[k] = key;
+    }
+  }
+  return out;
+}
+
+function applyUi(ui) {
+  const st = document.documentElement.style;
+  for (const k of uiApplied) st.removeProperty(`--${k}`);
+  uiApplied = Object.keys(ui);
+  for (const k of uiApplied) st.setProperty(`--${k}`, ui[k]);
+}
+
+/// Puts the stack on screen and in the speakers (after any layer changed).
+async function refreshLook() {
+  const gen = ++lookGen;
+  const m = mergedSkin();
+  applyUi(m.ui);
+  sound.setSources(m.sounds);
+  const next = new Map();
+  for (const slot of Object.keys(TEXTURE_SLOTS)) {
+    const o = texOverrides.get(slot);
+    const t = o ? { src: o.blob, size: o.size, name: o.name, from: 'browser' } : m.textures[slot];
+    if (!t) continue;
     try {
-      texState.set(e.slot, { image: await loadImage(e.url), size: e.size || TEXTURE_SLOTS[e.slot].size, from: 'pack', name: e.url.split('/').pop() });
+      next.set(slot, { image: await cachedImage(t.src), size: t.size || TEXTURE_SLOTS[slot].size, from: t.from, name: t.name || '' });
     } catch {
-      console.warn(`texture pack: ${e.url} could not be loaded`);
+      console.warn(`texture ${slot}: ${t.name || t.src} could not be loaded`);
     }
   }
-  try {
-    for (const [slot, rec] of await texStore.all()) {
-      try {
-        texState.set(slot, { image: await loadImage(rec.blob), size: rec.size || TEXTURE_SLOTS[slot].size, from: 'browser', name: rec.name || '' });
-      } catch {
-        // A stored file that no longer decodes: skip it.
-      }
-    }
-  } catch {
-    // No storage (private mode): the pack only.
-  }
+  if (gen !== lookGen) return;
+  texState.clear();
+  for (const [k, v] of next) texState.set(k, v);
   applyTextures();
 }
 
-/// Takes image files for slots: [[slot, File]]. Stored in this browser.
+/// The skin served with the game: assets/skin.json, or (before skins)
+/// assets/textures/pack.json and assets/sounds/<event>.wav.
+async function loadSiteSkin() {
+  try {
+    const res = await fetch(new URL('skin.json', siteBase), { cache: 'no-cache' });
+    if (res.ok && !(res.headers.get('content-type') || '').startsWith('text/html')) {
+      return skinLayer(await res.json(), (p) => new URL(p, siteBase).href, 'site');
+    }
+  } catch {
+    // No skin.json: the old layout.
+  }
+  const layer = { name: '(同梱)', textures: {}, sounds: {}, ui: {}, warnings: [] };
+  for (const e of await fetchPack(new URL('textures/', siteBase))) layer.textures[e.slot] = { src: e.url, size: e.size, name: e.url.split('/').pop() };
+  for (const ev of Object.keys(EVENT_SOUNDS)) layer.sounds[ev] = ['wav', 'mp3', 'ogg'].map((x) => new URL(`sounds/${ev}.${x}`, siteBase).href);
+  return layer;
+}
+
+/// The host's skin (`vimfps host --skin DIR`, served at skin/).
+async function loadHostSkin() {
+  if (!serverInfo || !serverInfo.skin) return null;
+  const base = new URL('skin/', window.location.href);
+  try {
+    const res = await fetch(new URL('skin.json', base), { cache: 'no-store' });
+    if (!res.ok) return null;
+    return skinLayer(await res.json(), (p) => new URL(p, base).href, String(serverInfo.skin));
+  } catch {
+    return null;
+  }
+}
+
+async function getSkinRecord(name) {
+  if (sessionSkins.has(name)) return sessionSkins.get(name);
+  try {
+    return (await skinStore.get(name)) || null;
+  } catch {
+    return null;
+  }
+}
+
+async function listSkinRecords() {
+  let stored = [];
+  try {
+    stored = await skinStore.list();
+  } catch {
+    // No storage.
+  }
+  const names = new Set(stored.map((r) => r.name));
+  return [...stored, ...[...sessionSkins.values()].filter((r) => !names.has(r.name))].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function recordLayer(rec) {
+  return skinLayer(rec.manifest, (p) => (rec.files && rec.files[p]) || null, rec.name);
+}
+
+/// Your skin: the one named in the profile. Returns an error message
+/// when it is named but not in this browser.
+async function loadMySkin() {
+  const name = profile.get('skin');
+  if (!name) {
+    skins.mine = null;
+    return null;
+  }
+  const rec = await getSkinRecord(name);
+  skins.mine = rec ? recordLayer(rec) : null;
+  return rec ? null : `スキン "${name}" はこのブラウザーに入っていません (zip やフォルダーをドロップするか :skin load)`;
+}
+
+/// At start-up (after server-info.json): every layer, then :texture.
+async function loadLook() {
+  const [site, host] = await Promise.all([loadSiteSkin(), loadHostSkin()]);
+  skins.site = site;
+  skins.host = host;
+  const missing = await loadMySkin();
+  if (missing) console.warn(missing);
+  try {
+    for (const [slot, rec] of await texStore.all()) texOverrides.set(slot, rec);
+  } catch {
+    // No storage (private mode).
+  }
+  await refreshLook();
+}
+
+async function useSkin(name) {
+  if (!name || name === 'off' || name === 'none') {
+    profile.put('skin', null);
+    skins.mine = null;
+    await refreshLook();
+    return balloon('スキンを外しました', skins.host ? 'ホストのスキンと同梱の素材だけになります' : '同梱の素材だけになります');
+  }
+  const rec = await getSkinRecord(name);
+  if (!rec) return balloon(`E: スキン "${name}" はこのブラウザーにありません`, ':skin で一覧', 'err');
+  profile.put('skin', rec.name);
+  skins.mine = recordLayer(rec);
+  await refreshLook();
+  return balloon(`スキン: ${rec.name}`, skinSummary(rec.manifest));
+}
+
+function skinSummary(manifest) {
+  const n = (o) => Object.keys((manifest && manifest[o]) || {}).length;
+  return [`テクスチャ ${n('textures')}`, `効果音 ${n('sounds')}`, `UI ${n('ui')}`].join(' · ');
+}
+
+/// A dropped folder or zip (Map: path → Blob): its skin goes into this
+/// browser and is put on; its .vimfpsrc is read (after the skin).
+async function importBundle(files, fallbackName) {
+  let b;
+  try {
+    b = await readBundle(files, skinName(fallbackName));
+  } catch (e) {
+    return balloon('読み込めません', String(e.message || e), 'err');
+  }
+  if (!b.skin && b.rc == null) {
+    return balloon('スキンも .vimfpsrc も見つかりません', 'skin.json のあるフォルダー (zip)、または ground.png / startup.wav のような名前のファイルを入れてください', 'err');
+  }
+  if (b.skin) {
+    const rec = { name: b.skin.name, manifest: b.skin.manifest, files: b.skin.files };
+    let note = '';
+    try {
+      await skinStore.put(rec);
+      sessionSkins.delete(rec.name);
+    } catch {
+      sessionSkins.set(rec.name, rec);
+      note = ' (このブラウザーには保存できません: このページを閉じるまで)';
+    }
+    profile.put('skin', rec.name);
+    skins.mine = recordLayer(rec);
+    balloon(`スキンを入れました: ${rec.name}${note}`, [skinSummary(rec.manifest), ...b.skin.warnings].join(' · '), b.skin.warnings.length ? 'err' : '');
+  }
+  if (b.rc != null) sourceText(b.rc, RC_NAME);
+  await refreshLook();
+  return undefined;
+}
+
+/// Files picked or dropped (not a folder). `loose`: what to do with plain
+/// images: 'textures' (`:texture`, by file name) or 'skin' (a new skin).
+async function importFiles(files, loose) {
+  if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
+    try {
+      return importBundle(await readZip(await files[0].arrayBuffer()), files[0].name.replace(/\.zip$/i, ''));
+    } catch (e) {
+      return balloon('zip を読めません', String(e.message || e), 'err');
+    }
+  }
+  if (files.length === 1 && (isRcName(files[0].name) || (files[0].type || '').startsWith('text/'))) return sourceText(await files[0].text(), files[0].name);
+  if (loose === 'skin' || files.some((f) => f.name.toLowerCase() === 'skin.json' || isRcName(f.name))) {
+    return importBundle(new Map(files.map((f) => [f.name, f])), 'my-skin');
+  }
+  return addTexturesByName(files);
+}
+
+/// Takes image files for slots: [[slot, File]]. Kept in this browser
+/// (`:texture`), over every skin.
 async function addTextures(pairs) {
   const done = [];
   const failed = [];
   for (const [slot, file] of pairs) {
     try {
       if (file.size > MAX_TEXTURE_BYTES) throw new Error(`大きすぎます (${Math.round(file.size / 1048576)} MB、上限 ${MAX_TEXTURE_BYTES / 1048576} MB)`);
-      const image = await loadImage(file);
+      await cachedImage(file);
       const size = (texState.get(slot) && texState.get(slot).size) || TEXTURE_SLOTS[slot].size;
-      texState.set(slot, { image, size, from: 'browser', name: file.name || '' });
+      const rec = { blob: file, size, name: file.name || '' };
+      texOverrides.set(slot, rec);
       done.push(`${slot} ← ${file.name || '画像'}`);
       try {
-        await texStore.put(slot, { blob: file, size, name: file.name || '' });
+        await texStore.put(slot, rec);
       } catch (e) {
         failed.push(`${slot}: 保存できません (このページを閉じるまでは使えます): ${e.message || e}`);
       }
@@ -632,7 +873,7 @@ async function addTextures(pairs) {
       failed.push(`${file.name || slot}: ${e.message || e}`);
     }
   }
-  applyTextures();
+  await refreshLook();
   if (done.length) balloon('テクスチャを貼りました', done.join(' · '));
   if (failed.length) balloon('テクスチャを読めません', failed.join(' · '), 'err');
 }
@@ -652,10 +893,10 @@ function addTexturesByName(files) {
 }
 
 /// Opens the system's file chooser (the one place a pointer is needed).
-function pickFiles(multiple, onFiles) {
+function pickFiles(multiple, onFiles, accept = 'image/*') {
   const input = document.createElement('input');
   input.type = 'file';
-  input.accept = 'image/*';
+  if (accept) input.accept = accept;
   input.multiple = multiple;
   input.style.display = 'none';
   input.addEventListener('change', () => {
@@ -667,11 +908,22 @@ function pickFiles(multiple, onFiles) {
   input.click();
 }
 
+function download(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+}
+
 function textureLines() {
-  const L = ['自分の画像を、地形はそのままに面へ貼ります (このブラウザーに保存されます)。', ''];
+  const L = ['自分の画像を、地形はそのままに面へ貼ります (このブラウザーに保存され、どのスキンよりも優先されます)。', ''];
   for (const [slot, o] of Object.entries(TEXTURE_SLOTS)) {
     const t = texState.get(slot);
-    const state = !t ? '—' : `${t.from === 'pack' ? '同梱パック' : 'このブラウザー'}: ${t.name || '画像'} (${t.image.naturalWidth}×${t.image.naturalHeight}${o.size ? `、1 枚 ${t.size} m` : ''})`;
+    const state = !t ? '—' : `${FROM[t.from] || t.from}: ${t.name || '画像'} (${t.image.naturalWidth}×${t.image.naturalHeight}${o.size ? `、1 枚 ${t.size} m` : ''})`;
     L.push(`  ${slot.padEnd(7)} ${o.label.padEnd(12)} ${state}`);
   }
   L.push('');
@@ -679,10 +931,10 @@ function textureLines() {
   L.push('  :texture load              複数のファイルをまとめて選ぶ (ファイル名の先頭で貼る場所を決める: ground.png, wall-brick.jpg …)');
   L.push('  :texture ground URL        URL の画像を貼る (その画像が他サイトからの読み込みを許可している場合)');
   L.push('  :texture ground size 12    1 枚の画像が覆う大きさ (メートル)。小さいほど細かく繰り返す');
-  L.push('  :texture ground none       その面を元の色に戻す        :texture reset   すべて元に戻す');
+  L.push('  :texture ground none       :texture で貼った画像を外す (スキンの画像か元の色に戻る)   :texture reset   すべて外す');
   L.push('  画像ファイルをこのページへドラッグ & ドロップしても貼れます (ファイル名で場所を決めます)。');
   L.push('');
-  L.push('  サーバーごと配る場合: web/assets/textures/ に画像と pack.json を置きます ({"ground": "grass.png", "wall": {"file": "brick.jpg", "size": 3}})。');
+  L.push('  テクスチャ・効果音・UI の色をまとめて配る・持ち運ぶにはスキンを使います (:skin、:help config)。');
   return L;
 }
 
@@ -691,26 +943,26 @@ async function textureCommand(args) {
   if (!a || a === 'list' || a === 'ls') return showMsg(':texture — テクスチャ', textureLines());
   if (a === 'load' || a === 'open') return pickFiles(true, addTexturesByName);
   if (a === 'reset' || a === 'clear') {
-    for (const [slot, t] of [...texState]) if (t.from === 'browser') texState.delete(slot);
+    texOverrides.clear();
     try {
       await texStore.clear();
     } catch {
       // Nothing stored.
     }
-    applyTextures();
-    return balloon('テクスチャを元に戻しました', '同梱パックの分は次に開いたときに戻ります');
+    await refreshLook();
+    return balloon(':texture の画像をすべて外しました', 'スキンの画像か元の色に戻ります');
   }
   if (!TEXTURE_SLOTS[a]) return balloon(`E: 貼る場所が分かりません: ${a}`, Object.keys(TEXTURE_SLOTS).join(' / '), 'err');
   if (!b) return pickFiles(false, (files) => addTextures([[a, files[0]]]));
   if (b === 'none' || b === 'off' || b === '-') {
-    texState.delete(a);
+    texOverrides.delete(a);
     try {
       await texStore.remove(a);
     } catch {
       // Nothing stored.
     }
-    applyTextures();
-    return balloon(`${a}: 元の色に戻しました`);
+    await refreshLook();
+    return balloon(`${a}: :texture の画像を外しました`);
   }
   if (b === 'size' || parseSize(b) != null) {
     const size = parseSize(b === 'size' ? c : b);
@@ -718,14 +970,17 @@ async function textureCommand(args) {
     if (size == null) return balloon('E: 大きさ (メートル) は 0.1〜500 で', '', 'err');
     if (!t) return balloon(`E: ${a} にはまだ画像がありません`, `:texture ${a} で選んでください`, 'err');
     t.size = size;
-    try {
-      const rec = (await texStore.all()).find(([s]) => s === a);
-      if (rec) await texStore.put(a, { ...rec[1], size });
-    } catch {
-      // Not stored: for this page only.
+    const o = texOverrides.get(a);
+    if (o) {
+      o.size = size;
+      try {
+        await texStore.put(a, o);
+      } catch {
+        // Not stored: for this page only.
+      }
     }
     applyTextures();
-    return balloon(`${a}: 1 枚 ${size} m`);
+    return balloon(`${a}: 1 枚 ${size} m`, o ? '' : 'スキンの画像の大きさは、このページを閉じるまで (変え続けるならスキンの skin.json の size で)');
   }
   // A URL.
   try {
@@ -739,25 +994,226 @@ async function textureCommand(args) {
   return undefined;
 }
 
-// Image files dropped on the page become textures.
+// Dropped on the page: a folder or zip → a skin (and its .vimfpsrc), a
+// .vimfpsrc → read, images → textures by file name.
 window.addEventListener('dragover', (e) => e.preventDefault());
-window.addEventListener('drop', (e) => {
+window.addEventListener('drop', async (e) => {
   e.preventDefault();
-  const files = [...((e.dataTransfer && e.dataTransfer.files) || [])];
-  if (files.length) addTexturesByName(files);
+  if (!e.dataTransfer) return;
+  try {
+    const { files, folder } = await filesFromDrop(e.dataTransfer);
+    if (folder) importBundle(files, folder);
+    else if (files.size) importFiles([...files.values()], 'textures');
+  } catch (err) {
+    balloon('読み込めません', String(err.message || err), 'err');
+  }
 });
 
-/// :sounds — the three event sounds and whether their files are there.
+/// :sounds — the event sounds, where each comes from and whether it loaded.
 function showSounds() {
   sound.wake();
   const st = sound.sampleStatus();
-  const word = { file: 'ファイルを再生', none: 'ファイルなし (無音)', '?': '確認中 (キーを押してからもう一度)' };
-  const L = ['次の場面で web/assets/sounds/ の音声ファイルを鳴らします。', ''];
-  for (const [name, when] of Object.entries(EVENT_SOUNDS)) L.push(`  ${`${name}.wav`.padEnd(13)} ${when.padEnd(22)} ${word[st[name]]}`);
+  const m = mergedSkin();
+  const word = { file: '再生できます', none: 'ファイルなし (無音)', '?': '確認中 (キーを押してからもう一度)' };
+  const L = ['次の場面で、スキンの "sounds" に書いた音声ファイルを鳴らします。', ''];
+  for (const [name, when] of Object.entries(EVENT_SOUNDS)) {
+    const src = m.sounds[name];
+    const from = src ? `${FROM[m.from.sounds[name]]}: ${typeof src === 'string' ? src.split('/').pop() : Array.isArray(src) ? `${name}.wav` : 'ファイル'}` : '—';
+    L.push(`  ${name.padEnd(9)} ${when.padEnd(22)} ${word[st[name]].padEnd(14)} ${from}`);
+  }
   L.push('');
-  L.push('  .wav の代わりに .mp3 / .ogg でも読みます (startup.mp3 など)。ファイル名は半角英数字のこの名前のままにしてください。');
-  L.push('  音量は :set volume=70。ファイルが無い場面では何も鳴りません (被弾だけは合成音)。');
+  L.push('  .wav / .mp3 / .ogg を読みます。音量は :set volume=70。ファイルが無い場面では何も鳴りません (被弾だけは合成音)。');
+  L.push('  自分の音にするには、スキンの skin.json に "sounds": { "startup": "sounds/boot.wav" } のように書きます (:help config)。');
   showMsg(':sounds — 効果音のファイル', L);
+}
+
+// ---------------------------------------------------------------- .vimfpsrc and :skin
+
+/// Reads a .vimfpsrc (its text). `set`, `skin` and `custom` take effect;
+/// `host` lines are kept for :mkvimrc (vimfps host reads them).
+function sourceText(text, label) {
+  const cmds = parseRc(text);
+  const host = [];
+  let skinChanged = false;
+  let n = 0;
+  const errors = applyRc(cmds, {
+    set: (args) => {
+      n++;
+      return settings.command(args).error;
+    },
+    skin: (args) => {
+      if (args.length !== 1) return 'E474: skin の後に名前を 1 つ (使わないなら skin off)';
+      profile.put('skin', args[0] === 'off' || args[0] === 'none' ? null : args[0]);
+      skinChanged = true;
+      n++;
+      return null;
+    },
+    custom: (args) => {
+      const e = customCommand(args, custom);
+      if (!e) {
+        saveCustom();
+        n++;
+      }
+      return e;
+    },
+    host: (raw) => {
+      host.push(raw);
+      return null;
+    },
+  });
+  if (host.length) profile.put('host', host);
+  if (skinChanged) {
+    loadMySkin().then((missing) => {
+      if (missing) balloon(missing, '', 'err');
+      refreshLook();
+    });
+  }
+  const what = `${n} 行を実行${host.length ? ` · host の行 ${host.length} 個 (vimfps host 用に保存)` : ''}`;
+  if (errors.length) showMsg(`:source ${label} — エラー ${errors.length} 件`, [`${label}: ${what}`, '', ...errors]);
+  else balloon(`"${label}" を読み込みました`, what);
+}
+
+/// :source — a .vimfpsrc (or a zip with one): picked, or from a URL.
+async function sourceCommand(args) {
+  if (!args) return pickFiles(true, (files) => importFiles(files, 'skin'), '');
+  try {
+    const res = await fetch(new URL(args, window.location.href), { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const name = args.split(/[\\/?#]/).filter(Boolean).pop() || RC_NAME;
+    if (/\.zip$/i.test(name) || (res.headers.get('content-type') || '').includes('zip')) return importBundle(await readZip(await res.arrayBuffer()), name.replace(/\.zip$/i, ''));
+    return sourceText(await res.text(), name);
+  } catch (e) {
+    return balloon('読み込めません', `${args}: ${e.message || e}`, 'err');
+  }
+}
+
+function rcText(skinDir) {
+  return buildRc({ set: settings.changedArgs(), skin: profile.get('skin') || null, custom, host: profile.get('host') || [], skinDir });
+}
+
+const EXT_OF = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif', 'image/avif': 'avif', 'image/bmp': 'bmp' };
+
+/// A skin as zip entries under `prefix`; `withTextures`: the `:texture`
+/// images go in too (over the skin's).
+async function skinEntries(rec, withTextures, prefix) {
+  const manifest = rec ? JSON.parse(JSON.stringify(rec.manifest)) : { name: 'my-skin', textures: {}, sounds: {}, ui: {} };
+  manifest.textures = manifest.textures || {};
+  const files = { ...((rec && rec.files) || {}) };
+  if (withTextures) {
+    for (const [slot, o] of texOverrides) {
+      const m = (o.name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+      const p = `textures/${slot}.${(m && m[1]) || EXT_OF[o.blob.type] || 'png'}`;
+      files[p] = o.blob;
+      manifest.textures[slot] = o.size ? { file: p, size: o.size } : p;
+    }
+  }
+  const used = new Set([...Object.values(manifest.textures).map((t) => (typeof t === 'string' ? t : t.file)), ...Object.values(manifest.sounds || {})]);
+  const out = [{ path: `${prefix}skin.json`, data: `${JSON.stringify(manifest, null, 2)}\n` }];
+  for (const [p, blob] of Object.entries(files)) if (used.has(p)) out.push({ path: prefix + p, data: new Uint8Array(await blob.arrayBuffer()) });
+  return out;
+}
+
+/// :mkvimrc — downloads .vimfpsrc. :mkvimrc! — a zip with .vimfpsrc and
+/// your skin (with the :texture images): everything, to carry elsewhere.
+async function mkvimrc(bang) {
+  if (!bang) {
+    download(new Blob([rcText(false)], { type: 'text/plain' }), RC_NAME);
+    return balloon(`${RC_NAME} を書き出しました`, 'vimfps host でも使うなら ~/.vimfpsrc という名前で置きます (ブラウザーが vimfpsrc.txt などに変えていたら直してください)');
+  }
+  const name = profile.get('skin');
+  const rec = name ? await getSkinRecord(name) : null;
+  const hasSkin = !!rec || texOverrides.size > 0;
+  const entries = [{ path: RC_NAME, data: rcText(hasSkin) }];
+  if (hasSkin) entries.push(...(await skinEntries(rec, true, 'skin/')));
+  download(writeZip(entries), 'vimfps-profile.zip');
+  return balloon('vimfps-profile.zip を書き出しました', `${RC_NAME}${hasSkin ? ` とスキン (${rec ? rec.name : 'my-skin'})` : ''}。別のブラウザーでは、この zip をドロップすれば全部入ります`);
+}
+
+async function skinLines() {
+  const L = ['スキン — テクスチャ・効果音・UI の色をまとめたもの。下ほど優先して重なります (書いていない項目は下の段から)。', ''];
+  const row = (label, layer, extra = '') => L.push(`  ${label.padEnd(14)} ${layer ? `${layer.name}  (${skinSummary(layer)})` : '—'}${extra}`);
+  row('1. 同梱', skins.site);
+  row('2. ホスト', skins.host, serverInfo && serverInfo.skin && !skins.host ? '  (読み込めませんでした)' : '');
+  row('3. 自分のスキン', skins.mine, profile.get('skin') && !skins.mine ? `  ("${profile.get('skin')}" はこのブラウザーにありません)` : '');
+  L.push(`  ${'4. :texture'.padEnd(14)} ${texOverrides.size ? [...texOverrides.keys()].join(', ') : '—'}`);
+  L.push('');
+  L.push('このブラウザーに入っているスキン:');
+  const recs = await listSkinRecords();
+  if (!recs.length) L.push('  (なし)');
+  for (const r of recs) L.push(`  ${r.name === profile.get('skin') ? '*' : ' '} ${r.name.padEnd(20)} ${skinSummary(r.manifest)}${sessionSkins.has(r.name) ? '  (保存できていません)' : ''}`);
+  L.push('');
+  L.push('  :skin 名前          そのスキンを使う                :skin off          使わない (ホスト・同梱の分だけ)');
+  L.push('  :skin load          zip や skin.json と素材のファイルを選んで入れる (フォルダーや zip をドロップしても入ります)');
+  L.push('  :skin export [名前] スキンを zip で書き出す          :skin rm 名前       このブラウザーから消す');
+  L.push('  :mkvimrc!           .vimfpsrc とスキンをまとめた zip を書き出す (別のブラウザーへの引っ越しに)');
+  L.push('');
+  L.push(`  skin.json の書き方: :help config / ${DOC_URL}`);
+  return L;
+}
+
+async function skinCommand(args) {
+  const [a, b] = tokenize(args);
+  if (!a || a === 'list' || a === 'ls') return showMsg(':skin — スキン', await skinLines());
+  if (a === 'load' || a === 'open') return pickFiles(true, (files) => importFiles(files, 'skin'), '');
+  if (a === 'export') {
+    const name = b || profile.get('skin');
+    const rec = name ? await getSkinRecord(name) : null;
+    if (!rec) return balloon(`E: 書き出すスキンがありません${name ? `: ${name}` : ''}`, ':skin で一覧', 'err');
+    download(writeZip(await skinEntries(rec, false, '')), `${rec.name}.zip`);
+    return balloon(`${rec.name}.zip を書き出しました`, 'ドロップすれば入ります。vimfps host --skin で全員に配るときは展開したフォルダーを指定します');
+  }
+  if (a === 'rm' || a === 'delete' || a === 'del') {
+    if (!b) return balloon('E: 消すスキンの名前を書いてください', ':skin rm 名前', 'err');
+    sessionSkins.delete(b);
+    try {
+      await skinStore.remove(b);
+    } catch {
+      // Not stored.
+    }
+    if (profile.get('skin') === b) await useSkin('off');
+    return balloon(`スキン "${b}" を消しました`);
+  }
+  return useSkin(a);
+}
+
+/// :help config — the short version of docs/config.md.
+const CONFIG_HELP = [
+  '設定ファイル (.vimfpsrc) とスキン — くわしくは ' + DOC_URL,
+  '',
+  '.vimfpsrc: 設定を 1 つのテキストファイルに。Vim の vimrc と同じ書き方 (" から行末までコメント)',
+  '  set adssens=30 forward=j nocompass      :set と同じ',
+  '  skin my-skin                            このブラウザーに入れたスキンを使う (skin off で使わない)',
+  '  custom bots=8 skill=4 rule=last time=15 カスタムマッチのフォームの値',
+  '  host bots=5 time-limit=15 tunnel        vimfps host のオプション (~/.vimfpsrc に置くと host が読みます)',
+  '',
+  '  :mkvimrc             今の設定を .vimfpsrc として書き出す',
+  '  :mkvimrc!            .vimfpsrc とスキンをまとめた zip を書き出す (別のブラウザーへの引っ越しに)',
+  '  :source              .vimfpsrc (か zip) を選んで読み込む。:source URL も可。ページへのドロップでも読めます',
+  '',
+  'スキン: テクスチャ・効果音・UI の色を、skin.json のある 1 つのフォルダー (zip) に',
+  '  { "name": "my-skin",',
+  '    "textures": { "ground": "textures/grass.png", "wall": { "file": "textures/brick.jpg", "size": 3 } },',
+  '    "sounds": { "startup": "sounds/boot.wav", "error2": "sounds/hit.ogg" },',
+  '    "ui": { "window": "#ece9d8", "crosshair": "#00ff66" } }',
+  `  textures: ${Object.keys(TEXTURE_SLOTS).join(' ')}`,
+  `  sounds:   ${Object.keys(EVENT_SOUNDS).join(' ')}`,
+  `  ui:       ${Object.keys(UI_VARS).join(' ')}`,
+  '',
+  '  重なる順 (下ほど優先): 同梱 (web/assets/skin.json) < ホスト (vimfps host --skin DIR) < 自分のスキン (:skin) < :texture',
+  '  :skin で一覧と使い方。フォルダーや zip をこのページにドロップすると入ります',
+];
+
+function hostLines() {
+  const lines = profile.get('host') || [];
+  return [
+    'host の行は vimfps host が読む設定です (ブラウザーでは使いません)。:source で読んだ .vimfpsrc の分を覚えていて、:mkvimrc で書き戻します。',
+    '',
+    ...(lines.length ? lines.map((l) => `  ${l}`) : ['  (なし)']),
+    '',
+    '  書ける項目: port bind tunnel password bots bot-skill max-players time-limit frag-limit seed name',
+    '              no-respawn no-ring no-tanks no-update-check no-network-check web skin',
+    `  くわしくは ${DOC_URL}`,
+  ];
 }
 
 // ---------------------------------------------------------------- chat
@@ -2156,12 +2612,16 @@ const CUSTOM_ROWS = [
   { key: 'seed', label: 'マップ', values: null, fmt: (v) => (v ? `シード ${v}` : 'ランダム') },
   { key: 'start', label: '▶ 開始', values: null, fmt: () => 'Enter' },
 ];
-const CUSTOM_KEY = 'vimfps.custom.v1';
-let custom = { bots: 5, skill: 3, rule: 'ffa', time: 10, frags: 25, ring: 'on', tanks: 'on', seed: 0, row: 0 };
-try {
-  Object.assign(custom, JSON.parse((storage && storage.getItem(CUSTOM_KEY)) || '{}'));
-} catch {
-  // Defaults.
+const custom = { ...CUSTOM_DEFAULTS, row: 0 };
+{
+  // Saved values that are still valid (the form only offers valid ones).
+  const saved = profile.get('custom') || {};
+  for (const k of Object.keys(CUSTOM_DEFAULTS)) if (saved[k] !== undefined) customCommand([`${k}=${saved[k]}`], custom);
+  if (Number.isInteger(saved.row)) custom.row = saved.row;
+}
+
+function saveCustom() {
+  profile.put('custom', { ...custom });
 }
 
 function openCustom() {
@@ -2198,11 +2658,7 @@ function customChange(n) {
     const i = r.values.indexOf(custom[r.key]);
     custom[r.key] = r.values[Math.max(0, Math.min(r.values.length - 1, (i < 0 ? 0 : i) + n))];
   }
-  try {
-    if (storage) storage.setItem(CUSTOM_KEY, JSON.stringify(custom));
-  } catch {
-    // Not saved.
-  }
+  saveCustom();
   sound.click();
   renderCustom();
 }
@@ -2784,11 +3240,10 @@ for (const [id, fn] of Object.entries(CLOSERS)) {
 }
 
 // ?debug: expose the state for automated browser tests (nothing else changes).
-if (new URLSearchParams(location.search).has('debug')) window.vimfps = { game, settings, onMessage: (m) => onMessage(m), startPractice, addTextures, touch: () => touch.scene, sound };
+if (new URLSearchParams(location.search).has('debug')) window.vimfps = { game, settings, profile, sourceText, importBundle, skins, onMessage: (m) => onMessage(m), startPractice, addTextures, touch: () => touch.scene, sound };
 
 async function boot() {
   showTitle();
-  loadTextures();
   try {
     // Static hosting (GitHub Pages, file://) has no host to join.
     if (location.protocol === 'file:' || location.hostname.endsWith('github.io')) throw new Error('static');
@@ -2800,6 +3255,8 @@ async function boot() {
   } catch {
     // Not served by a host (GitHub Pages, file://): practice / :connect.
   }
+  // After server-info.json: it says whether the host serves a skin.
+  loadLook();
   buildMenu();
   requestAnimationFrame(frame);
 }

@@ -43,7 +43,20 @@ export const OPTIONS = {
 /// Pseudo-option: all smoothing options at once.
 export const SMOOTH_GROUP = Object.keys(OPTIONS).filter((k) => OPTIONS[k].smooth);
 
+/// Where a plain Storage (localStorage) keeps the options. The game itself
+/// passes a section of the profile (profile.js), which holds everything.
 const STORAGE_KEY = 'vimfps.settings.v1';
+
+/// A store is { read() → object | null, write(object) }. A Storage-like
+/// object (getItem / setItem) is wrapped into one.
+function toStore(storage) {
+  if (!storage) return null;
+  if (typeof storage.read === 'function') return storage;
+  return {
+    read: () => JSON.parse(storage.getItem(STORAGE_KEY) || 'null'),
+    write: (o) => storage.setItem(STORAGE_KEY, JSON.stringify(o)),
+  };
+}
 
 export function resolveName(name) {
   if (name === 'smooth') return 'smooth';
@@ -56,7 +69,7 @@ export function resolveName(name) {
 
 export class Settings {
   constructor(storage) {
-    this.storage = storage || null;
+    this.store = toStore(storage);
     this.values = {};
     for (const [k, o] of Object.entries(OPTIONS)) this.values[k] = o.def;
     this.listeners = [];
@@ -78,11 +91,10 @@ export class Settings {
   }
 
   load() {
-    if (!this.storage) return;
+    if (!this.store) return;
     try {
-      const raw = this.storage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const saved = JSON.parse(raw);
+      const saved = this.store.read();
+      if (!saved || typeof saved !== 'object') return;
       for (const [k, v] of Object.entries(saved)) {
         if (!OPTIONS[k]) continue;
         const o = OPTIONS[k];
@@ -97,14 +109,14 @@ export class Settings {
   }
 
   save() {
-    if (!this.storage) return;
+    if (!this.store) return;
     const out = {};
     for (const [k, o] of Object.entries(OPTIONS)) {
       const v = this.values[k];
       if (v !== o.def) out[k] = v === Infinity ? 'inf' : v;
     }
     try {
-      this.storage.setItem(STORAGE_KEY, JSON.stringify(out));
+      this.store.write(out);
     } catch {
       // Private mode etc.: settings last for this page only.
     }
@@ -119,11 +131,26 @@ export class Settings {
     return `  ${k}=${v}`;
   }
 
-  /// Runs the arguments of `:set`. Returns { lines, error, changed }.
+  /// The options that differ from their defaults, as `:set` arguments
+  /// (for .vimfpsrc, which escapes them): ['adssens=30', 'nocompass'].
+  changedArgs() {
+    const out = [];
+    for (const [k, o] of Object.entries(OPTIONS)) {
+      const v = this.values[k];
+      if (v === o.def) continue;
+      if (o.type === 'bool') out.push(`${v ? '' : 'no'}${k}`);
+      else out.push(`${k}=${v === Infinity ? 'inf' : v}`);
+    }
+    return out;
+  }
+
+  /// Runs the arguments of `:set` (a string, or tokens already split, as
+  /// .vimfpsrc does: there `name=a\ b` keeps its space). Returns
+  /// { lines, error, changed }.
   command(args) {
     const lines = [];
     const changed = [];
-    const tokens = args.trim().split(/\s+/).filter(Boolean);
+    const tokens = Array.isArray(args) ? args : args.trim().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) {
       // Like Vim: the options that differ from their defaults.
       for (const [k, o] of Object.entries(OPTIONS)) {

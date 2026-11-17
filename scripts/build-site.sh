@@ -9,6 +9,12 @@ rm -rf dist/site
 mkdir -p dist/site
 cp -r web/. dist/site/
 touch dist/site/.nojekyll
+# The guides of docs/ as pages of the site (docs/config.md →
+# docs/config.html: the settings file and skins; linked from :help config).
+mkdir -p dist/site/docs
+for md in docs/*.md; do
+  python3 scripts/md2html.py "$md" "dist/site/docs/$(basename "${md%.md}").html"
+done
 python3 - <<'PY'
 import hashlib, json, os, re
 root = "dist/site"

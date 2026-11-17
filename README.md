@@ -10,7 +10,8 @@ FPS の経験よりも、どのモードで何をするかの判断と、キー�
 - 個人戦 (フリー・フォー・オール)。全員の基本性能は同じで、違いは拾った装備だけです
 - 丘や谷のある 400 m 四方の野外マップ。建物 24 棟、岩・低い壁 各 170、木箱 110、木 420 本があり、高所から撃ち下ろす・稜線や遮蔽物に隠れる、といった立ち回りができます
 - **戦車** (3 両) に乗れます。**リング** (段階的に縮む円) の外にいると体力が減ります
-- 自分の画像を地面や壁に貼れます (`:texture`)。起動音・エラー音・終了音は自分のファイルを置けます ([`web/assets/`](web/assets/README.md))
+- 設定は **`.vimfpsrc`** (Vim の vimrc と同じ書き方) 1 つにまとめて書けます。ホストのオプションも同じファイルに書けます
+- テクスチャ・効果音・UI の色は **スキン** (`skin.json` のあるフォルダーか zip) にまとめて、ドロップで入れたり、ホストから全員に配ったりできます。`:mkvimrc!` で設定とスキンを zip 1 つに書き出せます → **[設定ファイルとスキンの説明](docs/config.md)** ([サイト版](https://igarinpiano.github.io/vim-fps/docs/config.html))
 - スマートフォン・タブレットでは画面上のキーパッドで遊べます (`:set touch=on/off`)。キーは場面 (メニュー・戦闘・戦車・観戦など) ごとに切り替わります
 
 ## 遊び方
@@ -80,6 +81,18 @@ URL は起動のたびに変わります。
 | `--no-tanks` | 戦車なし |
 | `--web URL` / `--web embedded` | 配信する Web クライアント (既定: GitHub Pages の最新版) |
 | `--no-network-check` | macOS: 起動時のファイアウォールの確認 (下) をしない |
+| `--skin DIR` | 参加者全員に配るスキン (`skin.json` のあるフォルダー) |
+| `--config PATH` | 設定ファイル (既定: `~/.vimfpsrc`) |
+| `--no-config` | 設定ファイルを読まない |
+
+これらのオプションは `~/.vimfpsrc` の `host` の行にも書けます (`--` を取った名前。コマンドラインのほうが優先)。
+`vimfps config` で読まれる内容を確認、`vimfps config --init` でひな形を作れます。くわしくは [設定ファイルとスキン](docs/config.md#vimfps-host-で使う)。
+
+```vim
+" ~/.vimfpsrc
+host bots=5 bot-skill=4 time-limit=15
+host tunnel password=合言葉 skin=./my-skin
+```
 
 #### macOS のファイアウォール
 
@@ -271,22 +284,21 @@ vimfps uninstall
 ```
 
 - 画像ファイルをページへドラッグ & ドロップしても貼れます (ファイル名で場所を決めます)
-- 選んだ画像はそのブラウザーに保存され (IndexedDB)、次に開いたときも使われます。ほかの人の画面には影響しません
-- 全員に同じ見た目を配るには、[`web/assets/textures/`](web/assets/README.md) に画像と `pack.json` を置きます
+- 選んだ画像はそのブラウザーに保存され (IndexedDB)、次に開いたときも使われます。ほかの人の画面には影響しません。どのスキンよりも優先します
+- 何枚もまとめて持ち運ぶ・全員に同じ見た目を配るには **スキン** を使います ([設定ファイルとスキン](docs/config.md#スキン))
 - 壁や箱は大きさに関係なく同じ縮尺で繰り返し貼られます。当たり判定は変わりません
 
 ### 効果音のファイル (`:sounds`)
-次の場面で `web/assets/sounds/` の音声ファイルを鳴らします。差し替えるときは同じ名前で置きます。
+次の場面で音声ファイルを鳴らします。どのファイルを鳴らすかはスキンの `skin.json` の `"sounds"` に書きます ([設定ファイルとスキン](docs/config.md#sounds-効果音))。公開版には XP 風の音が入っています。
 
-| ファイル | 鳴る場面 |
+| 名前 | 鳴る場面 |
 |---|---|
-| `startup.wav` | スポーン時 (起動音) |
-| `error.wav` | キルされた時 (エラー音) |
-| `error2.wav` | 被弾した時 (ダメージを受けるたび。リングの外のダメージも) |
-| `shutdown.wav` | 試合終了時 (システム終了音) |
+| `startup` | スポーン時 (起動音) |
+| `error` | キルされた時 (エラー音) |
+| `error2` | 被弾した時 (ダメージを受けるたび。リングの外のダメージも) |
+| `shutdown` | 試合終了時 (システム終了音) |
 
-`.mp3` / `.ogg` でも読みます (`startup.mp3` など)。ファイルが無い場面では何も鳴りません (`error2` だけは、無ければ今までの合成音が鳴ります)。`:sounds` で読めているか確認できます。
-ファイル名は半角英数字のこの名前にしてください (空白を含むファイルは公開版に載せません)。
+wav / mp3 / ogg を読みます。ファイルが無い場面では何も鳴りません (`error2` だけは、無ければ合成音が鳴ります)。`:sounds` で、どのスキンのどのファイルが鳴るか確認できます。
 
 ### 通信統計
 - `:set netstat` で右上に ping (平均・最小・最大・ゆれ)、受信間隔、通信量が常に出ます
@@ -325,6 +337,7 @@ vimfps uninstall
 ## 設定 (`:set`)
 
 Vim と同じ書き方です。設定はブラウザに保存されます。
+`:mkvimrc` で設定ファイル (`.vimfpsrc`) に書き出し、`:source` で読み込めます (別のブラウザーへの引っ越しや、ホストの設定と一緒に管理するとき。[設定ファイルとスキン](docs/config.md))。
 
 ```vim
 :set step=0.1          " 短押し・回数指定 1 回の角度 (既定 0.2°)
@@ -389,8 +402,9 @@ node --test tests/web/*.test.mjs
 |---|---|
 | `crates/vimfps-core` | ゲームのルール (マップ生成、武器、当たり判定、bot、通信メッセージ)。サーバーとブラウザで同じものを使います |
 | `crates/vimfps-wasm` | 練習モード用に `vimfps-core` をブラウザで動かす wasm |
-| `crates/vimfps` | CLI (`host` / `update`)。HTTP + WebSocket サーバー、Cloudflare Quick Tunnel、自己アップデート |
-| `web/assets/` | 自分で置く素材 (効果音、テクスチャのパック)。[`web/assets/README.md`](web/assets/README.md) |
+| `crates/vimfps` | CLI (`host` / `config` / `update`)。HTTP + WebSocket サーバー、`.vimfpsrc` の読み込み、Cloudflare Quick Tunnel、自己アップデート |
+| `web/assets/` | ゲームと一緒に配る素材 (同梱のスキン: `skin.json`、効果音)。[`web/assets/README.md`](web/assets/README.md) |
+| `docs/` | 説明のページ ([`docs/config.md`](docs/config.md): 設定ファイルとスキン)。サイトには `scripts/md2html.py` で HTML にして載せます |
 | `web/` | ブラウザのクライアント (three.js、XP 風の UI、Vim のキー処理) |
 
 ### リリース

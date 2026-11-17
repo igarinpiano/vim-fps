@@ -3,7 +3,8 @@
 //
 // Where an image comes from, in this order:
 //   1. this browser (`:texture <slot>` picks a file; kept in IndexedDB),
-//   2. the pack served with the game: web/assets/textures/pack.json.
+//   2. the skins (skin.js): yours, the host's, the one served with the game
+//      (web/assets/skin.json; before skins, web/assets/textures/pack.json).
 //
 // Pure where it can be (file names, the pack's format) so it is testable
 // with node --test; the store takes `indexedDB` as an argument.
@@ -67,26 +68,41 @@ export function parseSize(text) {
 
 const DB_NAME = 'vimfps';
 const STORE = 'textures';
+/// Version 2 added `skins` (skin.js) next to `textures`.
+const DB_VERSION = 2;
+const DB_STORES = ['textures', 'skins'];
+const opened = new WeakMap();
+
+/// The game's IndexedDB database (one per idb factory, opened once).
+export function openDb(idb) {
+  if (!idb) return Promise.reject(new Error('このブラウザーでは保存できません (IndexedDB なし)'));
+  if (!opened.has(idb)) {
+    opened.set(
+      idb,
+      new Promise((resolve, reject) => {
+        const req = idb.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = () => {
+          for (const name of DB_STORES) if (!req.result.objectStoreNames.contains(name)) req.result.createObjectStore(name);
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => {
+          opened.delete(idb);
+          reject(req.error || new Error('IndexedDB を開けません'));
+        };
+      }),
+    );
+  }
+  return opened.get(idb);
+}
 
 /// Textures kept in this browser: slot -> { blob, size, name }.
 export class TextureStore {
   constructor(idb) {
     this.idb = idb || null;
-    this.db = null;
   }
 
   open() {
-    if (this.db) return Promise.resolve(this.db);
-    if (!this.idb) return Promise.reject(new Error('このブラウザーでは保存できません (IndexedDB なし)'));
-    return new Promise((resolve, reject) => {
-      const req = this.idb.open(DB_NAME, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore(STORE);
-      req.onsuccess = () => {
-        this.db = req.result;
-        resolve(this.db);
-      };
-      req.onerror = () => reject(req.error || new Error('IndexedDB を開けません'));
-    });
+    return openDb(this.idb);
   }
 
   async run(mode, fn) {

@@ -1,11 +1,13 @@
 //! vimfps — CLI host of vim-fps.
 //!
 //!   vimfps host [--port 7777] [--tunnel] [--bots N] [--password PW]
+//!   vimfps config [--init]
 //!   vimfps update [--check] [--yes]
 //!   vimfps uninstall [--yes]
 
 mod firewall;
 mod flow;
+mod rc;
 mod server;
 mod tunnel;
 mod uninstall;
@@ -28,8 +30,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// サーバーを立てる (LAN、--tunnel で Cloudflare Quick Tunnel も)
+    /// サーバーを立てる (LAN、--tunnel で Cloudflare Quick Tunnel も)。
+    /// ~/.vimfpsrc の host の行も読みます (コマンドラインのほうが優先)
+    #[command(args_override_self = true)]
     Host(server::HostArgs),
+    /// 設定ファイル (~/.vimfpsrc) の場所と、host が読む内容を表示する (--init でひな形を作る)
+    Config(rc::ConfigArgs),
     /// 最新版に更新する (GitHub Releases から)
     Update(update::UpdateArgs),
     /// アンインストールする (この実行ファイルを削除。Windows ではインストール先のフォルダと PATH も)
@@ -37,8 +43,17 @@ enum Cmd {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    // The `host` lines of ~/.vimfpsrc go in front of the command line.
+    let argv = match rc::expand_args(std::env::args_os().collect()) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+    };
+    let cli = Cli::parse_from(argv);
     let code = match cli.cmd {
+        Some(Cmd::Config(a)) => rc::run(&a),
         Some(Cmd::Update(a)) => update::run(&a),
         Some(Cmd::Uninstall(a)) => uninstall::run(&a),
         Some(Cmd::Host(a)) => server::run(a),
