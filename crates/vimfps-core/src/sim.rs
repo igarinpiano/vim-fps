@@ -237,6 +237,11 @@ pub struct BotSkill {
     /// cover behind one when hurt, holds still to heal, throws grenades at
     /// tanks.
     pub tactics: bool,
+    /// Sees that a wall stands between it and where it is going, and plans
+    /// the way round (out through the door) before walking. Without this it
+    /// walks straight at the goal and finds the way only after bumping into
+    /// something for a while.
+    pub plans: bool,
 }
 
 pub fn bot_skill(level: u8) -> BotSkill {
@@ -250,6 +255,7 @@ pub fn bot_skill(level: u8) -> BotSkill {
             tank_reach: 30.0,
             tank_chance: 0.3,
             tactics: false,
+            plans: false,
         },
         2 => BotSkill {
             sight: 110.0,
@@ -260,6 +266,7 @@ pub fn bot_skill(level: u8) -> BotSkill {
             tank_reach: 30.0,
             tank_chance: 0.3,
             tactics: false,
+            plans: false,
         },
         3 => BotSkill {
             sight: BOT_SIGHT,
@@ -270,6 +277,7 @@ pub fn bot_skill(level: u8) -> BotSkill {
             tank_reach: 30.0,
             tank_chance: 0.3,
             tactics: false,
+            plans: true,
         },
         4 => BotSkill {
             sight: 170.0,
@@ -280,6 +288,7 @@ pub fn bot_skill(level: u8) -> BotSkill {
             tank_reach: 60.0,
             tank_chance: 0.6,
             tactics: true,
+            plans: true,
         },
         _ => BotSkill {
             sight: 200.0,
@@ -290,6 +299,7 @@ pub fn bot_skill(level: u8) -> BotSkill {
             tank_reach: 90.0,
             tank_chance: 0.8,
             tactics: true,
+            plans: true,
         },
     }
 }
@@ -334,6 +344,19 @@ struct Bot {
     no_tank: f32,
     /// Stuck on the way somewhere: go by the waypoint for this long.
     detour: f32,
+    /// The walking route (nav.rs) it follows: corners still ahead, and the
+    /// goal they lead to.
+    path: Vec<Vec3>,
+    path_to: Vec3,
+    /// Until it next checks whether the straight way is blocked.
+    path_check: f32,
+    /// No route found: no new try for this long.
+    path_fail: f32,
+    /// Plan a route at the next chance (it got stuck).
+    replan: bool,
+    /// Hurt, it went behind a tank: that spot, and how much longer to stay
+    /// there once the enemy is out of sight (strong bots).
+    cover: Option<(Vec3, f32)>,
     /// Until the next grenade may be thrown.
     throw_cd: f32,
     /// Where a shot was heard, and for how much longer it is interesting.
@@ -491,6 +514,8 @@ pub struct Room {
     snap_acc: f32,
     out: Vec<(Target, ServerMsg)>,
     bots_wanted: u32,
+    /// Walking routes for bots (built from the map on first use).
+    nav: std::sync::OnceLock<crate::nav::NavGrid>,
 }
 
 fn gun_of(kind: PickupKind) -> Option<Gun> {
@@ -581,6 +606,7 @@ impl Room {
             intermission: None,
             snap_acc: 0.0,
             out: Vec::new(),
+            nav: std::sync::OnceLock::new(),
         };
         room.reset_field();
         room.sync_bots();
@@ -1385,6 +1411,12 @@ impl Room {
                 stuck_n: 0,
                 no_tank: 0.0,
                 detour: 0.0,
+                path: Vec::new(),
+                path_to: Vec3::ZERO,
+                path_check: 0.0,
+                path_fail: 0.0,
+                replan: false,
+                cover: None,
                 throw_cd: 0.0,
                 heard: None,
                 dummy: self.map.targets.get(bots.len()).map(|t| (t.pos, t.strafe)),
@@ -2700,13 +2732,23 @@ impl Room {
         b.stuck_timer += dt;
         if b.stuck_timer > 2.0 {
             if pos.distance(b.last_pos) < 1.0 {
-                b.wander_timer = 0.0;
                 b.stuck_n = b.stuck_n.saturating_add(1);
-                // Something is in the way of where it was heading (there is
-                // no path finding): try by another waypoint for a while.
                 if seen.is_none() {
-                    b.detour = 4.0;
-                    if !driving {
+                    if driving {
+                        // A tank has no routes (it does not fit through
+                        // doors): try by another waypoint for a while.
+                        b.wander_timer = 0.0;
+                        b.detour = 4.0;
+                    } else {
+                        // Something is in the way: work out the way round.
+                        // Still stuck on a route (a tank or a player in the
+                        // way, no route at all): somewhere else for a while.
+                        b.replan = true;
+                        if b.stuck_n >= 2 || !b.path.is_empty() || b.path_fail > 0.0 {
+                            b.wander_timer = 0.0;
+                            b.detour = 4.0;
+                        }
+                        b.path.clear();
                         b.no_tank = 20.0;
                     }
                 }
@@ -2725,6 +2767,12 @@ impl Room {
         b.no_tank = (b.no_tank - dt).max(0.0);
         b.detour = (b.detour - dt).max(0.0);
         b.throw_cd = (b.throw_cd - dt).max(0.0);
+        if let Some((_, t)) = &mut b.cover {
+            *t -= dt;
+            if *t <= 0.0 {
+                b.cover = None;
+            }
+        }
         b.err_timer -= dt;
         if b.err_timer <= 0.0 {
             b.err_timer = 0.6;
@@ -2797,13 +2845,19 @@ impl Room {
                     want_use = d < TANK_ENTER - 0.6;
                     Some(t)
                 } else if p.hp < 55.0 || p.reload.is_some() {
-                    cover_tanks
+                    let spot = cover_tanks
                         .iter()
                         .map(|t| {
                             let away = Vec3::new(t.x - enemy.x, 0.0, t.z - enemy.z).normalize();
                             *t + away * (TANK_RADIUS + 1.2)
                         })
-                        .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)))
+                        .min_by(|a, b| a.distance(pos).total_cmp(&b.distance(pos)));
+                    // Behind the tank it no longer sees the enemy: it stays
+                    // there a while all the same (not back out into the open).
+                    if let Some(c) = spot {
+                        b.cover = Some((c, 3.0));
+                    }
+                    spot
                 } else {
                     None
                 };
@@ -2883,7 +2937,10 @@ impl Room {
                     want_use = d < TANK_ENTER - 0.6;
                     t
                 });
+                // Behind a tank it went to (hurt): stay there for now.
+                let cover = b.cover.filter(|_| !driving && !outside_next).map(|c| c.0);
                 let goal = match ring_goal {
+                    _ if cover.is_some() => cover.unwrap(),
                     _ if b.detour > 0.0 => b.waypoint,
                     Some(c) if outside_next => c,
                     // Strong bots take the tank before looking into a noise.
@@ -2894,6 +2951,15 @@ impl Room {
                         .or(medkit)
                         .or(tank_goal)
                         .unwrap_or(b.waypoint),
+                };
+                // On foot: by the way round when something is in between.
+                let goal = if driving {
+                    goal
+                } else {
+                    let nav = self
+                        .nav
+                        .get_or_init(|| crate::nav::NavGrid::build(&self.map));
+                    route(nav, b, pos, goal, skill.plans, dt)
                 };
                 let d = goal - pos;
                 let want_yaw = (-d.x).atan2(-d.z);
@@ -2910,8 +2976,8 @@ impl Room {
                 let hold = skill.tactics
                     && !driving
                     && !outside_next
-                    && p.hp < BOT_HEAL_BELOW
-                    && p.inv.medkits > 0;
+                    && ((p.hp < BOT_HEAL_BELOW && p.inv.medkits > 0)
+                        || cover.is_some_and(|c| (c - pos).length_xz() < 0.8));
                 if hold {
                     mz = 0;
                 }
@@ -2983,6 +3049,57 @@ impl Room {
             p.inv.sel = Slot::Gun0;
         }
     }
+}
+
+/// Where a walking bot heads for this tick on its way to `goal`: the goal
+/// itself when the way is straight, else the next corner of a route round
+/// what stands between (nav.rs). `eager`: it checks the straight way every
+/// half second and plans before walking (strong bots); otherwise it plans
+/// only once it has got stuck (`b.replan`).
+fn route(
+    nav: &crate::nav::NavGrid,
+    b: &mut Bot,
+    pos: Vec3,
+    goal: Vec3,
+    eager: bool,
+    dt: f32,
+) -> Vec3 {
+    b.path_check -= dt;
+    b.path_fail = (b.path_fail - dt).max(0.0);
+    // A route to somewhere else is no use.
+    if !b.path.is_empty() && (b.path_to - goal).length_xz() > 4.0 {
+        b.path.clear();
+        b.replan = eager;
+    }
+    if b.path.is_empty() && b.path_fail <= 0.0 {
+        let mut want = b.replan;
+        if !want && eager && b.path_check <= 0.0 {
+            b.path_check = 0.5;
+            want = !nav.clear_line(pos, goal);
+        }
+        if want {
+            b.replan = false;
+            match nav.path(pos, goal, crate::nav::BUDGET) {
+                Some(p) => {
+                    b.path = p;
+                    b.path_to = goal;
+                }
+                None => b.path_fail = 3.0,
+            }
+        }
+    }
+    // Corners reached are behind it.
+    while let Some(next) = b.path.first() {
+        if (*next - pos).length_xz() < 0.9 && b.path.len() > 1 {
+            b.path.remove(0);
+        } else {
+            break;
+        }
+    }
+    if b.path.len() == 1 && (b.path[0] - pos).length_xz() < 0.9 {
+        b.path.clear();
+    }
+    b.path.first().copied().unwrap_or(goal)
 }
 
 #[cfg(test)]
@@ -3886,6 +4003,98 @@ mod tests {
         assert_eq!(r.tanks.len(), 1);
     }
 
+    /// One bot inside a closed room whose only door faces away from where
+    /// the ring is heading (the room's west wall between it and the safe
+    /// circle). Returns when it left the room and whether it got inside the
+    /// circle within `secs`.
+    fn bot_in_a_room_with_the_ring_behind(skill: u8, secs: f32) -> (Option<f32>, bool) {
+        use crate::map::{BoxKind, GRID, Solid};
+        let half = crate::map::HALF;
+        let wall = |x0: f32, z0: f32, x1: f32, z1: f32| Solid {
+            kind: BoxKind::Wall,
+            aabb: crate::math::Aabb::new(Vec3::new(x0, -1.0, z0), Vec3::new(x1, 3.4, z1)),
+        };
+        let map = Map {
+            seed: 0,
+            half,
+            grid: GRID,
+            cell: 2.0 * half / (GRID - 1) as f32,
+            heights: vec![0.0; GRID * GRID],
+            // 12 x 12 m, a 2.2 m door in the east wall only.
+            solids: vec![
+                wall(-6.0, -6.0, 6.0, -5.6),
+                wall(-6.0, 5.6, 6.0, 6.0),
+                wall(-6.0, -6.0, -5.6, 6.0),
+                wall(5.6, -6.0, 6.0, -1.1),
+                wall(5.6, 1.1, 6.0, 6.0),
+            ],
+            trees: Vec::new(),
+            spawns: vec![Vec3::new(-70.0, 0.0, 0.0)],
+            pickups: Vec::new(),
+            targets: Vec::new(),
+            labels: Vec::new(),
+            tanks: Vec::new(),
+            top: Default::default(),
+        };
+        let mut r = Room::with_map(
+            Config {
+                bots: 1,
+                bot_skill: skill,
+                tanks: false,
+                ..Default::default()
+            },
+            map,
+        );
+        r.tick(1.0 / 60.0);
+        let id = *r.players.keys().next().unwrap();
+        // Facing west, at the west wall: the ring comes from behind the door.
+        r.teleport(id, Vec3::new(-4.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2);
+        let (c, rad) = ((-70.0, 0.0), 30.0);
+        r.ring = Some(Ring {
+            c: (0.0, 0.0),
+            r: 300.0,
+            from_c: (0.0, 0.0),
+            from_r: 300.0,
+            to_c: c,
+            to_r: rad,
+            stage: 1,
+            timer: 1000.0,
+            shrinking: false,
+            unit: 1000.0,
+            acc: 0.0,
+        });
+        let mut out_at = None;
+        for i in 0..(secs * 60.0) as usize {
+            r.tick(1.0 / 60.0);
+            r.drain();
+            let p = r.player_pos(id).unwrap();
+            if out_at.is_none() && (p.x.abs() > 6.5 || p.z.abs() > 6.5) {
+                out_at = Some(i as f32 / 60.0);
+            }
+            if (p.x - c.0).hypot(p.z - c.1) < rad - 4.0 {
+                return (out_at, true);
+            }
+        }
+        (out_at, false)
+    }
+
+    #[test]
+    fn bots_find_the_door_when_the_ring_comes_from_behind_a_wall() {
+        let mut times = Vec::new();
+        for skill in 1..=5 {
+            let (out, inside) = bot_in_a_room_with_the_ring_behind(skill, 40.0);
+            assert!(
+                inside,
+                "skill {skill}: never got into the circle (left the room at {out:?})"
+            );
+            times.push(out.unwrap());
+        }
+        // Weak bots (1, 2) walk into the wall first and look for the way
+        // only once stuck; from 3 up they plan before walking.
+        assert!(times[2] + 1.0 < times[0], "{times:?}");
+        assert!(times[2] < 4.0, "{times:?}");
+    }
+
     #[test]
     fn bots_take_tanks() {
         // One bot alone on a flat field, a tank parked 20 m from where it
@@ -4020,6 +4229,7 @@ mod tests {
             hidden
         };
         let strong = run(5);
+        eprintln!("HIDDEN {strong}");
         assert!(strong > 3 * 60, "hidden for {strong} ticks");
         assert_eq!(run(3), 0);
     }
