@@ -605,9 +605,9 @@ export class Vim {
 }
 
 /// Look speed from held keys: an immediate step on press, then (after
-/// aimdelay) continuous turning: slow (sensitivity) at first and, only
-/// where the caller lets it accelerate, faster after accelafter up to
-/// maxspeed.
+/// aimdelay) continuous turning. Where the caller lets it accelerate: slow
+/// (sensitivity) at first, faster after accelafter up to maxspeed. Where
+/// not (the first stage of VIEW): one steady speed, adssens.
 export class Aim {
   constructor(settings) {
     this.s = settings;
@@ -645,7 +645,7 @@ export class Aim {
   }
 
   /// Degrees to turn this frame. accelerate = false (the first stage of
-  /// VIEW): the speed stays at sensitivity however long the key is held.
+  /// VIEW): the speed stays at adssens however long the key is held.
   update(dt, zoom = 1, accelerate = true) {
     let yaw = 0;
     let pitch = 0;
@@ -660,7 +660,7 @@ export class Aim {
       const accel = this.s.get('accel');
       const t = Math.max(0, h.t - delay - this.s.get('accelafter') / 1000);
       const v = !accelerate
-        ? this.s.get('sensitivity')
+        ? this.s.get('adssens')
         : accel === Infinity && h.t - delay > this.s.get('accelafter') / 1000
           ? this.s.get('maxspeed')
           : accel === Infinity
