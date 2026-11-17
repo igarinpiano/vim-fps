@@ -159,6 +159,17 @@ test('aim: long press stays slow (fine) before accelafter', () => {
   assert.ok(total < -10, 'speeds up later');
 });
 
+test('aim: the first stage of VIEW turns at adssens and never speeds up', () => {
+  const s = new Settings(null);
+  s.command('aimdelay=100 accelafter=0 sens=10 adssens=30 accel=1000 maxspeed=300');
+  const aim = new Aim(s);
+  aim.press('left', false);
+  aim.update(0.1); // the delay
+  let total = 0;
+  for (let i = 0; i < 200; i++) total += aim.update(0.01, 0.5, false).yaw; // 2 s held
+  assert.ok(Math.abs(total - 30 * 2 * 0.5) < 1e-6, `turned ${total}`);
+});
+
 test('message window: j/k, counts, Ctrl-d/u/f/b, gg/G, h/l, close', () => {
   const { log, down, vim } = setup();
   vim.mode = 'msg';

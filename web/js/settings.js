@@ -5,10 +5,11 @@
 export const OPTIONS = {
   name: { type: 'string', def: '', desc: 'プレイヤー名 (次の接続から)' },
   forward: { type: 'enum', values: ['k', 'j'], def: 'k', desc: '前進キー (もう一方が後退)' },
-  sensitivity: { type: 'number', def: 12, min: 0.5, max: 1440, alias: ['sens'], desc: '長押しの初速 (度/秒)。この速さで微調整' },
+  sensitivity: { type: 'number', def: 12, min: 0.5, max: 1440, alias: ['sens'], desc: 'スコープ (VIEW の 2 段階目) で長押ししたときの初速 (度/秒)。この速さで微調整' },
   accelafter: { type: 'number', def: 450, min: 0, max: 5000, alias: ['aa'], desc: '長押しがこの時間 (ミリ秒) を超えたら加速を始める' },
   accel: { type: 'number', def: 200, min: 0, max: Infinity, alias: ['acc'], desc: '視点移動の加速度 (度/秒²、inf で即最高速、0 で一定)' },
   maxspeed: { type: 'number', def: 220, min: 1, max: 2880, alias: ['maxs'], desc: '視点移動の最高速 (度/秒)' },
+  adssens: { type: 'number', def: 24, min: 0.5, max: 1440, alias: ['as'], desc: '構え (VIEW の 1 段階目) で長押ししたときの速さ (度/秒)。加速はせず、ズーム率と zoomsens が掛かる' },
   step: { type: 'number', def: 0.2, min: 0.01, max: 90, desc: '短押し・回数指定 1 回で回る角度 (度)' },
   aimdelay: { type: 'number', def: 160, min: 0, max: 2000, desc: '押しっぱなしが連続移動になるまで (ミリ秒)' },
   fastlook: { type: 'number', def: 4, min: 1, max: 40, desc: 'Shift+hjkl (VIEW) の速度倍率' },
@@ -42,7 +43,20 @@ export const OPTIONS = {
 /// Pseudo-option: all smoothing options at once.
 export const SMOOTH_GROUP = Object.keys(OPTIONS).filter((k) => OPTIONS[k].smooth);
 
+/// Where a plain Storage (localStorage) keeps the options. The game itself
+/// passes a section of the profile (profile.js), which holds everything.
 const STORAGE_KEY = 'vimfps.settings.v1';
+
+/// A store is { read() → object | null, write(object) }. A Storage-like
+/// object (getItem / setItem) is wrapped into one.
+function toStore(storage) {
+  if (!storage) return null;
+  if (typeof storage.read === 'function') return storage;
+  return {
+    read: () => JSON.parse(storage.getItem(STORAGE_KEY) || 'null'),
+    write: (o) => storage.setItem(STORAGE_KEY, JSON.stringify(o)),
+  };
+}
 
 export function resolveName(name) {
   if (name === 'smooth') return 'smooth';
@@ -55,7 +69,7 @@ export function resolveName(name) {
 
 export class Settings {
   constructor(storage) {
-    this.storage = storage || null;
+    this.store = toStore(storage);
     this.values = {};
     for (const [k, o] of Object.entries(OPTIONS)) this.values[k] = o.def;
     this.listeners = [];
@@ -77,11 +91,10 @@ export class Settings {
   }
 
   load() {
-    if (!this.storage) return;
+    if (!this.store) return;
     try {
-      const raw = this.storage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const saved = JSON.parse(raw);
+      const saved = this.store.read();
+      if (!saved || typeof saved !== 'object') return;
       for (const [k, v] of Object.entries(saved)) {
         if (!OPTIONS[k]) continue;
         const o = OPTIONS[k];
@@ -96,14 +109,14 @@ export class Settings {
   }
 
   save() {
-    if (!this.storage) return;
+    if (!this.store) return;
     const out = {};
     for (const [k, o] of Object.entries(OPTIONS)) {
       const v = this.values[k];
       if (v !== o.def) out[k] = v === Infinity ? 'inf' : v;
     }
     try {
-      this.storage.setItem(STORAGE_KEY, JSON.stringify(out));
+      this.store.write(out);
     } catch {
       // Private mode etc.: settings last for this page only.
     }
@@ -118,11 +131,26 @@ export class Settings {
     return `  ${k}=${v}`;
   }
 
-  /// Runs the arguments of `:set`. Returns { lines, error, changed }.
+  /// The options that differ from their defaults, as `:set` arguments
+  /// (for .vimfpsrc, which escapes them): ['adssens=30', 'nocompass'].
+  changedArgs() {
+    const out = [];
+    for (const [k, o] of Object.entries(OPTIONS)) {
+      const v = this.values[k];
+      if (v === o.def) continue;
+      if (o.type === 'bool') out.push(`${v ? '' : 'no'}${k}`);
+      else out.push(`${k}=${v === Infinity ? 'inf' : v}`);
+    }
+    return out;
+  }
+
+  /// Runs the arguments of `:set` (a string, or tokens already split, as
+  /// .vimfpsrc does: there `name=a\ b` keeps its space). Returns
+  /// { lines, error, changed }.
   command(args) {
     const lines = [];
     const changed = [];
-    const tokens = args.trim().split(/\s+/).filter(Boolean);
+    const tokens = Array.isArray(args) ? args : args.trim().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) {
       // Like Vim: the options that differ from their defaults.
       for (const [k, o] of Object.entries(OPTIONS)) {

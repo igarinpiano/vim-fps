@@ -3,9 +3,9 @@
 // spawning, being killed, taking damage and the end of a match (see
 // EVENT_SOUNDS).
 
-/// Event sounds: files in web/assets/sounds/, named <event>.wav (or .mp3 /
-/// .ogg). They are not shipped with the game: drop your own in. Without a
-/// file the moment passes in silence.
+/// Event sounds: files named by the skins (skin.js: "sounds" in
+/// skin.json). Without a skin.json, web/assets/sounds/<event>.wav (or .mp3 /
+/// .ogg). Without a file the moment passes in silence.
 export const EVENT_SOUNDS = {
   startup: 'スポーン時 (起動音)',
   error: 'キルされた時 (エラー音)',
@@ -23,6 +23,9 @@ export class Sound {
     // while loading.
     this.samples = new Map();
     this.base = new URL('../assets/sounds/', import.meta.url);
+    // event -> where its file is: a URL, a Blob, or a list of URLs to try.
+    // null: the old fixed names under assets/sounds/ (until the skins load).
+    this.sources = null;
     // What to play once its file has loaded (asked for before that).
     this.queued = null;
     this.playing = null;
@@ -46,11 +49,29 @@ export class Sound {
     this.loadSamples();
   }
 
-  /// Fetches and decodes one event sound; tries each extension in turn.
+  /// Where the event sounds come from (from the skins): { event: URL |
+  /// Blob | [URL, ...] }. An event left out has no sound. Reloads them.
+  setSources(map) {
+    this.sources = map || {};
+    this.gen = (this.gen || 0) + 1;
+    this.samples.clear();
+    if (this.ctx) this.loadSamples();
+  }
+
+  /// Fetches and decodes one event sound; tries each candidate in turn.
   async loadSample(name) {
-    for (const ext of SOUND_EXTS) {
+    const src = this.sources ? this.sources[name] : SOUND_EXTS.map((ext) => new URL(`${name}.${ext}`, this.base).href);
+    if (!src) return 'missing';
+    if (typeof src !== 'string' && !Array.isArray(src)) {
       try {
-        const res = await fetch(new URL(`${name}.${ext}`, this.base));
+        return await this.ctx.decodeAudioData(await src.arrayBuffer());
+      } catch {
+        return 'missing';
+      }
+    }
+    for (const url of Array.isArray(src) ? src : [src]) {
+      try {
+        const res = await fetch(url);
         if (!res.ok) continue;
         // A host that answers every path with a page is no sound.
         const type = res.headers.get('content-type') || '';
@@ -58,7 +79,7 @@ export class Sound {
         const data = await res.arrayBuffer();
         return await this.ctx.decodeAudioData(data);
       } catch {
-        // Not there, or not audio: the next extension.
+        // Not there, or not audio: the next candidate.
       }
     }
     return 'missing';
@@ -67,7 +88,10 @@ export class Sound {
   loadSamples() {
     for (const name of Object.keys(EVENT_SOUNDS)) {
       if (this.samples.has(name)) continue;
+      const gen = this.gen;
       const job = this.loadSample(name).then((buf) => {
+        // Sources changed while this loaded: the newer load wins.
+        if (gen !== this.gen) return buf;
         this.samples.set(name, buf);
         if (this.queued && this.queued.name === name && performance.now() - this.queued.at < 1500) {
           this.queued = null;

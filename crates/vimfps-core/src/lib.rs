@@ -4,6 +4,7 @@
 
 pub mod map;
 pub mod math;
+pub mod nav;
 pub mod protocol;
 pub mod rng;
 pub mod sim;

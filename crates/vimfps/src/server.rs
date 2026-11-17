@@ -1,5 +1,6 @@
 //! HTTP + WebSocket host. Serves the embedded web client at `/`, the game at
-//! `/ws`, and runs one `Room` in a task at 60 Hz.
+//! `/ws`, the host's skin (`--skin DIR`) at `/skin/`, and runs one `Room` in
+//! a task at 60 Hz.
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -68,6 +69,15 @@ pub struct HostArgs {
     /// か、`embedded` (この CLI に埋め込まれた版)
     #[arg(long, env = "VIMFPS_WEB", default_value = crate::webclient::DEFAULT_WEB)]
     pub web: String,
+    /// 参加者全員に配るスキン: skin.json のあるフォルダー (テクスチャ・効果音・UI の色)
+    #[arg(long, value_name = "DIR")]
+    pub skin: Option<std::path::PathBuf>,
+    /// 設定ファイル (既定: ~/.vimfpsrc)。host の行をオプションとして読む
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<std::path::PathBuf>,
+    /// 設定ファイルを読まない
+    #[arg(long)]
+    pub no_config: bool,
 }
 
 impl Default for HostArgs {
@@ -90,6 +100,9 @@ impl Default for HostArgs {
             no_update_check: false,
             no_network_check: false,
             web: crate::webclient::DEFAULT_WEB.into(),
+            skin: None,
+            config: None,
+            no_config: false,
         }
     }
 }
@@ -113,6 +126,36 @@ struct AppState {
     info: Arc<serde_json::Value>,
     tunnel: bool,
     web: crate::webclient::Shared,
+    /// `--skin DIR`, resolved (files are read from disk on each request, so
+    /// edits show on the next reload).
+    skin: Option<Arc<std::path::PathBuf>>,
+}
+
+/// The skin folder: resolved, with a readable skin.json. Returns (folder,
+/// the skin's name).
+fn open_skin(dir: &std::path::Path) -> Result<(std::path::PathBuf, String), String> {
+    let root = std::fs::canonicalize(dir)
+        .map_err(|e| format!("スキンのフォルダーがありません: {} ({e})", dir.display()))?;
+    let manifest = root.join("skin.json");
+    let text = std::fs::read_to_string(&manifest).map_err(|e| {
+        format!(
+            "{} を読めません ({e})。スキンのフォルダーには skin.json が要ります",
+            manifest.display()
+        )
+    })?;
+    let json: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{} が JSON として正しくありません: {e}", manifest.display()))?;
+    let name = json
+        .get("name")
+        .and_then(|n| n.as_str())
+        .filter(|n| !n.trim().is_empty())
+        .map(|n| n.trim().chars().take(40).collect())
+        .unwrap_or_else(|| {
+            root.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "host".into())
+        });
+    Ok((root, name))
 }
 
 pub fn run(args: HostArgs) -> i32 {
@@ -156,6 +199,13 @@ async fn host(args: HostArgs) -> i32 {
         ring: !args.no_ring,
         tanks: !args.no_tanks,
     };
+    let skin = match args.skin.as_deref().map(open_skin).transpose() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
     let addr = SocketAddr::new(args.bind, args.port);
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
@@ -176,6 +226,7 @@ async fn host(args: HostArgs) -> i32 {
         "bot_skill": cfg.bot_skill,
         "ring": cfg.ring,
         "tanks": cfg.tanks,
+        "skin": skin.as_ref().map(|(_, name)| name.clone()),
     });
     let source = args.web.clone();
     let files = tokio::task::spawn_blocking(move || crate::webclient::initial(&source))
@@ -189,12 +240,14 @@ async fn host(args: HostArgs) -> i32 {
         events: ev_tx,
         info: Arc::new(info),
         tunnel: args.tunnel,
+        skin: skin.as_ref().map(|(root, _)| Arc::new(root.clone())),
     };
     tokio::spawn(game_loop(cfg.clone(), ev_rx));
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/server-info.json", get(server_info))
+        .route("/skin/{*path}", get(skin_file))
         .fallback(static_file)
         .with_state(state);
 
@@ -219,6 +272,9 @@ async fn host(args: HostArgs) -> i32 {
         tokio::task::spawn_blocking(crate::update::notify_if_newer);
     }
     println!("  Web クライアント: {web_label}");
+    if let Some((root, name)) = &skin {
+        println!("  スキン:   {name} ({})", root.display());
+    }
     println!("Ctrl+C で終了します");
 
     let server = axum::serve(
@@ -261,6 +317,48 @@ async fn server_info(State(st): State<AppState>) -> Response {
         [(header::CACHE_CONTROL, "no-store")],
         [(header::CONTENT_TYPE, "application/json")],
         st.info.to_string(),
+    )
+        .into_response()
+}
+
+/// Largest file served from the skin folder.
+const MAX_SKIN_FILE: u64 = 32 * 1024 * 1024;
+
+/// A file of the host's skin. Only plain relative paths, nothing hidden, and
+/// nothing outside the folder (symbolic links included).
+async fn skin_file(
+    State(st): State<AppState>,
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> Response {
+    let not_found = || (StatusCode::NOT_FOUND, "not found").into_response();
+    let Some(root) = st.skin.as_ref() else {
+        return not_found();
+    };
+    if !crate::webclient::safe_path(&path) || path.split('/').any(|seg| seg.starts_with('.')) {
+        return not_found();
+    }
+    let root = root.clone();
+    let file = path.clone();
+    let read = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+        let real = std::fs::canonicalize(root.join(&file)).ok()?;
+        let meta = std::fs::metadata(&real).ok()?;
+        (real.starts_with(root.as_path()) && meta.is_file() && meta.len() <= MAX_SKIN_FILE)
+            .then(|| std::fs::read(&real).ok())
+            .flatten()
+    })
+    .await;
+    let Ok(Some(data)) = read else {
+        return not_found();
+    };
+    let mime = mime_guess::from_path(&path)
+        .first_or_octet_stream()
+        .to_string();
+    (
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "no-cache".into()),
+        ],
+        data,
     )
         .into_response()
 }
@@ -477,5 +575,23 @@ mod tests {
     #[test]
     fn encodes() {
         assert_eq!(url_encode("a b&c"), "a%20b%26c");
+    }
+
+    #[test]
+    fn skin_folder() {
+        let dir = std::env::temp_dir().join(format!("vimfps-skin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(open_skin(&dir).is_err(), "no skin.json");
+        std::fs::write(dir.join("skin.json"), "{nope").unwrap();
+        assert!(open_skin(&dir).is_err(), "bad JSON");
+        std::fs::write(dir.join("skin.json"), r#"{"name": " neon "}"#).unwrap();
+        let (root, name) = open_skin(&dir).unwrap();
+        assert_eq!(name, "neon");
+        assert!(root.is_absolute());
+        std::fs::write(dir.join("skin.json"), "{}").unwrap();
+        let (_, name) = open_skin(&dir).unwrap();
+        assert!(name.starts_with("vimfps-skin-"));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(open_skin(&dir).is_err(), "no folder");
     }
 }

@@ -16,6 +16,7 @@
   --start-b: #2b7a2b;
   --tray: #0f8ae8;
   --bg: #3a6ea5;
+  --crosshair: #fff;
   --font: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Noto Sans Mono", monospace;
   color-scheme: light;
@@ -76,12 +77,12 @@ kbd { font-family: var(--mono); background: #fff; border: 1px solid #aaa; border
 
 /* ---------- HUD ---------- */
 #crosshair { position: absolute; left: 50%; top: calc(50% - 17px); width: 0; height: 0; z-index: 5; pointer-events: none; }
-#crosshair::before, #crosshair::after { content: ""; position: absolute; background: #fff; box-shadow: 0 0 2px #000; }
-#crosshair[data-mode="normal"]::before { width: 14px; height: 18px; left: -7px; top: -9px; background: rgba(255,255,255,0.35); border: 2px solid #fff; }
+#crosshair::before, #crosshair::after { content: ""; position: absolute; background: var(--crosshair); box-shadow: 0 0 2px #000; }
+#crosshair[data-mode="normal"]::before { width: 14px; height: 18px; left: -7px; top: -9px; background: rgba(255,255,255,0.35); background: color-mix(in srgb, var(--crosshair) 35%, transparent); border: 2px solid var(--crosshair); }
 #crosshair[data-mode="normal"]::after { display: none; }
 #crosshair[data-mode="view"]::before { width: 22px; height: 2px; left: -11px; top: -1px; }
 #crosshair[data-mode="view"]::after { width: 2px; height: 22px; left: -1px; top: -11px; }
-#crosshair[data-mode="other"]::before { width: 12px; height: 20px; left: -6px; top: -10px; background: transparent; border: 2px solid #fff; }
+#crosshair[data-mode="other"]::before { width: 12px; height: 20px; left: -6px; top: -10px; background: transparent; border: 2px solid var(--crosshair); }
 #crosshair[data-mode="other"]::after { display: none; }
 #hitmarker { position: absolute; left: 50%; top: calc(50% - 17px); transform: translate(-50%, -50%); color: #fff; font-size: 26px; font-weight: 700; text-shadow: 0 0 3px #000; z-index: 6; }
 #hitmarker.head { color: #ff4040; }
