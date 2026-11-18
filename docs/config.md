@@ -24,6 +24,7 @@ vim-fps で自分好みに変えられるものは、次の 2 つにまとまっ
 " vim-fps の設定ファイル。" から行末まではコメント
 set adssens=30 forward=j      " :set と同じ。1 行に何個でも
 set nocompass
+set fov=150                   " 視野角 (40〜360。120 を超えると魚眼)
 skin neon                     " このブラウザーに入れたスキンを使う
 custom bots=8 skill=4 rule=last time=15
 
