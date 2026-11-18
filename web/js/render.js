@@ -2,6 +2,7 @@
 // gun in your hands.
 
 import * as THREE from '../vendor/three.module.min.js';
+import { PERSPECTIVE_MAX, isFisheye, lensStrength, lensScale, maxAngle } from './lens.js';
 
 const COLORS = {
   wall: 0xd9d0b8,
@@ -154,6 +155,17 @@ function makeMarker() {
   s.renderOrder = 10;
   return s;
 }
+
+/// The directions of the cube's faces, in the order of CubeCamera's
+/// cameras (and of the faces of its render target): +x −x +y −y +z −z.
+const FACE_AXES = [
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 1, 0],
+  [0, -1, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+];
 
 export class Renderer {
   constructor(canvas, settings) {
@@ -813,8 +825,11 @@ export class Renderer {
     this.scene.fog.far = 230 + lift * 1.6;
     this.camera.position.set(cam.x, cam.y, cam.z);
     this.camera.rotation.set(cam.pitch, cam.yaw, 0);
-    if (Math.abs(this.camera.fov - cam.fov) > 1e-3) {
-      this.camera.fov = cam.fov;
+    // (Wider than a flat camera can go, it only carries the gun in your
+    // hands and gives the direction; renderFisheye draws the view.)
+    const flat = Math.min(cam.fov, PERSPECTIVE_MAX);
+    if (Math.abs(this.camera.fov - flat) > 1e-3) {
+      this.camera.fov = flat;
       this.camera.updateProjectionMatrix();
     }
     this.viewmodel.visible = !vm.hide;
@@ -827,8 +842,120 @@ export class Renderer {
     this.viewmodel.position.y += vm.bob;
     this.viewmodel.position.z += vm.kick;
     this.viewmodel.rotation.z = (1 - ads) * 0.04;
-    this.renderer.render(this.scene, this.camera);
+    if (isFisheye(cam.fov)) this.renderFisheye(cam);
+    else this.renderer.render(this.scene, this.camera);
     if (inset) this.renderInset(inset);
+  }
+
+  /// A view wider than a flat camera can show (lens.js): the six directions
+  /// around the eye go into a cube, and a pass over the screen looks each
+  /// pixel's direction up in it. (The faces the screen cannot reach are
+  /// skipped: looking ahead at a little over 120°, the one behind you.)
+  renderFisheye(cam) {
+    const r = this.renderer;
+    const buf = r.getDrawingBufferSize(this.fishBuf || (this.fishBuf = new THREE.Vector2()));
+    const s = lensStrength(cam.fov);
+    const scale = lensScale(cam.fov);
+    // A face has 1.5 times as many pixels per degree in its middle as the
+    // middle of the screen (the faces have no antialiasing of their own).
+    const want = (buf.y / 2) * (s / scale) * 2 * 1.5;
+    const size = Math.max(128, Math.min(r.capabilities.maxCubemapSize || 2048, 2048, Math.ceil(want / 64) * 64));
+    if (!this.fish || this.fish.size !== size) this.buildFisheye(size);
+    const f = this.fish;
+    const cube = f.cubeCamera;
+    if (cube.coordinateSystem !== r.coordinateSystem) {
+      cube.coordinateSystem = r.coordinateSystem;
+      cube.updateCoordinateSystem();
+    }
+    cube.position.set(cam.x, cam.y, cam.z);
+    cube.updateMatrixWorld();
+    this.camera.updateMatrixWorld();
+    // The faces in view: those that come within the widest angle on screen
+    // of where you look (a face reaches 54.7° from its axis, at its corners).
+    const reach = maxAngle(cam.fov, buf.x / Math.max(1, buf.y)) + 0.96 + 0.05;
+    const look = this.fishLook || (this.fishLook = new THREE.Vector3());
+    this.camera.getWorldDirection(look);
+    const axes = FACE_AXES;
+    const prevTarget = r.getRenderTarget();
+    for (let i = 0; i < 6; i++) {
+      const a = axes[i];
+      const dot = look.x * a[0] + look.y * a[1] + look.z * a[2];
+      if (Math.acos(Math.max(-1, Math.min(1, dot))) > reach) continue;
+      r.setRenderTarget(f.target, i);
+      r.render(this.scene, cube.children[i]);
+    }
+    r.setRenderTarget(prevTarget);
+    const u = f.quad.material.uniforms;
+    u.aspect.value = buf.x / Math.max(1, buf.y);
+    u.scale.value = scale;
+    u.invS.value = 1 / s;
+    u.rot.value.setFromMatrix4(this.camera.matrixWorld);
+    r.render(f.scene, f.camera);
+  }
+
+  buildFisheye(size) {
+    if (this.fish) {
+      this.fish.target.dispose();
+      this.fish.target = null;
+    }
+    const target = new THREE.WebGLCubeRenderTarget(size, {
+      colorSpace: THREE.SRGBColorSpace,
+      generateMipmaps: false,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+    });
+    if (this.fish) {
+      this.fish.size = size;
+      this.fish.target = target;
+      this.fish.cubeCamera.renderTarget = target;
+      this.fish.quad.material.uniforms.cube.value = target.texture;
+      return;
+    }
+    const cubeCamera = new THREE.CubeCamera(this.camera.near, this.camera.far, target);
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        cube: { value: target.texture },
+        aspect: { value: 1 },
+        scale: { value: 1 },
+        invS: { value: 1 },
+        rot: { value: new THREE.Matrix3() },
+        outside: { value: new THREE.Color(0x101010) },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }`,
+      fragmentShader: `
+        uniform samplerCube cube;
+        uniform float aspect;
+        uniform float scale;
+        uniform float invS;
+        uniform mat3 rot;
+        uniform vec3 outside;
+        varying vec2 vUv;
+        void main() {
+          vec2 p = (vUv * 2.0 - 1.0) * vec2(aspect, 1.0);
+          float rho = length(p);
+          float th = atan(rho * scale) * invS;
+          if (th > 3.14159265) {
+            gl_FragColor = vec4(outside, 1.0);
+          } else {
+            vec2 d = rho > 1e-6 ? p / rho : vec2(0.0);
+            vec3 v = vec3(d * sin(th), -cos(th));
+            gl_FragColor = vec4(textureCube(cube, rot * v).rgb, 1.0);
+          }
+          #include <colorspace_fragment>
+        }`,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+    quad.frustumCulled = false;
+    const scene = new THREE.Scene();
+    scene.add(quad);
+    this.fish = { size, target, cubeCamera, quad, scene, camera: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1) };
   }
 
   renderInset({ cam, rect, hide }) {
@@ -836,7 +963,8 @@ export class Renderer {
     const c = this.insetCamera;
     c.position.set(cam.x, cam.y, cam.z);
     c.rotation.set(cam.pitch, cam.yaw, 0);
-    c.fov = cam.fov;
+    // The small view stays a flat camera (a fisheye there would be unreadable).
+    c.fov = Math.min(cam.fov, PERSPECTIVE_MAX);
     c.aspect = rect.w / rect.h;
     c.updateProjectionMatrix();
     const body = hide != null ? this.players.get(hide) : null;

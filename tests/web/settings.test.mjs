@@ -18,6 +18,10 @@ test('number options, aliases and arithmetic', () => {
   assert.deepEqual(s.command('accel?').lines, ['  accel=inf']);
   assert.match(s.command('sens=abc').error, /^E521/);
   assert.match(s.command('fov=1000').error, /^E474/);
+  assert.match(s.command('fov=361').error, /^E474/);
+  assert.equal(s.command('fov=360').error, null);
+  assert.equal(s.get('fov'), 360);
+  s.command('fov&');
   assert.match(s.command('nope=1').error, /^E518/);
   s.command('sens&');
   assert.equal(s.get('sensitivity'), OPTIONS.sensitivity.def);

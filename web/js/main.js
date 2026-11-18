@@ -12,6 +12,7 @@ import { Profile } from './profile.js';
 import { parseRc, applyRc, buildRc, customCommand, tokenize, isRcName, CUSTOM_DEFAULTS, RC_NAME, DOC_URL } from './rc.js';
 import { SkinStore, skinLayer, skinName, readBundle, readZip, writeZip, filesFromDrop, UI_VARS } from './skin.js';
 import { VERSION } from './version.js';
+import { halfWidth } from './lens.js';
 
 const $ = (id) => document.getElementById(id);
 const DEG = Math.PI / 180;
@@ -1411,7 +1412,7 @@ function drawMap() {
     const cx = tx(game.pos.x);
     const cz = tx(game.pos.z);
     const aspect = window.innerWidth / Math.max(1, window.innerHeight);
-    const halfFov = Math.atan(Math.tan((game.fov * DEG) / 2) * aspect);
+    const halfFov = halfWidth(game.fov, aspect);
     // Looking down, the view reaches less far across the ground.
     const reach = 46 * Math.max(0.35, Math.cos(game.camPitch || 0));
     const dir = -game.yaw - Math.PI / 2;

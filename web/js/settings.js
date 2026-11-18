@@ -16,7 +16,7 @@ export const OPTIONS = {
   zoomsens: { type: 'number', def: 1, min: 0.05, max: 4, desc: '構え・スコープ中の視点速度と 1 目盛りの倍率 (ズーム率に比例した値に掛ける)' },
   invert: { type: 'bool', def: false, desc: '視点の上下を反転' },
   turnangle: { type: 'number', def: 45, min: 1, max: 180, alias: ['ta'], desc: ', と . で回る角度 (度)' },
-  fov: { type: 'number', def: 80, min: 40, max: 120, desc: '視野角 (度)' },
+  fov: { type: 'number', def: 80, min: 40, max: 360, desc: '視野角 (度、画面の縦方向)。120 を超えると魚眼になり、360 で全方向が見える' },
   timeoutlen: { type: 'number', def: 1000, min: 50, max: 10000, alias: ['tm'], desc: 'dd や gt の 2 打目を待つ時間 (ミリ秒)' },
   volume: { type: 'number', def: 70, min: 0, max: 100, alias: ['vol'], desc: '音量 (0-100)' },
   showcmd: { type: 'bool', def: true, alias: ['sc'], desc: '入力途中のキーを表示' },
