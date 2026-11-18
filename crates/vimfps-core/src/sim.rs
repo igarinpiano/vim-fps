@@ -17,6 +17,12 @@ pub const RESPAWN_TIME: f32 = 3.0;
 pub const PROTECT_TIME: f32 = 3.0;
 /// A spawn point in sight of someone alive this close is avoided.
 pub const SPAWN_SIGHT: f32 = 250.0;
+/// No one spawns nearer than this to anyone alive, unless there is no
+/// other place.
+pub const SPAWN_GAP: f32 = 15.0;
+/// Free spots tried inside the ring's circle on every spawn, besides the
+/// map's spawn points there.
+const SPAWN_SCATTER: usize = 24;
 /// Bots use a medkit below this much health (when no enemy is in sight),
 /// and go for one lying nearby below BOT_SEEK_MEDKIT with none on them.
 pub const BOT_HEAL_BELOW: f32 = 70.0;
@@ -1443,14 +1449,22 @@ impl Room {
         // possible, with a little randomness. (Only if every point is in
         // someone's sight is one of those taken: the farthest.)
         self.unseat(id);
-        // With the ring on: only inside the circle it is heading for (when
-        // no spawn point is, any free spot there).
+        // With the ring on: only inside the circle it is heading for, from
+        // the spawn points there plus free spots scattered over it. (Late
+        // in a match the circle is small and holds few spawn points, if
+        // any: choosing among just those put people right in front of, or
+        // on top of, someone.)
         let mut points: Vec<Vec3> = self.map.spawns.clone();
+        let mut jitter = 20.0;
         if let Some(((cx, cz), r)) = self.safe_circle() {
             let r = r * 0.9;
+            // The randomness must not outweigh the distances in a small
+            // circle.
+            jitter = (r * 0.1).min(20.0);
             points.retain(|s| (s.x - cx).hypot(s.z - cz) < r);
+            let mut added = 0;
             let mut tries = 0;
-            while points.len() < 4 && tries < 200 {
+            while added < SPAWN_SCATTER && tries < SPAWN_SCATTER * 8 {
                 tries += 1;
                 let a = self.rng.range(0.0, std::f32::consts::TAU);
                 let d = r * self.rng.range(0.0, 1.0).sqrt();
@@ -1458,6 +1472,7 @@ impl Room {
                 q.y = self.map.height(q.x, q.z);
                 if !self.map.blocked(q, 0.7) {
                     points.push(q);
+                    added += 1;
                 }
             }
             if points.is_empty() {
@@ -1477,7 +1492,11 @@ impl Room {
                     o.distance(*s) < SPAWN_SIGHT
                         && self.map.line_of_sight(*o + Vec3::new(0.0, 1.6, 0.0), chest)
                 });
-            let score = d + self.rng.range(0.0, 20.0) - if seen { 1000.0 } else { 0.0 };
+            // Right next to someone: only when there is nowhere else.
+            let crowded = !self.cfg.range && d < SPAWN_GAP;
+            let score = d + self.rng.range(0.0, jitter)
+                - if seen { 1000.0 } else { 0.0 }
+                - if crowded { 2000.0 } else { 0.0 };
             if score > best_score {
                 best_score = score;
                 best = *s;
@@ -3640,6 +3659,8 @@ mod tests {
         };
         for _ in 0..20 {
             let mut r = walled_room(vec![wall.clone()], vec![Vec3::ZERO, open, hidden]);
+            // Only the map's spawn points (the ring adds free spots).
+            r.ring = None;
             let a = r.join("alice", None, PROTOCOL, false).unwrap();
             r.players.get_mut(&a).unwrap().pos = Vec3::ZERO;
             let b = r.join("bob", None, PROTOCOL, false).unwrap();
@@ -3652,11 +3673,51 @@ mod tests {
         }
         // With no cover anywhere, the farthest point still wins.
         let mut r = walled_room(Vec::new(), vec![Vec3::ZERO, open, hidden]);
+        r.ring = None;
         let a = r.join("alice", None, PROTOCOL, false).unwrap();
         r.players.get_mut(&a).unwrap().pos = Vec3::ZERO;
         let b = r.join("bob", None, PROTOCOL, false).unwrap();
         r.spawn(b);
         assert_eq!(r.player_pos(b), Some(open));
+    }
+
+    #[test]
+    fn spawn_in_a_small_ring_keeps_away_from_everyone() {
+        // Late in a match: a small circle whose spawn points are all taken
+        // by people standing on them (and one far outside it, which must
+        // not be used).
+        let taken = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(20.0, 0.0, 0.0),
+            Vec3::new(-20.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 20.0),
+            Vec3::new(0.0, 0.0, -20.0),
+        ];
+        let mut spawns = taken.to_vec();
+        spawns.push(Vec3::new(200.0, 0.0, 200.0));
+        for _ in 0..30 {
+            let mut r = walled_room(Vec::new(), spawns.clone());
+            {
+                let ring = r.ring.as_mut().expect("the ring is on by default");
+                ring.to_c = (0.0, 0.0);
+                ring.to_r = 40.0;
+            }
+            for (i, at) in taken.iter().enumerate() {
+                let id = r.join(&format!("p{i}"), None, PROTOCOL, false).unwrap();
+                r.players.get_mut(&id).unwrap().pos = *at;
+            }
+            let c = r.join("c", None, PROTOCOL, false).unwrap();
+            r.spawn(c);
+            let p = r.player_pos(c).unwrap();
+            assert!(p.x.hypot(p.z) < 40.0, "inside the circle: {p:?}");
+            for at in taken {
+                assert!(
+                    p.distance(at) >= SPAWN_GAP,
+                    "{p:?} is {} m from someone",
+                    p.distance(at)
+                );
+            }
+        }
     }
 
     #[test]
