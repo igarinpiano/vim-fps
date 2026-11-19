@@ -883,6 +883,58 @@ function camTile() {
   return el;
 }
 
+/// One step of the tile cursor (h j k l). Alone on the monitor (Enter),
+/// it goes to the previous / next tile and shows that one alone.
+function moveTile(key) {
+  const back = key === 'h' || key === 'k';
+  if (S.solo != null) {
+    const all = [...(camOn() ? [CAM] : []), ...viewable().map((p) => p.id)];
+    const i = all.indexOf(S.solo);
+    const j = clamp(i + (back ? -1 : 1), 0, all.length - 1);
+    if (all[j] == null || j === i) return;
+    S.solo = all[j];
+    select(all[j]);
+    layoutTiles(true);
+    return;
+  }
+  const ids = tileIds();
+  if (!ids.length) return;
+  const i = ids.indexOf(S.sel);
+  if (i < 0) {
+    select(ids[0]);
+    return;
+  }
+  const cols = Math.max(1, tileCols);
+  const col = i % cols;
+  const row = Math.floor(i / cols);
+  const rows = Math.ceil(ids.length / cols);
+  let j = i;
+  if (key === 'h' && col > 0) j = i - 1;
+  else if (key === 'l' && col < cols - 1 && i + 1 < ids.length) j = i + 1;
+  else if (key === 'k' && row > 0) j = i - cols;
+  else if (key === 'j' && row < rows - 1) j = Math.min(i + cols, ids.length - 1);
+  if (j !== i) {
+    select(ids[j]);
+    return;
+  }
+  // At the edge: the next / previous page, if there is one.
+  const pages = pageCount();
+  if (pages <= 1) return;
+  const forward = key === 'l' || key === 'j';
+  if (forward ? S.page >= pages - 1 : S.page <= 0) return;
+  S.page += forward ? 1 : -1;
+  S.cycleAt = performance.now() + S.cycle * 1000;
+  layoutTiles(true);
+  const next = tileIds();
+  // Same column on the new page (top row going down, bottom row going up).
+  let k;
+  if (key === 'j') k = col;
+  else if (key === 'k') k = (Math.ceil(next.length / cols) - 1) * cols + col;
+  // l: the first player there (the camera's tile is on every page).
+  else k = forward ? (camOn() && next[0] === CAM && next.length > 1 ? 1 : 0) : next.length - 1;
+  select(next[clamp(k, 0, next.length - 1)]);
+}
+
 /// The camera: 'auto', 'free' or 'off'.
 function setCam(mode) {
   const was = S.cam.mode;
@@ -1582,21 +1634,15 @@ function windowKey(key, n, count) {
   const big = key === 'H' || key === 'L';
   const dir = key === 'h' || key === 'H' ? -1 : key === 'l' || key === 'L' ? 1 : 0;
   if (w === 'monitor') {
-    // Across every page: moving off this one turns to the next. The
-    // camera's tile comes first.
-    const cam = camOn() && S.solo == null ? 1 : 0;
-    const list = [...(cam ? [{ id: CAM }] : []), ...viewable()];
-    const i = list.findIndex((p) => p.id === S.sel);
-    const step = { h: -1, l: 1, k: -tileCols, j: tileCols }[key];
-    if (step != null) {
-      if (!list.length) return true;
-      const j = i < 0 ? cam + S.page * Math.max(1, S.perPage) : clamp(i + step * n, 0, list.length - 1);
-      select(list[j].id);
-      const pj = j - cam;
-      if (S.perPage > 0 && S.solo == null && pj >= 0 && Math.floor(pj / S.perPage) !== S.page) {
-        S.page = Math.floor(pj / S.perPage);
-        layoutTiles(true);
-      }
+    // hjkl move over the tiles as they are on screen (the camera's tile
+    // first); past the edge of a page, onto the next / previous one.
+    if ('hjkl'.includes(key) && key.length === 1) {
+      for (let i = 0; i < n; i++) moveTile(key);
+      return true;
+    }
+    if (key === 'gg' || key === 'G') {
+      const ids = tileIds();
+      if (ids.length) select(ids[key === 'G' ? ids.length - 1 : 0]);
       return true;
     }
     if (key === 'a') {
@@ -1848,9 +1894,14 @@ document.addEventListener('keydown', (e) => {
   if (m === 'msg') {
     e.preventDefault();
     const body = $('msg-body');
+    // One whole line a press (held: keeps going), as in the game.
+    const line = parseFloat(getComputedStyle(body).lineHeight) || 20;
+    const at = Math.round(body.scrollTop / line);
     if (e.key === 'Enter' || e.key === 'q' || escKey) closeMessage();
-    else if (e.key === 'j') body.scrollTop += 20;
-    else if (e.key === 'k') body.scrollTop -= 20;
+    else if (e.key === 'j' || e.key === 'ArrowDown') body.scrollTop = (at + 1) * line;
+    else if (e.key === 'k' || e.key === 'ArrowUp') body.scrollTop = Math.max(0, at - 1) * line;
+    else if (e.key === 'G') body.scrollTop = body.scrollHeight;
+    else if (e.key === 'g') body.scrollTop = 0;
     return;
   }
   if (escKey && e.key !== 'Escape') {

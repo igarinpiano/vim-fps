@@ -1989,6 +1989,7 @@ impl Room {
             ServerMsg::MatchEnd {
                 ranking,
                 next_in: INTERMISSION,
+                to_lobby: self.cfg.managed && !self.auto,
             },
         );
     }
@@ -3018,6 +3019,7 @@ impl Room {
                         ring: ring.clone(),
                         lobby: self.lobby,
                         countdown: self.countdown.map(|t| t.max(0.0).ceil()),
+                        to_lobby: self.cfg.managed && !self.auto,
                     },
                 ));
                 continue;
@@ -3053,6 +3055,7 @@ impl Room {
                     ring: ring.clone(),
                     lobby: false,
                     countdown: None,
+                    to_lobby: self.cfg.managed && !self.auto,
                 },
             ));
         }
@@ -5132,8 +5135,15 @@ mod tests {
                 .iter()
                 .any(|(_, m)| matches!(m, ServerMsg::MatchStart { .. }))
         );
-        // The admin ends it: results, then back to waiting (not a new match).
+        // The admin ends it: results, then back to waiting (not a new match),
+        // and the result screen says so.
+        r.drain();
         r.admin_end().unwrap();
+        assert!(
+            r.drain()
+                .iter()
+                .any(|(_, m)| matches!(m, ServerMsg::MatchEnd { to_lobby: true, .. }))
+        );
         assert_eq!(r.phase(), Phase::Results);
         for _ in 0..((INTERMISSION * 60.0) as usize + 5) {
             r.tick(1.0 / 60.0);
@@ -5217,7 +5227,15 @@ mod tests {
         // With auto on, the next match follows the results by itself.
         r.set_auto(true);
         r.admin_start(0.0).unwrap();
+        r.drain();
         r.admin_end().unwrap();
+        assert!(r.drain().iter().any(|(_, m)| matches!(
+            m,
+            ServerMsg::MatchEnd {
+                to_lobby: false,
+                ..
+            }
+        )));
         for _ in 0..((INTERMISSION * 60.0) as usize + 5) {
             r.tick(1.0 / 60.0);
         }

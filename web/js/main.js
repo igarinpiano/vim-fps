@@ -54,6 +54,8 @@ const game = {
   // once they have.
   lobby: false,
   countdown: null,
+  // The results end in the waiting room (a host's admin starts the next match).
+  toLobby: false,
   pos: { x: 0, y: 0, z: 0 },
   vel: { x: 0, z: 0 },
   yaw: 0,
@@ -124,6 +126,7 @@ function resetGame() {
     intermission: null,
     lobby: false,
     countdown: null,
+    toLobby: false,
     lastInput: '',
     watching: false,
     follow: null,
@@ -2018,6 +2021,8 @@ function onMessage(m) {
       sound.event('startup');
       break;
     case 'match_end':
+      // A host's admin starts the next match: back to waiting, not "next match".
+      game.toLobby = !!m.to_lobby;
       showResult(m);
       sound.event('shutdown');
       break;
@@ -2298,13 +2303,14 @@ function showResult(m) {
 /// The clock in the task bar.
 function clockText() {
   if (game.lobby) return game.countdown != null ? `開始 ${Math.ceil(game.countdown)}` : '待機中';
-  return game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left);
+  if (game.intermission != null) return `${game.toLobby ? '待機へ' : '次'} ${fmtTime(game.intermission)}`;
+  return fmtTime(game.left);
 }
 
 /// Under the result table: what follows it.
 function resultNext() {
   const n = Math.ceil(game.intermission);
-  return serverInfo && serverInfo.managed && !game.practice ? `${n} 秒後に結果を閉じます (次の試合は管理者が開始)` : `${n} 秒後に次の試合`;
+  return game.toLobby ? `${n} 秒後に待機画面へ戻ります (次の試合は管理者が開始します)` : `${n} 秒後に次の試合`;
 }
 
 // ---------------------------------------------------------------- waiting room
@@ -2365,6 +2371,7 @@ function onSnap(m) {
   if (!m.watching && game.watching && m.me) stopWatching();
   const wasLobby = game.lobby;
   game.lobby = !!m.lobby;
+  game.toLobby = !!m.to_lobby;
   game.countdown = m.countdown ?? null;
   if (game.lobby && !wasLobby) enterLobby();
   else if (!game.lobby && wasLobby) showLobby(false);
@@ -2592,10 +2599,16 @@ const vim = new Vim(settings, {
   msgScroll(kind, n) {
     const body = $('msg-body');
     const line = parseFloat(getComputedStyle(body).lineHeight) || 20;
-    const page = Math.max(line, body.clientHeight - line);
-    if (kind === 'line') body.scrollTop += n * line;
-    else if (kind === 'half') body.scrollTop += n * Math.round(page / 2);
-    else if (kind === 'page') body.scrollTop += n * page;
+    // In whole lines, from the line now at the top (no drift, no half
+    // lines at the top).
+    const rows = Math.max(1, Math.floor(body.clientHeight / line));
+    const at = Math.round(body.scrollTop / line);
+    const to = (k) => {
+      body.scrollTop = Math.max(0, k) * line;
+    };
+    if (kind === 'line') to(at + n);
+    else if (kind === 'half') to(at + n * Math.max(1, Math.floor(rows / 2)));
+    else if (kind === 'page') to(at + n * Math.max(1, rows - 1));
     else if (kind === 'top') body.scrollTop = 0;
     else if (kind === 'bottom') body.scrollTop = body.scrollHeight;
     else if (kind === 'side') body.scrollLeft += n * 8 * (line / 1.5);

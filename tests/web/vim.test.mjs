@@ -281,3 +281,23 @@ test('spectate: a toggles the automatic camera', () => {
   assert.equal(only(log, 'follow').length, 0);
   assert.equal(vim.mode, 'spectate');
 });
+
+test('a held j / k keeps scrolling a message one line at a time', () => {
+  const { log, down, vim } = setup();
+  vim.mode = 'msg';
+  down('j');
+  down('j', { repeat: true });
+  down('j', { repeat: true });
+  down('k', { repeat: true });
+  assert.deepEqual(only(log, 'msgScroll'), [
+    ['msgScroll', 'line', 1],
+    ['msgScroll', 'line', 1],
+    ['msgScroll', 'line', 1],
+    ['msgScroll', 'line', -1],
+  ]);
+  // Walking still ignores the OS repeat (held keys are tracked by down / up).
+  const w = setup();
+  w.down('k');
+  w.down('k', { repeat: true });
+  assert.equal(only(w.log, 'move').length, 1);
+});
