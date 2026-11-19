@@ -13,6 +13,7 @@ import { parseRc, applyRc, buildRc, customCommand, tokenize, isRcName, CUSTOM_DE
 import { SkinStore, skinLayer, skinName, readBundle, readZip, writeZip, filesFromDrop, UI_VARS } from './skin.js';
 import { VERSION } from './version.js';
 import { halfWidth } from './lens.js';
+import { EQ_PRESETS, EQ_TYPE_NAMES, parseEq, formatEq, eqGraph, apoToEq, looksLikeApo } from './eq.js';
 
 const $ = (id) => document.getElementById(id);
 const DEG = Math.PI / 180;
@@ -286,6 +287,9 @@ const HELP = [
   '  :set nonameplates    頭上の名前を消す :set nohpbars  頭上の体力ゲージを消す',
   '  :texture             自分の画像を地面・壁などに貼る (:texture だけで使い方と一覧)',
   '  :sounds              起動音・エラー音・終了音のファイルの状態',
+  '  :speakers            サラウンド (5.1 / 7.1 など) の設定とスピーカーのテスト (:speakers test)',
+  '  :set nospatial       空間オーディオ (遠くの音・壁の向こうの音がこもる、建物の響き) を切る  :set reverb=50 響きを半分に',
+  '  :eq                  イコライザー (低音を強くするなど。:eq bass  :eq steps  :eq off  :eq load でファイル)',
   '  :skin                スキン (テクスチャ・効果音・UI の色をまとめたもの)',
   '  :mkvimrc             設定を .vimfpsrc に書き出す  :source  .vimfpsrc を読み込む (:help config)',
   '',
@@ -578,6 +582,14 @@ function runCommand(line) {
     case 'sounds':
       showSounds();
       break;
+    case 'eq':
+      eqCommand(args.trim());
+      break;
+    case 'speaker':
+    case 'speakers':
+    case 'spk':
+      speakersCommand(args.trim());
+      break;
     case 'fs':
     case 'fullscreen':
       fullscreen();
@@ -845,7 +857,11 @@ async function importFiles(files, loose) {
       return balloon('zip を読めません', String(e.message || e), 'err');
     }
   }
-  if (files.length === 1 && (isRcName(files[0].name) || (files[0].type || '').startsWith('text/'))) return sourceText(await files[0].text(), files[0].name);
+  if (files.length === 1 && (isRcName(files[0].name) || (files[0].type || '').startsWith('text/'))) {
+    const text = await files[0].text();
+    if (!isRcName(files[0].name) && looksLikeApo(text)) return importEq(text, files[0].name);
+    return sourceText(text, files[0].name);
+  }
   if (loose === 'skin' || files.some((f) => f.name.toLowerCase() === 'skin.json' || isRcName(f.name))) {
     return importBundle(new Map(files.map((f) => [f.name, f])), 'my-skin');
   }
@@ -1009,6 +1025,129 @@ window.addEventListener('drop', async (e) => {
     balloon('読み込めません', String(err.message || err), 'err');
   }
 });
+
+/// :eq — the equalizer. No argument: the curve as a graph, the presets and
+/// how to write one. `:eq bass`, `:eq ls100:+6,hs8k:+2` set it (as `:set
+/// eq=`); `:eq load` reads an Equalizer APO / AutoEq file.
+function eqCommand(arg) {
+  sound.wake();
+  if (arg === 'load' || arg === 'file') {
+    pickFiles(false, async (files) => importEq(await files[0].text(), files[0].name), '.txt,text/plain');
+    return;
+  }
+  if (arg) {
+    const r = settings.command([`eq=${arg.replace(/\s+/g, '')}`]);
+    if (r.error) return balloon(r.error, '', 'err');
+  }
+  showEq();
+  return undefined;
+}
+
+function showEq() {
+  const v = settings.get('eq');
+  let eq;
+  try {
+    eq = parseEq(v === 'off' ? '' : v);
+  } catch {
+    eq = { pre: 0, bands: [] };
+  }
+  const L = [`今の設定: eq=${v}`];
+  if (eq.bands.length || eq.pre) {
+    L.push(`  展開すると: ${formatEq(eq)}`);
+    if (eq.pre) L.push(`  プリアンプ ${eq.pre > 0 ? '+' : ''}${eq.pre} dB`);
+    for (const b of eq.bands) {
+      const gain = b.type === 'lp' || b.type === 'hp' ? '' : `  ${b.gain > 0 ? '+' : ''}${b.gain} dB`;
+      L.push(`  ${EQ_TYPE_NAMES[b.type].padEnd(7, '　')} ${String(b.freq).padStart(6)} Hz${gain}  Q ${b.q}`);
+    }
+  }
+  L.push('');
+  L.push(...eqGraph(eq));
+  L.push('');
+  L.push('プリセット (:eq 名前 / :set eq=名前):');
+  for (const [k, p] of Object.entries(EQ_PRESETS)) L.push(`  ${k.padEnd(10)} ${p.desc}${p.curve ? `  (${p.curve})` : ''}`);
+  L.push('');
+  L.push('自分で書く: 種類 周波数 : ゲイン(dB) : Q を , で並べます (Q は省略可)');
+  L.push('  pk = ピーク (省略時)  ls = ローシェルフ  hs = ハイシェルフ  lp / hp = ローパス / ハイパス (ゲインなし)  pre±N = プリアンプ');
+  L.push('  :eq ls100:+6,pk3k:+3:1.4      100 Hz 以下を +6 dB、3 kHz を +3 dB (Q 1.4)');
+  L.push('  :eq bass,hs8k:+2,pre-2        プリセットに足す');
+  L.push('  :eq load                      Equalizer APO / AutoEq のファイル (ParametricEQ.txt) を読み込む (ページにドロップでも)');
+  L.push('  :eq off                       EQ なし');
+  L.push('');
+  L.push(':mkvimrc で .vimfpsrc に set eq=… として書き出され、:source で読み込めます。音割れ防止のリミッターが掛かります。');
+  showMsg(':eq — イコライザー', L);
+}
+
+/// :speakers — how the sound goes out (headphones or N speakers), the
+/// channels in order, and `:speakers test` (noise on each in turn).
+/// `:speakers 5.1` sets it (as `:set speakers=`).
+function speakersCommand(arg) {
+  sound.wake();
+  if (arg === 'test') {
+    const info = sound.outputInfo();
+    const total = sound.speakerTest((label, k, n) => balloon(`スピーカーのテスト ${k + 1} / ${n}`, label));
+    if (total) balloon(`スピーカーのテスト (${info.mode})`, `${Math.round(total)} 秒。鳴っている場所と表示が合っているか確かめてください`);
+    return undefined;
+  }
+  if (arg) {
+    const r = settings.command([`speakers=${arg}`]);
+    if (r.error) return balloon(r.error, '', 'err');
+    if (!r.changed.length) sound.rebuild();
+  } else {
+    // The OS output may have changed since (stereo → 5.1): look again.
+    sound.rebuild();
+  }
+  // After the sound has rebuilt (its listener runs after this one).
+  setTimeout(showSpeakers, 0);
+  return undefined;
+}
+
+function showSpeakers() {
+  const info = sound.outputInfo();
+  const L = [`設定: speakers=${info.setting}  →  今の出し方: ${info.mode}`];
+  if (info.note) L.push(`  ${info.note}`);
+  L.push(`  このブラウザーの出力: 最大 ${info.max} チャンネル`);
+  L.push('');
+  if (info.layout) {
+    L.push('チャンネルの順番 (この順に音声機器へ送ります):');
+    info.layout.forEach((sp, i) => L.push(`  ${String(i + 1).padStart(2)}. ${sp.name.padEnd(4)} ${sp.label}${sp.lfe ? '  (全部の音の低音を少し)' : `  ${sp.az}°`}`));
+    L.push('');
+    L.push('  銃声・足音などは、その方向の両隣のスピーカーから鳴ります (高さは使いません)。');
+    L.push('  起動音・被弾音など方向のない音は左右のフロントから鳴ります。');
+  } else {
+    L.push('  ヘッドホン用の立体音響 (HRTF) で、左右・前後・上下を 2 チャンネルに収めて鳴らします。');
+  }
+  L.push('');
+  L.push('切り替え (:speakers 名前 / :set speakers=名前):');
+  L.push('  headphones  ヘッドホン (2 チャンネルの立体音響。初期値)');
+  L.push('  stereo      スピーカー 2 本 (左右に振り分け。立体音響の加工なし)');
+  L.push('  quad        スピーカー 4 本 (前 2・後ろ 2)');
+  L.push('  5.1         5.1ch (L R C LFE SL SR)');
+  L.push('  7.1         7.1ch (L R C LFE BL BR SL SR)');
+  L.push('  auto        出力のチャンネル数で選ぶ (8 → 7.1、6 → 5.1、4 → quad、2 → headphones)');
+  L.push('');
+  L.push('  :speakers test   各スピーカーから順に音を出して確かめる');
+  L.push('');
+  L.push(`空間オーディオ: ${settings.get('spatial') ? `オン (響き ${settings.get('reverb')}%)` : 'オフ'}  — 壁の向こうや遠くの音がこもり、建物の中と外で響きが変わります (:set nospatial / :set reverb=50)`);
+  L.push('  Windows Sonic / Dolby Atmos for Headphones をオンにすると出力が 7.1 に見えることが多く、:speakers auto で OS の立体音響を使えます。');
+  L.push('');
+  L.push('5.1 / 7.1 で鳴らすには、OS の音声出力を 5.1 / 7.1 にしてください (Windows: サウンドの設定 → スピーカーの構成)。');
+  L.push('出力が 2 チャンネルのままだと、ブラウザーは 2 チャンネルしか出せません (上の「最大」の数)。');
+  showMsg(':speakers — サラウンド', L);
+}
+
+/// An Equalizer APO / AutoEq file → `:set eq=`.
+function importEq(text, label) {
+  let r;
+  try {
+    r = apoToEq(text);
+  } catch (e) {
+    return balloon(`${label}: EQ として読めません`, String(e.message || e), 'err');
+  }
+  const res = settings.command([`eq=${r.value}`]);
+  if (res.error) return balloon(`${label}: EQ として読めません`, res.error, 'err');
+  balloon(`EQ を読み込みました: ${label}`, [`eq=${r.value}`, ...r.warnings].join(' · '), r.warnings.length ? 'err' : '');
+  return undefined;
+}
 
 /// :sounds — the event sounds, where each comes from and whether it loaded.
 function showSounds() {
@@ -1616,6 +1755,7 @@ async function onWelcome(m) {
   game.myId = m.id;
   game.map = m.map;
   game.world = new World(m.map);
+  sound.setWorld(game.world);
   game.specs = m.specs;
   game.range = !!m.range;
   game.respawnMode = m.respawn !== false;
@@ -2223,6 +2363,12 @@ for (const ev of ['mousedown', 'wheel', 'contextmenu']) {
 }
 
 settings.onChange((k, v) => {
+  if (k === 'speakers' && sound.ctx) {
+    setTimeout(() => {
+      const info = sound.outputInfo();
+      if (info.note) balloon(`speakers: ${info.mode} で鳴らします`, info.note, 'err');
+    }, 0);
+  }
   if (k === 'uianim') document.body.classList.toggle('uianim', v);
   if (k === 'showfps') show('fps', v);
   if (k === 'name' && vim.mode === 'menu') renderMenu();
@@ -2499,7 +2645,7 @@ function frame(now) {
       fov: game.fov,
     };
     renderer.render(cam, { ads: game.adsK, hide: scoped || !game.alive || !!tank, bob: bobY, kick: game.kick });
-    sound.listener(cam.x, cam.y, cam.z, game.yaw);
+    sound.listener(cam.x, cam.y, cam.z, game.yaw, cam.pitch || 0);
     if (vim.mode === 'map') drawMap();
   }
   touch.setScene(touchScene());
@@ -2959,7 +3105,7 @@ function watchFrame(now, dt) {
   game.fov = cam.fov;
   renderer.updateEffects(dt);
   renderer.render(cam, vm, inset);
-  sound.listener(cam.x, cam.y, cam.z, cam.yaw);
+  sound.listener(cam.x, cam.y, cam.z, cam.yaw, cam.pitch || 0);
   if (vim.mode === 'map') drawMap();
 }
 

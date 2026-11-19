@@ -142,7 +142,7 @@ export class World {
   }
 }
 
-function rayBox(o, d, lo, hi, max) {
+export function rayBox(o, d, lo, hi, max) {
   let tmin = 0;
   let tmax = max;
   for (const k of ['x', 'y', 'z']) {

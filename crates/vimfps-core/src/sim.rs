@@ -2274,7 +2274,8 @@ impl Room {
             return;
         }
         v.hp -= dmg;
-        v.heal = None;
+        // A heal under way goes on when hit (the ring, a shot): only
+        // dying, switching or reloading stops it.
         let dead = v.hp <= 0.0;
         let dmg = r2(dmg);
         let hit = ServerMsg::Hit {
@@ -3742,6 +3743,30 @@ mod tests {
             matches!(p.inv.sel, Slot::Gun0 | Slot::Gun1),
             "back to the gun"
         );
+    }
+    #[test]
+    fn damage_does_not_cancel_a_heal() {
+        let mut r = walled_room(Vec::new(), vec![Vec3::ZERO]);
+        let me = r.join("me", None, PROTOCOL, false).unwrap();
+        {
+            let p = r.players.get_mut(&me).unwrap();
+            p.hp = 50.0;
+            p.protect = 0.0;
+            p.inv.medkits = 1;
+        }
+        r.handle(me, ClientMsg::Select { slot: Slot::Medkit });
+        r.handle(me, ClientMsg::Trigger);
+        r.tick(1.0 / 60.0);
+        assert!(r.players[&me].heal.is_some(), "healing");
+        r.damage(me, me, 10.0, false, Cause::Ring, Vec3::ZERO);
+        assert!(r.players[&me].heal.is_some(), "still healing after a hit");
+        for _ in 0..(60 * 2) {
+            r.tick(1.0 / 60.0);
+        }
+        let p = &r.players[&me];
+        assert!(p.heal.is_none());
+        assert_eq!(p.inv.medkits, 0);
+        assert!((p.hp - 100.0).abs() < 0.01, "50 - 10 + 60 = {}", p.hp);
     }
     /// A flat field with one tank parked at (20, 0), ring off.
     fn tank_room() -> (Room, ClientId, ClientId) {

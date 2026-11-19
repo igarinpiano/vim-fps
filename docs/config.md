@@ -25,6 +25,9 @@ vim-fps で自分好みに変えられるものは、次の 2 つにまとまっ
 set adssens=30 forward=j      " :set と同じ。1 行に何個でも
 set nocompass
 set fov=150                   " 視野角 (40〜360。120 を超えると魚眼)
+set reverb=60                 " 響きの大きさ (0〜200%。nospatial で空間オーディオごと切る)
+set speakers=5.1              " サラウンド (headphones / stereo / quad / 5.1 / 7.1 / auto)
+set eq=ls100:+6,pk3k:+3:1.4   " イコライザー (プリセット名でも: set eq=bass)
 skin neon                     " このブラウザーに入れたスキンを使う
 custom bots=8 skill=4 rule=last time=15
 
@@ -197,6 +200,8 @@ neon/
 | `shutdown` | 試合が終わった時 (システム終了音) |
 
 音声は wav / mp3 / ogg。どのスキンにも無い場面では何も鳴りません (`error2` だけは合成音が鳴ります)。銃声や足音は合成音で、差し替えられません。
+
+音の高さごとの大きさ (低音を強くするなど) はスキンではなく、各自の設定の `set eq=…` で変えます (ヘッドホンや好みは人それぞれなので)。書き方はゲーム内の `:eq` か [README のイコライザー](https://github.com/igarinpiano/vim-fps#イコライザー-eq)。
 
 ### ui (画面の色)
 

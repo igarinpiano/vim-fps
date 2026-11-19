@@ -2,6 +2,9 @@
 // `:set sens?`, `:set sens&`, `:set all&`, `:set sens+=10`, `:set nosmooth`.
 // Pure module (storage is passed in) so it can be tested with node --test.
 
+import { eqError } from './eq.js';
+import { SPEAKER_MODES } from './surround.js';
+
 export const OPTIONS = {
   name: { type: 'string', def: '', desc: 'プレイヤー名 (次の接続から)' },
   forward: { type: 'enum', values: ['k', 'j'], def: 'k', desc: '前進キー (もう一方が後退)' },
@@ -19,6 +22,10 @@ export const OPTIONS = {
   fov: { type: 'number', def: 80, min: 40, max: 360, desc: '視野角 (度、画面の縦方向)。120 を超えると魚眼になり、360 で全方向が見える' },
   timeoutlen: { type: 'number', def: 1000, min: 50, max: 10000, alias: ['tm'], desc: 'dd や gt の 2 打目を待つ時間 (ミリ秒)' },
   volume: { type: 'number', def: 70, min: 0, max: 100, alias: ['vol'], desc: '音量 (0-100)' },
+  speakers: { type: 'enum', values: SPEAKER_MODES, def: 'headphones', alias: ['spk'], desc: '音の出し方: headphones (ヘッドホンで立体音響) / stereo / quad / 5.1 / 7.1 (スピーカーの数だけチャンネルを出す) / auto (出力のチャンネル数で選ぶ)。:speakers で確認とテスト' },
+  spatial: { type: 'bool', def: true, desc: '空間オーディオ: 遠くの音ほどこもる・壁や丘の向こうの音はこもって小さくなる・建物の中と外で響きが変わる (off: 方向と距離だけ)' },
+  reverb: { type: 'number', def: 100, min: 0, max: 200, desc: '響き (残響) の大きさ (%)。0 で響きなし。spatial のときだけ' },
+  eq: { type: 'string', def: 'off', maxlen: 600, validate: eqError, desc: 'イコライザー: プリセット名 (bass / steps など) か ls100:+6,pk3k:+3:1.4 のようなフィルターの並び (:eq で一覧とグラフ)' },
   showcmd: { type: 'bool', def: true, alias: ['sc'], desc: '入力途中のキーを表示' },
   showfps: { type: 'bool', def: false, desc: 'FPS を表示' },
   compass: { type: 'bool', def: true, desc: '索敵コンパス (銃声・足音・発見した敵の方向)' },
@@ -101,7 +108,7 @@ export class Settings {
         if (o.type === 'number' && (typeof v === 'number' || v === 'inf')) this.values[k] = v === 'inf' ? Infinity : v;
         else if (o.type === 'bool' && typeof v === 'boolean') this.values[k] = v;
         else if (o.type === 'enum' && o.values.includes(v)) this.values[k] = v;
-        else if (o.type === 'string' && typeof v === 'string') this.values[k] = v;
+        else if (o.type === 'string' && typeof v === 'string' && !(o.validate && o.validate(v))) this.values[k] = v;
       }
     } catch {
       // Unreadable storage: keep the defaults.
@@ -259,7 +266,10 @@ export class Settings {
       v = val;
     } else {
       if (!['=', ':'].includes(op)) return `E474: Invalid argument: ${tok}`;
-      v = val.slice(0, 16);
+      if (o.maxlen && val.length > o.maxlen) return `E474: Invalid argument: ${name} (${o.maxlen} 文字まで)`;
+      v = val.slice(0, o.maxlen || 16);
+      const bad = o.validate && o.validate(v);
+      if (bad) return `E474: Invalid argument: ${tok} (${bad})`;
     }
     if (this.values[name] !== v) {
       this.set(name, v);
