@@ -181,6 +181,8 @@ export class Renderer {
     // The small second view (the wipe while watching with the automatic camera).
     this.insetCamera = new THREE.PerspectiveCamera(80, 16 / 9, 0.05, 600);
     this.insetCamera.rotation.order = 'YXZ';
+    // In the scene, so the gun it carries for an inset view is drawn.
+    this.scene.add(this.insetCamera);
     this.scene.add(new THREE.HemisphereLight(0xdff0ff, 0x6b8a4a, 1.6));
     const sun = new THREE.DirectionalLight(0xffffff, 1.6);
     sun.position.set(60, 100, 30);
@@ -833,18 +835,24 @@ export class Renderer {
       this.camera.updateProjectionMatrix();
     }
     this.viewmodel.visible = !vm.hide;
-    const m = this.models[this.held];
-    // Aiming: the sight's centre sits exactly on the screen centre.
-    const sight = m ? m.sight * this.viewmodel.scale.y : 0;
-    const ads = m && m.ads ? vm.ads : 0;
-    this.vmTarget.set(0, -sight, m && m.ads === 'scope' ? -0.22 : -0.32);
-    this.viewmodel.position.lerpVectors(this.vmHip, this.vmTarget, ads);
-    this.viewmodel.position.y += vm.bob;
-    this.viewmodel.position.z += vm.kick;
-    this.viewmodel.rotation.z = (1 - ads) * 0.04;
+    this.poseViewmodel(vm);
     if (isFisheye(cam.fov)) this.renderFisheye(cam);
     else this.renderer.render(this.scene, this.camera);
     if (inset) this.renderInset(inset);
+  }
+
+  /// Where the gun in the hands sits: at the hip, or (ads 1) with its
+  /// sight on the middle of the view; bob and kick move it.
+  poseViewmodel(vm) {
+    const m = this.models[this.held];
+    // Aiming: the sight's centre sits exactly on the screen centre.
+    const sight = m ? m.sight * this.viewmodel.scale.y : 0;
+    const ads = m && m.ads ? vm.ads || 0 : 0;
+    this.vmTarget.set(0, -sight, m && m.ads === 'scope' ? -0.22 : -0.32);
+    this.viewmodel.position.lerpVectors(this.vmHip, this.vmTarget, ads);
+    this.viewmodel.position.y += vm.bob || 0;
+    this.viewmodel.position.z += vm.kick || 0;
+    this.viewmodel.rotation.z = (1 - ads) * 0.04;
   }
 
   /// A view wider than a flat camera can show (lens.js): the six directions
@@ -958,7 +966,9 @@ export class Renderer {
     this.fish = { size, target, cubeCamera, quad, scene, camera: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1) };
   }
 
-  renderInset({ cam, rect, hide }) {
+  /// `vm` (optional): the gun in that player's hands, as in render() —
+  /// {held: 'ar' | ..., ads, kick, flash: the muzzle flash shows, hide}.
+  renderInset({ cam, rect, hide, vm = null }) {
     const r = this.renderer;
     const c = this.insetCamera;
     c.position.set(cam.x, cam.y, cam.z);
@@ -970,8 +980,19 @@ export class Renderer {
     const body = hide != null ? this.players.get(hide) : null;
     const shown = body && body.group.visible;
     if (body) body.group.visible = false;
-    const vm = this.viewmodel.visible;
-    this.viewmodel.visible = false;
+    const shownVm = this.viewmodel.visible;
+    const held = this.held;
+    const flash = this.flash.visible;
+    const pose = vm && !vm.hide && vm.held;
+    if (pose) {
+      // The gun goes to this camera for the one view, then back.
+      c.add(this.viewmodel);
+      c.updateMatrixWorld();
+      this.setHeld(vm.held);
+      this.poseViewmodel(vm);
+      this.flash.visible = !!vm.flash;
+    }
+    this.viewmodel.visible = !!pose;
     // The canvas may be shown at another size than it is drawn at.
     const el = r.domElement;
     const size = r.getSize(this.insetSize || (this.insetSize = new THREE.Vector2()));
@@ -986,6 +1007,11 @@ export class Renderer {
     r.setScissorTest(false);
     r.setViewport(0, 0, size.x, size.y);
     if (body) body.group.visible = shown;
-    this.viewmodel.visible = vm;
+    if (pose) {
+      this.camera.add(this.viewmodel);
+      this.setHeld(held);
+      this.flash.visible = flash;
+    }
+    this.viewmodel.visible = shownVm;
   }
 }

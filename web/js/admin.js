@@ -36,6 +36,8 @@ const S = {
   pickups: [],
   /// id -> time of the last shot fired or hit taken (red title bars).
   action: new Map(),
+  /// id -> time of the last shot (muzzle flash and kick in their view).
+  muzzle: new Map(),
   /// The view shown alone on the monitor, or null.
   solo: null,
   /// The player picked (monitor, map and ranking share it).
@@ -264,6 +266,7 @@ function onMessage(m) {
       break;
     case 'shot':
       S.action.set(m.id, performance.now());
+      S.muzzle.set(m.id, performance.now());
       if (renderer) renderer.tracer(m.from, m.to, false, m.vel, S.specs && S.specs.gravity);
       break;
     case 'shell':
@@ -276,6 +279,12 @@ function onMessage(m) {
     case 'hit':
       S.action.set(m.attacker, performance.now());
       S.action.set(m.victim, performance.now());
+      // As in the player's own view: a mark when they hit, red edges when
+      // they are hit.
+      if (m.victim && m.attacker !== m.victim) {
+        flashTile(m.attacker, m.head ? 'hithead' : 'hit', 160);
+        flashTile(m.victim, 'hurt', 350);
+      }
       break;
     case 'kill': {
       const how = m.cause === 'grenade' ? 'グレネード' : m.cause === 'tank' ? '戦車' : m.cause === 'ring' ? 'リングの外' : gunName(m.cause && m.cause.gun);
@@ -737,7 +746,7 @@ function layoutTiles(force) {
         el = document.createElement('div');
         el.className = 'tile';
         el.innerHTML =
-          '<div class="ttl"><span></span><em></em></div><div class="pic"><div class="over" hidden></div></div>' +
+          '<div class="ttl"><span></span><em></em></div><div class="pic"><i class="xh"></i><i class="hm">✕</i><div class="over" hidden></div></div>' +
           '<div class="sbar"><span class="hpp"><span class="xpbar"><div></div></span><b class="hpn"></b></span><span class="kd"></span><span class="ping"></span></div>';
         const id = p.id;
         el.addEventListener('click', () => {
@@ -764,6 +773,15 @@ function layoutTiles(force) {
   updateTiles();
 }
 
+/// A class on a player's tile for a moment (hit mark, being hit).
+function flashTile(id, cls, ms) {
+  const el = tileEls.get(id);
+  if (!el) return;
+  el.classList.add(cls);
+  clearTimeout(el[`_${cls}`]);
+  el[`_${cls}`] = setTimeout(() => el.classList.remove(cls), ms);
+}
+
 function toggleSolo(id) {
   S.solo = S.solo === id || id == null ? null : id;
   if (S.solo != null) S.mode = 'tiles';
@@ -781,6 +799,8 @@ function updateTiles() {
     el.classList.toggle('down', waiting || !p.alive);
     el.classList.toggle('fight', st.phase === 'live' && p.alive && now - (S.action.get(p.id) || -1e9) < 1500);
     el.classList.toggle('cur', p.id === S.sel);
+    el.classList.toggle('scoped', p.alive && p.ads && p.gun === 'sr' && p.tank == null && st.phase === 'live');
+    el.classList.toggle('aim', p.alive && !!p.ads);
     el.querySelector('.ttl span').textContent = p.name;
     el.querySelector('.ttl em').textContent = p.tank != null ? '戦車' : p.alive && p.gun ? `${gunName(p.gun)}${p.zoom === 2 ? ' · スコープ' : p.ads ? ' · 構え' : ''}` : '';
     const hp = p.alive ? Math.max(0, Math.round(p.hp)) : 0;
@@ -876,7 +896,11 @@ function drawTiles(dt) {
     const pic = el.querySelector('.pic').getBoundingClientRect();
     const rect = { x: pic.left - base.left, y: pic.top - base.top, w: pic.width, h: pic.height };
     if (rect.w < 8 || rect.h < 8) continue;
-    renderer.renderInset({ cam: eyeOf(p, v), rect, hide: p.id });
+    // Their gun in their hands, flashing and kicking when they fire.
+    const since = performance.now() - (S.muzzle.get(p.id) || -1e9);
+    const scope = p.ads && p.gun === 'sr';
+    const vm = { held: p.tank != null ? null : p.gun, ads: p.ads ? 1 : 0, kick: Math.max(0, 0.06 - since * 0.0006), flash: since < 50, hide: !p.alive || p.tank != null || scope };
+    renderer.renderInset({ cam: eyeOf(p, v), rect, hide: p.id, vm });
   }
 }
 

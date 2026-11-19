@@ -101,6 +101,24 @@ code { font-family: var(--mono); font-size: 12px; }
 .tile .pic { position: relative; flex: 1; }
 .tile .over { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; font-weight: 700; color: #fff; text-shadow: 1px 1px 2px #000; background: rgba(20, 40, 90, 0.55); padding: 6px; }
 .tile.waiting .over { background: #ece9d8; color: #555; text-shadow: none; font-weight: 400; }
+/* What the player sees on their own screen: a crosshair, the hit mark,
+   red edges when hit, the scope's black ring. */
+.tile .xh, .tile .hm { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: none; font-style: normal; }
+.tile .xh { width: 12px; height: 12px; }
+.tile .xh::before, .tile .xh::after { content: ""; position: absolute; background: #fff; box-shadow: 0 0 1px #000; }
+.tile .xh::before { left: 5px; top: 0; width: 2px; height: 12px; }
+.tile .xh::after { left: 0; top: 5px; width: 12px; height: 2px; }
+.tile.aim .xh { width: 6px; height: 6px; }
+.tile.aim .xh::before { left: 2px; height: 6px; }
+.tile.aim .xh::after { top: 2px; width: 6px; }
+.tile.waiting .xh, .tile.down .xh, .tile.scoped .xh { display: none; }
+.tile .hm { display: none; color: #fff; font-size: 22px; font-weight: 700; text-shadow: 0 0 2px #000; }
+.tile.hit .hm { display: block; }
+.tile.hithead .hm { display: block; color: #ff3030; }
+.tile.hurt .pic { box-shadow: inset 0 0 18px 4px rgba(220, 20, 20, 0.75); }
+.tile.scoped .pic::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(circle at 50% 50%, transparent 0 34%, #000 35%),
+    linear-gradient(#000, #000) 50% 50% / 1px 68% no-repeat, linear-gradient(#000, #000) 50% 50% / 38% 1px no-repeat; }
 /* Status bar under the picture. */
 .sbar { display: grid; grid-template-columns: 1fr auto auto; gap: 2px; height: 22px; padding: 2px; background: var(--window); font-size: 11px; color: #000; }
 .sbar > * { display: flex; align-items: center; gap: 4px; padding: 0 5px; border: 1px solid; border-color: #aca899 #fff #fff #aca899; white-space: nowrap; font-variant-numeric: tabular-nums; }

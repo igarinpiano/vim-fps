@@ -1886,11 +1886,14 @@ function onMessage(m) {
       break;
     case 'shot': {
       const mine = m.id === game.myId;
+      // Through someone's eyes, their shots look and sound like your own.
+      const eyes = m.id === eyesId();
       if (!mine) game.shots.push({ x: m.from.x, z: m.from.z, id: m.id, t: performance.now() });
+      muzzleAt.set(m.id, performance.now());
       if (game.director) game.director.note('shot', m.id);
-      if (renderer) renderer.tracer(m.from, m.to, mine, m.vel, game.specs && game.specs.gravity);
-      sound.shot(m.gun, mine ? null : m.from);
-      if (mine) {
+      if (renderer) renderer.tracer(m.from, m.to, eyes, m.vel, game.specs && game.specs.gravity);
+      sound.shot(m.gun, eyes ? null : m.from);
+      if (eyes) {
         if (renderer) renderer.muzzle();
         if (settings.get('bob')) game.kick = 0.06;
       }
@@ -1898,16 +1901,17 @@ function onMessage(m) {
     }
     case 'shell': {
       const mine = m.id === game.myId;
+      const eyes = m.id === eyesId();
       if (!mine) game.shots.push({ x: m.from.x, z: m.from.z, id: m.id, t: performance.now() });
       if (game.director) game.director.note('shot', m.id);
       if (renderer) renderer.shell(m.from, m.to, m.vel, game.specs && game.specs.gravity);
-      sound.cannon(mine ? null : m.from);
-      if (mine && settings.get('bob')) game.kick = 0.12;
+      sound.cannon(eyes ? null : m.from);
+      if (eyes && settings.get('bob')) game.kick = 0.12;
       break;
     }
     case 'hit':
       if (game.director && m.victim) game.director.note('hit', m.attacker, m.victim);
-      if (m.attacker === game.myId && m.victim !== game.myId) {
+      if (m.attacker === eyesId() && m.victim !== m.attacker) {
         const hm = $('hitmarker');
         hm.classList.toggle('head', m.head);
         show('hitmarker');
@@ -1917,6 +1921,11 @@ function onMessage(m) {
         const snap = game.snaps[game.snaps.length - 1];
         const v = snap && snap.players.get(m.victim);
         if (v && renderer && settings.get('dmgnum')) renderer.damageNumber({ x: v.x, y: v.y + (m.head ? 2.0 : 1.4), z: v.z }, m.dmg, m.head);
+      }
+      if (game.watching && m.victim === eyesId() && m.attacker !== m.victim) {
+        // The one you watch through was hit: the arc toward the shooter.
+        damageArc(m.from);
+        sound.hurt();
       }
       if (m.victim === game.myId) {
         damageArc(m.from);
@@ -2031,6 +2040,18 @@ function onMessage(m) {
 }
 
 let hitTimer = null;
+
+/// Whose eyes the screen shows: yours while playing, the followed
+/// player's while watching through them (not the automatic, free or sky
+/// camera). null: nobody's.
+function eyesId() {
+  if (!game.watching) return game.myId;
+  if (game.auto || game.free || game.sky) return null;
+  return game.follow;
+}
+
+/// When each player last fired (the muzzle flash in the wipe).
+const muzzleAt = new Map();
 
 /// A fresh start (a respawn, a new match): nothing carries over from the
 /// life before — not VIEW (aiming), not an open inventory or map, and for a
@@ -3192,8 +3213,11 @@ function watchFrame(now, dt) {
     renderer.setHeld(null);
     const rect = target && target.alive ? pipRect() : null;
     if (rect) {
-      // The wipe: what the followed player sees.
-      inset = { cam: eyesOf(target), rect, hide: target.id };
+      // The wipe: what the followed player sees, gun and all.
+      const flash = performance.now() - (muzzleAt.get(target.id) || -1e9) < 50;
+      const inTank = target.tank != null;
+      const scope = target.ads && target.gun === 'sr';
+      inset = { cam: eyesOf(target), rect, hide: target.id, vm: { held: inTank ? null : target.gun, ads: target.ads ? 1 : 0, kick: flash ? 0.04 : 0, flash, hide: inTank || scope } };
     }
     showPip(rect, target ? nameOf(target.id) : '');
   } else if (game.sky) {
@@ -3252,7 +3276,8 @@ function watchFrame(now, dt) {
     scoped = target.ads && target.gun === 'sr' && !inTank;
     cam = eyesOf(target);
     renderer.setHeld(inTank ? null : target.gun || null);
-    vm = { ads: target.ads ? 1 : 0, hide: scoped || inTank, bob: 0, kick: 0 };
+    // Their shots kick the gun as your own do (see 'shot').
+    vm = { ads: target.ads ? 1 : 0, hide: scoped || inTank, bob: 0, kick: game.kick };
   }
   if (!auto) showPip(null);
   show('scope', scoped);
@@ -3264,6 +3289,7 @@ function watchFrame(now, dt) {
   game.yaw = cam.yaw;
   game.pitch = cam.pitch;
   game.fov = cam.fov;
+  game.kick = settings.get('bob') ? Math.max(0, game.kick - dt * 0.6) : 0;
   renderer.updateEffects(dt);
   renderer.render(cam, vm, inset);
   sound.listener(cam.x, cam.y, cam.z, cam.yaw, cam.pitch || 0);
