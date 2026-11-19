@@ -288,6 +288,7 @@ const HELP = [
   '  :texture             自分の画像を地面・壁などに貼る (:texture だけで使い方と一覧)',
   '  :sounds              起動音・エラー音・終了音のファイルの状態',
   '  :speakers            サラウンド (5.1 / 7.1 など) の設定とスピーカーのテスト (:speakers test)',
+  '  :set nospatial       空間オーディオ (遠くの音・壁の向こうの音がこもる、建物の響き) を切る  :set reverb=50 響きを半分に',
   '  :eq                  イコライザー (低音を強くするなど。:eq bass  :eq steps  :eq off  :eq load でファイル)',
   '  :skin                スキン (テクスチャ・効果音・UI の色をまとめたもの)',
   '  :mkvimrc             設定を .vimfpsrc に書き出す  :source  .vimfpsrc を読み込む (:help config)',
@@ -1126,6 +1127,9 @@ function showSpeakers() {
   L.push('');
   L.push('  :speakers test   各スピーカーから順に音を出して確かめる');
   L.push('');
+  L.push(`空間オーディオ: ${settings.get('spatial') ? `オン (響き ${settings.get('reverb')}%)` : 'オフ'}  — 壁の向こうや遠くの音がこもり、建物の中と外で響きが変わります (:set nospatial / :set reverb=50)`);
+  L.push('  Windows Sonic / Dolby Atmos for Headphones をオンにすると出力が 7.1 に見えることが多く、:speakers auto で OS の立体音響を使えます。');
+  L.push('');
   L.push('5.1 / 7.1 で鳴らすには、OS の音声出力を 5.1 / 7.1 にしてください (Windows: サウンドの設定 → スピーカーの構成)。');
   L.push('出力が 2 チャンネルのままだと、ブラウザーは 2 チャンネルしか出せません (上の「最大」の数)。');
   showMsg(':speakers — サラウンド', L);
@@ -1751,6 +1755,7 @@ async function onWelcome(m) {
   game.myId = m.id;
   game.map = m.map;
   game.world = new World(m.map);
+  sound.setWorld(game.world);
   game.specs = m.specs;
   game.range = !!m.range;
   game.respawnMode = m.respawn !== false;
@@ -2640,7 +2645,7 @@ function frame(now) {
       fov: game.fov,
     };
     renderer.render(cam, { ads: game.adsK, hide: scoped || !game.alive || !!tank, bob: bobY, kick: game.kick });
-    sound.listener(cam.x, cam.y, cam.z, game.yaw);
+    sound.listener(cam.x, cam.y, cam.z, game.yaw, cam.pitch || 0);
     if (vim.mode === 'map') drawMap();
   }
   touch.setScene(touchScene());
@@ -3100,7 +3105,7 @@ function watchFrame(now, dt) {
   game.fov = cam.fov;
   renderer.updateEffects(dt);
   renderer.render(cam, vm, inset);
-  sound.listener(cam.x, cam.y, cam.z, cam.yaw);
+  sound.listener(cam.x, cam.y, cam.z, cam.yaw, cam.pitch || 0);
   if (vim.mode === 'map') drawMap();
 }
 

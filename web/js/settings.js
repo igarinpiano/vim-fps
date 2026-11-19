@@ -23,6 +23,8 @@ export const OPTIONS = {
   timeoutlen: { type: 'number', def: 1000, min: 50, max: 10000, alias: ['tm'], desc: 'dd や gt の 2 打目を待つ時間 (ミリ秒)' },
   volume: { type: 'number', def: 70, min: 0, max: 100, alias: ['vol'], desc: '音量 (0-100)' },
   speakers: { type: 'enum', values: SPEAKER_MODES, def: 'headphones', alias: ['spk'], desc: '音の出し方: headphones (ヘッドホンで立体音響) / stereo / quad / 5.1 / 7.1 (スピーカーの数だけチャンネルを出す) / auto (出力のチャンネル数で選ぶ)。:speakers で確認とテスト' },
+  spatial: { type: 'bool', def: true, desc: '空間オーディオ: 遠くの音ほどこもる・壁や丘の向こうの音はこもって小さくなる・建物の中と外で響きが変わる (off: 方向と距離だけ)' },
+  reverb: { type: 'number', def: 100, min: 0, max: 200, desc: '響き (残響) の大きさ (%)。0 で響きなし。spatial のときだけ' },
   eq: { type: 'string', def: 'off', maxlen: 600, validate: eqError, desc: 'イコライザー: プリセット名 (bass / steps など) か ls100:+6,pk3k:+3:1.4 のようなフィルターの並び (:eq で一覧とグラフ)' },
   showcmd: { type: 'bool', def: true, alias: ['sc'], desc: '入力途中のキーを表示' },
   showfps: { type: 'bool', def: false, desc: 'FPS を表示' },
