@@ -104,9 +104,13 @@ export function applyRc(cmds, handlers) {
 
 /// The custom match (the form on the title screen), and what each value
 /// may be: [min, max] for numbers, a list for words.
+/// Most bots in the browser (it runs and draws the match itself; a host
+/// takes up to 500). Kept equal to MAX_BOTS_BROWSER in crates/vimfps-core.
+export const MAX_BOTS_BROWSER = 100;
+
 export const CUSTOM_DEFAULTS = { bots: 5, skill: 3, rule: 'ffa', time: 10, frags: 25, ring: 'on', tanks: 'on', seed: 0 };
 export const CUSTOM_SPEC = {
-  bots: [0, 15],
+  bots: [0, MAX_BOTS_BROWSER],
   skill: [1, 5],
   rule: ['ffa', 'last'],
   time: [1, 60],

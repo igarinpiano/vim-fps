@@ -153,7 +153,10 @@ body:not(.touch) .btnrow { display: none; }
 body.touch #chatwin, body.touch #cmdwin { top: 56px; bottom: auto; z-index: 45; }
 body.touch .xpbtn { min-height: 40px; font-size: 15px; flex: 1; }
 #msgwin { left: 50%; top: 45%; transform: translate(-50%, -50%); max-width: calc(100vw - 32px); z-index: 26; }
-#msg-body { margin: 0; font: 13px/1.5 var(--mono); background: #fff; border: 1px solid #7f9db9; padding: 8px 10px; max-height: calc(100vh - 200px); max-width: calc(100vw - 60px); overflow: auto; white-space: pre; min-width: min(560px, calc(100vw - 60px)); }
+/* Lines of a whole number of pixels, and the space around them a border
+   (which does not scroll): j / k move exactly one line, and the top line
+   always shows whole. */
+#msg-body { margin: 0; font: 13px/20px var(--mono); background: #fff; border: solid #fff; border-width: 8px 10px; box-shadow: 0 0 0 1px #7f9db9; padding: 0; max-height: calc(100vh - 200px); max-height: calc(round(down, 100vh - 216px, 20px) + 16px); max-width: calc(100vw - 60px); overflow: auto; white-space: pre; min-width: min(560px, calc(100vw - 60px)); }
 #msg-body .err { color: #c00000; }
 /* Death: stop screen and reboot (they cover everything, the taskbar too). */
 #bsod { position: fixed; inset: 0; z-index: 100; background: #0000aa; color: #fff; display: flex; align-items: center; justify-content: center; padding: 16px; }

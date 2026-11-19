@@ -215,8 +215,8 @@ body[data-phase="countdown"] #phase-clock { color: #b36b00; }
 #msgwin { position: fixed; left: 50%; top: 42%; transform: translate(-50%, -50%); min-width: min(360px, calc(100vw - 32px)); max-width: calc(100vw - 32px); }
 #msg-row { display: flex; gap: 12px; align-items: flex-start; }
 #msg-icon { flex: none; width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; font: 700 20px var(--font); color: #fff; background: radial-gradient(circle at 35% 30%, #7fb1ff, #1d4fc4); border: 1px solid #0b3a9e; }
-#msg-body { margin: 0; font: 13px/1.55 var(--mono); white-space: pre-wrap; max-height: calc(100vh - 220px); overflow: auto; min-width: 0; flex: 1; }
-#msg-body.plain { font-family: var(--font); background: transparent; border: 0; padding: 4px 0; }
+#msg-body { margin: 0; font: 13px/20px var(--mono); border: solid #fff; border-width: 8px 10px; box-shadow: 0 0 0 1px #7f9db9; padding: 0; white-space: pre-wrap; max-height: calc(100vh - 220px); max-height: calc(round(down, 100vh - 236px, 20px) + 16px); overflow: auto; min-width: 0; flex: 1; }
+#msg-body.plain { font-family: var(--font); background: transparent; border: 0; box-shadow: none; padding: 4px 0; }
 #msg-btns { margin-top: 12px; }
 #msg-btns:empty { display: none; }
 

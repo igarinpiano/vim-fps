@@ -9,7 +9,7 @@ import { Director } from './director.js';
 import { Sound, EVENT_SOUNDS } from './audio.js';
 import { TEXTURE_SLOTS, MAX_TEXTURE_BYTES, TextureStore, slotOf, parseSize, loadImage, fetchPack } from './textures.js';
 import { Profile } from './profile.js';
-import { parseRc, applyRc, buildRc, customCommand, tokenize, isRcName, CUSTOM_DEFAULTS, RC_NAME, DOC_URL } from './rc.js';
+import { parseRc, applyRc, buildRc, customCommand, tokenize, isRcName, CUSTOM_DEFAULTS, MAX_BOTS_BROWSER, RC_NAME, DOC_URL } from './rc.js';
 import { SkinStore, skinLayer, skinName, readBundle, readZip, writeZip, filesFromDrop, UI_VARS } from './skin.js';
 import { VERSION } from './version.js';
 import { halfWidth } from './lens.js';
@@ -54,6 +54,8 @@ const game = {
   // once they have.
   lobby: false,
   countdown: null,
+  // The results end in the waiting room (a host's admin starts the next match).
+  toLobby: false,
   pos: { x: 0, y: 0, z: 0 },
   vel: { x: 0, z: 0 },
   yaw: 0,
@@ -124,6 +126,7 @@ function resetGame() {
     intermission: null,
     lobby: false,
     countdown: null,
+    toLobby: false,
     lastInput: '',
     watching: false,
     follow: null,
@@ -561,7 +564,7 @@ function runCommand(line) {
       else connect('');
       break;
     case 'bots':
-      if (game.practice && game.conn) game.conn.send({ t: 'bots', n: Math.max(0, Math.min(15, parseInt(args, 10) || 0)) });
+      if (game.practice && game.conn) game.conn.send({ t: 'bots', n: Math.max(0, Math.min(MAX_BOTS_BROWSER, parseInt(args, 10) || 0)) });
       else balloon('E: :bots は練習モードだけで使えます', '', 'err');
       break;
     case 'botskill':
@@ -2018,6 +2021,8 @@ function onMessage(m) {
       sound.event('startup');
       break;
     case 'match_end':
+      // A host's admin starts the next match: back to waiting, not "next match".
+      game.toLobby = !!m.to_lobby;
       showResult(m);
       sound.event('shutdown');
       break;
@@ -2298,13 +2303,14 @@ function showResult(m) {
 /// The clock in the task bar.
 function clockText() {
   if (game.lobby) return game.countdown != null ? `開始 ${Math.ceil(game.countdown)}` : '待機中';
-  return game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left);
+  if (game.intermission != null) return `${game.toLobby ? '待機へ' : '次'} ${fmtTime(game.intermission)}`;
+  return fmtTime(game.left);
 }
 
 /// Under the result table: what follows it.
 function resultNext() {
   const n = Math.ceil(game.intermission);
-  return serverInfo && serverInfo.managed && !game.practice ? `${n} 秒後に結果を閉じます (次の試合は管理者が開始)` : `${n} 秒後に次の試合`;
+  return game.toLobby ? `${n} 秒後に待機画面へ戻ります (次の試合は管理者が開始します)` : `${n} 秒後に次の試合`;
 }
 
 // ---------------------------------------------------------------- waiting room
@@ -2365,6 +2371,7 @@ function onSnap(m) {
   if (!m.watching && game.watching && m.me) stopWatching();
   const wasLobby = game.lobby;
   game.lobby = !!m.lobby;
+  game.toLobby = !!m.to_lobby;
   game.countdown = m.countdown ?? null;
   if (game.lobby && !wasLobby) enterLobby();
   else if (!game.lobby && wasLobby) showLobby(false);
@@ -2592,10 +2599,16 @@ const vim = new Vim(settings, {
   msgScroll(kind, n) {
     const body = $('msg-body');
     const line = parseFloat(getComputedStyle(body).lineHeight) || 20;
-    const page = Math.max(line, body.clientHeight - line);
-    if (kind === 'line') body.scrollTop += n * line;
-    else if (kind === 'half') body.scrollTop += n * Math.round(page / 2);
-    else if (kind === 'page') body.scrollTop += n * page;
+    // In whole lines, from the line now at the top (no drift, no half
+    // lines at the top).
+    const rows = Math.max(1, Math.floor(body.clientHeight / line));
+    const at = Math.round(body.scrollTop / line);
+    const to = (k) => {
+      body.scrollTop = Math.max(0, k) * line;
+    };
+    if (kind === 'line') to(at + n);
+    else if (kind === 'half') to(at + n * Math.max(1, Math.floor(rows / 2)));
+    else if (kind === 'page') to(at + n * Math.max(1, rows - 1));
     else if (kind === 'top') body.scrollTop = 0;
     else if (kind === 'bottom') body.scrollTop = body.scrollHeight;
     else if (kind === 'side') body.scrollLeft += n * 8 * (line / 1.5);
@@ -3047,7 +3060,7 @@ function updateNetStats(now) {
 
 const SKILL_NAMES = ['とても弱い', '弱い', '普通', '強い (偏差撃ち)', 'とても強い (偏差撃ち)'];
 const CUSTOM_ROWS = [
-  { key: 'bots', label: 'bot の数', values: [...Array(16).keys()], fmt: (v) => `${v} 体` },
+  { key: 'bots', label: 'bot の数', values: [...Array(MAX_BOTS_BROWSER + 1).keys()], fmt: (v) => `${v} 体${v > 40 ? ' (重くなります)' : ''}` },
   { key: 'skill', label: 'bot の強さ', values: [1, 2, 3, 4, 5], fmt: (v) => `${v} · ${SKILL_NAMES[v - 1]}` },
   { key: 'rule', label: 'ルール', values: ['ffa', 'last'], fmt: (v) => (v === 'ffa' ? '個人戦 (復活あり)' : '復活なし (最後の 1 人が勝ち)') },
   { key: 'time', label: '時間', values: [3, 5, 10, 15, 20, 30, 60], fmt: (v) => `${v} 分` },

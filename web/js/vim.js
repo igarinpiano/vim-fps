@@ -115,8 +115,8 @@ export class Vim {
     }
     if (ev.repeat) {
       // Held keys are tracked by down/up; OS key repeat is ignored except
-      // for list navigation.
-      return this.mode === 'inventory' || this.mode === 'menu' ? this.keyDown(ev, key) : true;
+      // for lists and pages (held j / k keep going).
+      return this.mode === 'inventory' || this.mode === 'menu' || this.mode === 'msg' ? this.keyDown(ev, key) : true;
     }
     // Ctrl is free for the browser except Esc (Ctrl-[) and paging a message.
     if (ev.ctrl && key !== 'Escape' && !(this.mode === 'msg' && /^[dufbey]$/i.test(key))) return false;

@@ -32,14 +32,14 @@ pub struct HostArgs {
     /// 合言葉 (招待 URL の #pw=... に入る)
     #[arg(long)]
     pub password: Option<String>,
-    /// bot の数 (0〜15)
+    /// bot の数 (0〜500。150 を超えるとホストの処理が追いつかず試合が遅くなります)
     #[arg(long, default_value_t = 0)]
     pub bots: u32,
     /// bot の強さ: 1 とても弱い / 2 弱い / 3 普通 / 4 強い (偏差撃ち) / 5 とても強い
     #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(1..=5))]
     pub bot_skill: u8,
-    /// 最大人数 (bot を除く)
-    #[arg(long, default_value_t = 12)]
+    /// 最大人数 (bot・観戦を除く)
+    #[arg(long, default_value_t = 100)]
     pub max_players: usize,
     /// 1 試合の長さ (分)
     #[arg(long, default_value_t = 10.0)]
@@ -113,7 +113,7 @@ impl Default for HostArgs {
             password: None,
             bots: 0,
             bot_skill: 3,
-            max_players: 12,
+            max_players: 100,
             time_limit: 10.0,
             frag_limit: 25,
             seed: None,
@@ -706,7 +706,7 @@ async fn admin_client(mut socket: WebSocket, st: AppState, ip: IpAddr) {
             return;
         }
     };
-    let (tx, mut rx) = mpsc::channel::<Arc<str>>(1024);
+    let (tx, mut rx) = mpsc::channel::<Arc<str>>(8192);
     let (reply_tx, reply_rx) = oneshot::channel();
     if st
         .events
@@ -773,7 +773,9 @@ async fn client(mut socket: WebSocket, st: AppState, ip: IpAddr) {
     else {
         return;
     };
-    let (tx, mut rx) = mpsc::channel::<Arc<str>>(512);
+    // Roomy: a crowded match sends many messages a tick (a client is
+    // dropped only when this fills).
+    let (tx, mut rx) = mpsc::channel::<Arc<str>>(4096);
     let (reply_tx, reply_rx) = oneshot::channel();
     if st
         .events
@@ -959,6 +961,7 @@ async fn game_loop(
                             version: vimfps_core::VERSION.into(),
                             map: Box::new(room.map.clone()),
                             specs: Box::new(Specs::current()),
+                            max_bots: vimfps_core::sim::MAX_BOTS,
                         };
                         if let Some(m) = json(&welcome) {
                             let _ = tx.try_send(m);

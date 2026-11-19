@@ -340,6 +340,10 @@ pub enum ServerMsg {
         /// Seconds until the match the admin started begins.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         countdown: Option<f32>,
+        /// After these results, back to the waiting room (the admin may
+        /// turn "next match by itself" on or off meanwhile).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        to_lobby: bool,
     },
     Roster {
         players: Vec<RosterEntry>,
@@ -404,6 +408,10 @@ pub enum ServerMsg {
     MatchEnd {
         ranking: Vec<RosterEntry>,
         next_in: f32,
+        /// After the results: back to the waiting room (the admin starts
+        /// the next match), not straight into the next match.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        to_lobby: bool,
     },
     /// A match began: its rules (the admin may have changed them).
     MatchStart {
@@ -579,6 +587,9 @@ pub enum AdminOut {
         version: String,
         map: Box<Map>,
         specs: Box<Specs>,
+        /// Most bots the host takes.
+        #[serde(default)]
+        max_bots: u32,
     },
     AdminState {
         #[serde(flatten)]

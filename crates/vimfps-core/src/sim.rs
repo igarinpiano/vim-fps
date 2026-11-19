@@ -34,7 +34,26 @@ pub const CHAT_MAX: usize = 120;
 pub const WEAPON_RESPAWN: f32 = 30.0;
 pub const ITEM_RESPAWN: f32 = 20.0;
 pub const DROP_TTL: f32 = 30.0;
-pub const MAX_BOTS: u32 = 15;
+/// Most bots a room holds. A host keeps up at 60 ticks a second to about
+/// 150 (≈0.1 ms a bot a tick); past that the match slows down, and at 500
+/// it runs at about 40 % speed (and each snapshot is ~60 KB a player).
+pub const MAX_BOTS: u32 = 500;
+/// More players than this (people and bots) make a crowd: the roster and the
+/// pickups are sent at most every CROWD_LIST_EVERY seconds.
+pub const CROWD: usize = 32;
+pub const CROWD_LIST_EVERY: f32 = 0.5;
+
+/// Most bots in the browser (it simulates and draws the match itself).
+pub const MAX_BOTS_BROWSER: u32 = 100;
+
+/// Most bots this room takes: the browser's practice has its own limit.
+pub fn bot_cap(cfg: &Config) -> u32 {
+    if cfg.practice {
+        MAX_BOTS_BROWSER
+    } else {
+        MAX_BOTS
+    }
+}
 /// Bots see enemies this far (with a clear line of sight).
 pub const BOT_SIGHT: f32 = 150.0;
 /// Bots hear gunshots this far, and running footsteps within BOT_FOOTSTEPS.
@@ -211,7 +230,7 @@ impl Default for Config {
             seed: 1,
             time_limit: 600.0,
             frag_limit: 25,
-            max_players: 12,
+            max_players: 100,
             password: None,
             practice: false,
             bots: 0,
@@ -324,7 +343,7 @@ pub fn bot_skill(level: u8) -> BotSkill {
 /// the rack.
 pub const RANGE_RESPAWN: f32 = 1.0;
 /// How many spectators may watch at once (on top of max_players).
-pub const MAX_SPECTATORS: usize = 32;
+pub const MAX_SPECTATORS: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -543,6 +562,10 @@ pub struct Room {
     /// Rules the admin set for the next match.
     next: Option<MatchSettings>,
     snap_acc: f32,
+    /// Since the roster and the list of pickups were last sent (a crowded
+    /// room sends them at most every CROWD_LIST_EVERY seconds).
+    roster_wait: f32,
+    pickups_wait: f32,
     out: Vec<(Target, ServerMsg)>,
     bots_wanted: u32,
     /// Walking routes for bots (built from the map on first use).
@@ -620,7 +643,7 @@ impl Room {
             bots_wanted: if cfg.range {
                 cfg.bots
             } else {
-                cfg.bots.min(MAX_BOTS)
+                cfg.bots.min(bot_cap(&cfg))
             },
             cfg,
             map,
@@ -641,6 +664,8 @@ impl Room {
             auto: false,
             next: None,
             snap_acc: 0.0,
+            roster_wait: 0.0,
+            pickups_wait: 0.0,
             out: Vec::new(),
             nav: std::sync::OnceLock::new(),
         };
@@ -1462,7 +1487,7 @@ impl Room {
     }
 
     pub fn set_bots(&mut self, n: u32) {
-        self.bots_wanted = n.min(MAX_BOTS);
+        self.bots_wanted = n.min(bot_cap(&self.cfg));
         self.sync_bots();
     }
 
@@ -1902,13 +1927,25 @@ impl Room {
             self.snap_acc = 0.0;
             self.snapshot();
         }
-        if self.roster_dirty {
+        // The roster and the pickups go whole. In a crowd they change on
+        // almost every tick (hundreds of bots dying and dropping guns): at
+        // most twice a second there, at once otherwise.
+        let every = if self.players.len() > CROWD {
+            CROWD_LIST_EVERY
+        } else {
+            0.0
+        };
+        self.roster_wait += dt;
+        self.pickups_wait += dt;
+        if self.roster_dirty && self.roster_wait >= every {
             self.roster_dirty = false;
+            self.roster_wait = 0.0;
             let players = self.roster();
             self.send(Target::All, ServerMsg::Roster { players });
         }
-        if self.pickups_dirty {
+        if self.pickups_dirty && self.pickups_wait >= every {
             self.pickups_dirty = false;
+            self.pickups_wait = 0.0;
             let list = self
                 .pickups
                 .iter()
@@ -1989,6 +2026,7 @@ impl Room {
             ServerMsg::MatchEnd {
                 ranking,
                 next_in: INTERMISSION,
+                to_lobby: self.cfg.managed && !self.auto,
             },
         );
     }
@@ -2084,7 +2122,7 @@ impl Room {
         self.cfg.respawn = s.respawn;
         self.cfg.ring = s.ring;
         self.cfg.tanks = s.tanks;
-        self.cfg.bots = s.bots.min(MAX_BOTS);
+        self.cfg.bots = s.bots.min(bot_cap(&self.cfg));
         self.set_bots(self.cfg.bots);
     }
 
@@ -2110,7 +2148,7 @@ impl Room {
 
     /// The number of bots, at once (also in a match under way).
     pub fn admin_bots(&mut self, n: u32) -> Result<String, String> {
-        let n = n.min(MAX_BOTS);
+        let n = n.min(bot_cap(&self.cfg));
         self.set_bots(n);
         self.cfg.bots = n;
         if let Some(s) = &mut self.next {
@@ -2229,7 +2267,7 @@ impl Room {
         let s = MatchSettings {
             time_limit: s.time_limit.clamp(0.5, MAX_TIME_LIMIT),
             frag_limit: s.frag_limit.clamp(1, 999),
-            bots: s.bots.min(MAX_BOTS),
+            bots: s.bots.min(bot_cap(&self.cfg)),
             bot_skill: s.bot_skill.clamp(1, 5),
             ..s
         };
@@ -3018,6 +3056,7 @@ impl Room {
                         ring: ring.clone(),
                         lobby: self.lobby,
                         countdown: self.countdown.map(|t| t.max(0.0).ceil()),
+                        to_lobby: self.cfg.managed && !self.auto,
                     },
                 ));
                 continue;
@@ -3053,6 +3092,7 @@ impl Room {
                     ring: ring.clone(),
                     lobby: false,
                     countdown: None,
+                    to_lobby: self.cfg.managed && !self.auto,
                 },
             ));
         }
@@ -5132,8 +5172,15 @@ mod tests {
                 .iter()
                 .any(|(_, m)| matches!(m, ServerMsg::MatchStart { .. }))
         );
-        // The admin ends it: results, then back to waiting (not a new match).
+        // The admin ends it: results, then back to waiting (not a new match),
+        // and the result screen says so.
+        r.drain();
         r.admin_end().unwrap();
+        assert!(
+            r.drain()
+                .iter()
+                .any(|(_, m)| matches!(m, ServerMsg::MatchEnd { to_lobby: true, .. }))
+        );
         assert_eq!(r.phase(), Phase::Results);
         for _ in 0..((INTERMISSION * 60.0) as usize + 5) {
             r.tick(1.0 / 60.0);
@@ -5217,7 +5264,15 @@ mod tests {
         // With auto on, the next match follows the results by itself.
         r.set_auto(true);
         r.admin_start(0.0).unwrap();
+        r.drain();
         r.admin_end().unwrap();
+        assert!(r.drain().iter().any(|(_, m)| matches!(
+            m,
+            ServerMsg::MatchEnd {
+                to_lobby: false,
+                ..
+            }
+        )));
         for _ in 0..((INTERMISSION * 60.0) as usize + 5) {
             r.tick(1.0 / 60.0);
         }
@@ -5249,5 +5304,89 @@ mod tests {
         assert_eq!((st.phase, st.countdown), (Phase::Countdown, Some(5.0)));
         let json = serde_json::to_string(&st).unwrap();
         assert!(!json.contains("alice"), "no names: {json}");
+    }
+}
+
+#[cfg(test)]
+mod caps {
+    use super::*;
+
+    #[test]
+    fn hosts_take_hundreds_of_bots_and_the_browser_a_hundred() {
+        let mut host = Room::new(Config {
+            seed: 3,
+            bots: 10_000,
+            ..Default::default()
+        });
+        assert_eq!(host.bots_wanted, MAX_BOTS);
+        host.admin_bots(250).unwrap();
+        assert_eq!(
+            host.players.values().filter(|p| p.bot.is_some()).count(),
+            250
+        );
+        let practice = Room::new(Config {
+            seed: 3,
+            bots: 10_000,
+            practice: true,
+            ..Default::default()
+        });
+        assert_eq!(practice.bots_wanted, MAX_BOTS_BROWSER);
+        // Many people (the default lets 100 in).
+        let mut r = Room::new(Config {
+            seed: 3,
+            ..Default::default()
+        });
+        for i in 0..100 {
+            r.join(&format!("p{i}"), None, PROTOCOL, false).unwrap();
+        }
+        assert!(r.join("one-too-many", None, PROTOCOL, false).is_err());
+        assert!(r.join("watcher", None, PROTOCOL, true).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// How long a tick takes with many bots (cargo test --release -- --ignored bench_bots --nocapture).
+    #[test]
+    #[ignore]
+    fn bench_bots() {
+        let sizes: Vec<u32> = std::env::var("BENCH_BOTS")
+            .ok()
+            .map(|v| v.split(',').filter_map(|x| x.parse().ok()).collect())
+            .unwrap_or_else(|| vec![15, 50, 100, 200, 300, 500]);
+        let warm: usize = std::env::var("BENCH_WARM")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120);
+        for n in sizes {
+            let mut r = Room::new(Config {
+                seed: 7,
+                bots: n,
+                ..Default::default()
+            });
+            r.bots_wanted = n;
+            r.sync_bots();
+            // Warm up (paths, first fights).
+            for _ in 0..warm {
+                r.tick(1.0 / 60.0);
+                r.drain();
+            }
+            let t = std::time::Instant::now();
+            let ticks = 300;
+            let mut bytes = 0;
+            for _ in 0..ticks {
+                r.tick(1.0 / 60.0);
+                for (_, m) in r.drain() {
+                    if matches!(m, ServerMsg::Snap { .. }) {
+                        bytes = serde_json::to_string(&m).unwrap().len();
+                    }
+                }
+            }
+            let ms = t.elapsed().as_secs_f64() * 1000.0 / ticks as f64;
+            let alive = r.players.values().filter(|p| p.alive).count();
+            println!("bots {n:4}: {ms:6.2} ms/tick  snap {bytes} bytes  alive {alive}");
+        }
     }
 }
