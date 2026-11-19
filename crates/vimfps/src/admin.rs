@@ -202,7 +202,7 @@ pub const HELP: &str = "\
   auto on|off         結果のあと、次の試合を自動で始めるか
   set 項目=値 ...     次の試合の設定: time=分 frags=キル数 bots=数 skill=1〜5
                       respawn=on|off ring=on|off tanks=on|off
-  bots 数             bot の数をすぐ変える (0〜15)
+  bots 数             bot の数をすぐ変える (0〜500)
   level 名前|番号 1〜5   bot 1 体の強さをすぐ変える (auto で全体の設定に戻す)
   kick 名前|番号      退出させる
   watch 名前|番号     観戦に回す

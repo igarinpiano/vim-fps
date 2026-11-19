@@ -587,6 +587,9 @@ pub enum AdminOut {
         version: String,
         map: Box<Map>,
         specs: Box<Specs>,
+        /// Most bots the host takes.
+        #[serde(default)]
+        max_bots: u32,
     },
     AdminState {
         #[serde(flatten)]

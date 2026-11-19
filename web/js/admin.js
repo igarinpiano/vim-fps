@@ -327,6 +327,7 @@ async function onWelcome(m) {
   storeSet(S.key);
   S.name = m.name;
   S.specs = m.specs;
+  S.maxBots = m.max_bots || 500;
   $('signin').hidden = true;
   $('desk').hidden = false;
   $('admin-name').textContent = m.name;
@@ -534,7 +535,8 @@ function sendPending(key, value, msg) {
 function botRows() {
   const st = S.state;
   const n = pendingOr('bots', st ? st.next.bots : 0);
-  const rows = [{ label: 'bot の数', val: `${n} 体`, adj: (d) => sendPending('bots', clamp(n + d, 0, 15), { t: 'bots', n: clamp(n + d, 0, 15) }) }];
+  const max = S.maxBots || 500;
+  const rows = [{ label: 'bot の数', sub: n > 150 ? '多いとホストが追いつかず試合が遅くなります' : '', val: `${n} 体`, adj: (d) => sendPending('bots', clamp(n + d, 0, max), { t: 'bots', n: clamp(n + d, 0, max) }) }];
   for (const b of bots()) {
     const l = pendingOr(b.id, b.level || 3);
     const set = (v) => sendPending(b.id, v, { t: 'bot_level', id: b.id, level: v });
@@ -627,8 +629,20 @@ function viewable() {
   return players().filter((p) => S.showBots || !p.bot);
 }
 
+/// Most views drawn at once when sized automatically (more go onto pages:
+/// hundreds of bots would leave specks).
+const AUTO_MAX = 25;
+
+/// Views a page holds: the chosen number, or (automatic) everyone up to
+/// AUTO_MAX. 0: all of them, sized to fit.
+function perPage() {
+  if (S.perPage > 0) return S.perPage;
+  return viewable().length > AUTO_MAX ? AUTO_MAX : 0;
+}
+
 function pageCount() {
-  return S.perPage > 0 ? Math.max(1, Math.ceil(viewable().length / S.perPage)) : 1;
+  const per = perPage();
+  return per > 0 ? Math.max(1, Math.ceil(viewable().length / per)) : 1;
 }
 
 /// The camera tile's id (players' tiles go by their numbers).
@@ -651,9 +665,10 @@ function shown() {
   const all = viewable();
   if (S.solo === CAM) return [];
   if (S.solo != null) return all.filter((p) => p.id === S.solo);
-  if (S.perPage <= 0) return all;
+  const per = perPage();
+  if (per <= 0) return all;
   S.page = clamp(S.page, 0, pageCount() - 1);
-  return all.slice(S.page * S.perPage, (S.page + 1) * S.perPage);
+  return all.slice(S.page * per, (S.page + 1) * per);
 }
 
 /// More or fewer views at once (`+` / `-`), or sized to fit (`=`).
@@ -706,7 +721,7 @@ function renderMonitorBar() {
   const n = viewable().length;
   const pages = pageCount();
   const items = [
-    ['per', '表示数', S.perPage > 0 ? `${S.perPage}` : `自動 (${n})`, false],
+    ['per', '表示数', S.perPage > 0 ? `${S.perPage}` : n > AUTO_MAX ? `自動 (${AUTO_MAX} ずつ)` : `自動 (${n})`, false],
     ['page', 'ページ', S.solo != null ? '1 人' : `${S.page + 1} / ${pages}`, pages <= 1 || S.solo != null],
     ['cycle', '巡回', S.cycle > 0 ? `${S.cycle} 秒ごと` : 'しない', pages <= 1],
     ['bots', 'bot', S.showBots ? '出す' : '出さない', false],
@@ -758,7 +773,7 @@ function layoutTiles(force) {
     const gap = 6;
     const bars = 20 + 22 + 2;
     // A fixed number of views keeps one size from page to page.
-    const n = S.solo != null ? 1 : Math.max(1, (S.perPage > 0 ? S.perPage : shown().length) + (camOn() ? 1 : 0));
+    const n = S.solo != null ? 1 : Math.max(1, (perPage() > 0 ? perPage() : shown().length) + (camOn() ? 1 : 0));
     let best = { cols: 1, w: 0 };
     for (let cols = 1; cols <= n; cols++) {
       const rows = Math.ceil(n / cols);

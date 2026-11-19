@@ -9,7 +9,7 @@ import { Director } from './director.js';
 import { Sound, EVENT_SOUNDS } from './audio.js';
 import { TEXTURE_SLOTS, MAX_TEXTURE_BYTES, TextureStore, slotOf, parseSize, loadImage, fetchPack } from './textures.js';
 import { Profile } from './profile.js';
-import { parseRc, applyRc, buildRc, customCommand, tokenize, isRcName, CUSTOM_DEFAULTS, RC_NAME, DOC_URL } from './rc.js';
+import { parseRc, applyRc, buildRc, customCommand, tokenize, isRcName, CUSTOM_DEFAULTS, MAX_BOTS_BROWSER, RC_NAME, DOC_URL } from './rc.js';
 import { SkinStore, skinLayer, skinName, readBundle, readZip, writeZip, filesFromDrop, UI_VARS } from './skin.js';
 import { VERSION } from './version.js';
 import { halfWidth } from './lens.js';
@@ -564,7 +564,7 @@ function runCommand(line) {
       else connect('');
       break;
     case 'bots':
-      if (game.practice && game.conn) game.conn.send({ t: 'bots', n: Math.max(0, Math.min(15, parseInt(args, 10) || 0)) });
+      if (game.practice && game.conn) game.conn.send({ t: 'bots', n: Math.max(0, Math.min(MAX_BOTS_BROWSER, parseInt(args, 10) || 0)) });
       else balloon('E: :bots は練習モードだけで使えます', '', 'err');
       break;
     case 'botskill':
@@ -3060,7 +3060,7 @@ function updateNetStats(now) {
 
 const SKILL_NAMES = ['とても弱い', '弱い', '普通', '強い (偏差撃ち)', 'とても強い (偏差撃ち)'];
 const CUSTOM_ROWS = [
-  { key: 'bots', label: 'bot の数', values: [...Array(16).keys()], fmt: (v) => `${v} 体` },
+  { key: 'bots', label: 'bot の数', values: [...Array(MAX_BOTS_BROWSER + 1).keys()], fmt: (v) => `${v} 体${v > 40 ? ' (重くなります)' : ''}` },
   { key: 'skill', label: 'bot の強さ', values: [1, 2, 3, 4, 5], fmt: (v) => `${v} · ${SKILL_NAMES[v - 1]}` },
   { key: 'rule', label: 'ルール', values: ['ffa', 'last'], fmt: (v) => (v === 'ffa' ? '個人戦 (復活あり)' : '復活なし (最後の 1 人が勝ち)') },
   { key: 'time', label: '時間', values: [3, 5, 10, 15, 20, 30, 60], fmt: (v) => `${v} 分` },

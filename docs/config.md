@@ -55,7 +55,7 @@ host name=週末\ サーバー        " 空白は前に \ を付ける
 
 | キー | 値 | 既定 |
 |---|---|---|
-| `bots` | bot の数 0〜15 | 5 |
+| `bots` | bot の数 0〜100 | 5 |
 | `skill` | bot の強さ 1〜5 | 3 |
 | `rule` | `ffa` (復活あり) / `last` (復活なし: 最後の 1 人が勝ち) | `ffa` |
 | `time` | 試合の長さ (分) 1〜60 | 10 |
@@ -112,9 +112,9 @@ vimfps host --no-config # 設定ファイルを読まずに起動
 | `bind` | `bind=127.0.0.1` | 待ち受けアドレス |
 | `tunnel` | `tunnel` | Cloudflare Quick Tunnel で公開 |
 | `password` | `password=合言葉` | 合言葉 |
-| `bots` | `bots=5` | bot の数 (0〜15) |
+| `bots` | `bots=5` | bot の数 (0〜500) |
 | `bot-skill` | `bot-skill=4` | bot の強さ (1〜5) |
-| `max-players` | `max-players=12` | 最大人数 (bot を除く) |
+| `max-players` | `max-players=100` | 最大人数 (bot・観戦を除く) |
 | `time-limit` | `time-limit=15` | 1 試合の分数 |
 | `frag-limit` | `frag-limit=25` | このキル数で試合終了 |
 | `seed` | `seed=42` | マップのシード |

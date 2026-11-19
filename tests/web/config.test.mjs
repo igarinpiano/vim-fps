@@ -58,7 +58,10 @@ test('rc: custom match values are checked; nothing changes on an error', () => {
   assert.equal(c.bots, 8);
   assert.equal(c.rule, 'last');
   assert.equal(c.time, 7);
-  assert.match(customCommand(['bots=99'], c), /^E474/);
+  // Up to a hundred bots in the browser (a host takes more).
+  assert.equal(customCommand(['bots=100'], c), null);
+  assert.equal(c.bots, 100);
+  assert.match(customCommand(['bots=101'], c), /^E474/);
   assert.match(customCommand(['skill=4', 'ring=maybe'], c), /^E474/);
   assert.equal(c.skill, 3, 'not half-applied');
   assert.match(customCommand(['colour=red'], c), /^E518/);
