@@ -93,6 +93,17 @@
     <div class="body"><table id="result-table"></table><p id="result-next"></p></div>
   </div>
 
+  <!-- Waiting room: the host's admin starts the match -->
+  <div id="lobbywin" class="window hidden" aria-live="polite">
+    <div class="titlebar"><span id="lobby-title">待機中</span></div>
+    <div class="body">
+      <p id="lobby-status"></p>
+      <div id="lobby-count" class="hidden"></div>
+      <ul id="lobby-list"></ul>
+      <p class="hint" id="lobby-hint">待っている間は観戦のキーで見て回れます: <kbd>hjkl</kbd> 移動 · <kbd>o</kbd> 自由視点 · <kbd>O</kbd> 空から · <kbd>m</kbd> マップ · <kbd>i</kbd> チャット</p>
+    </div>
+  </div>
+
   <!-- Custom match -->
   <div id="customwin" class="window hidden">
     <div class="titlebar"><span>カスタムマッチ</span><span class="tb-btns"><i class="x">×</i></span></div>

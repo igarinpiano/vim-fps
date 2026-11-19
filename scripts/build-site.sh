@@ -35,10 +35,13 @@ for d, _, names in os.walk(os.path.join(root, "js")):
             p = os.path.join(d, n)
             src = open(p, encoding="utf-8").read()
             open(p, "w", encoding="utf-8").write(ref.sub(lambda m: f"{m[1]}{m[2]}?v={tag}{m[3]}", src))
-idx = os.path.join(root, "index.html")
-html = open(idx, encoding="utf-8").read()
-html = html.replace('src="js/main.js"', f'src="js/main.js?v={tag}"').replace('href="style.css"', f'href="style.css?v={tag}"')
-open(idx, "w", encoding="utf-8").write(html)
+for page, script in (("index.html", "main.js"), ("admin.html", "admin.js")):
+    idx = os.path.join(root, page)
+    if not os.path.exists(idx):
+        continue
+    html = open(idx, encoding="utf-8").read()
+    html = html.replace(f'src="js/{script}"', f'src="js/{script}?v={tag}"').replace('href="style.css"', f'href="style.css?v={tag}"').replace('href="admin.css"', f'href="admin.css?v={tag}"')
+    open(idx, "w", encoding="utf-8").write(html)
 print(f"cache-busting tag: {tag}")
 version = re.search(r"VERSION = '([^']+)'", open("web/js/version.js").read()).group(1)
 protocol = int(re.search(r"PROTOCOL = (\d+)", open("web/js/net.js").read()).group(1))

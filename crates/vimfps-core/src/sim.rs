@@ -199,6 +199,10 @@ pub struct Config {
     pub ring: bool,
     /// Tanks parked on the field.
     pub tanks: bool,
+    /// Run by an admin (`vimfps host`): the room waits in the lobby until
+    /// the admin starts a match, and goes back there after the results.
+    /// false: matches start by themselves, one after another (practice).
+    pub managed: bool,
 }
 
 impl Default for Config {
@@ -216,9 +220,15 @@ impl Default for Config {
             bot_skill: 3,
             ring: true,
             tanks: true,
+            managed: false,
         }
     }
 }
+
+/// Longest countdown the admin may set (s).
+pub const MAX_COUNTDOWN: f32 = 60.0;
+/// Longest match the admin may set (minutes).
+pub const MAX_TIME_LIMIT: f32 = 120.0;
 
 pub const BOT_SKILL_NAMES: [&str; 5] = ["とても弱い", "弱い", "普通", "強い", "とても強い"];
 
@@ -335,6 +345,8 @@ struct InputState {
 
 #[derive(Debug, Clone)]
 struct Bot {
+    /// Its own skill 1..=5, set by the host's admin (None: the room's).
+    level: Option<u8>,
     waypoint: Vec3,
     wander_timer: f32,
     target: Option<ClientId>,
@@ -522,6 +534,14 @@ pub struct Room {
     ring: Option<Ring>,
     left: f32,
     intermission: Option<f32>,
+    /// Waiting for the admin (managed rooms): nobody is on the field.
+    lobby: bool,
+    /// The admin started a match: seconds until it begins.
+    countdown: Option<f32>,
+    /// After the results, go on to the next match without the admin.
+    auto: bool,
+    /// Rules the admin set for the next match.
+    next: Option<MatchSettings>,
     snap_acc: f32,
     out: Vec<(Target, ServerMsg)>,
     bots_wanted: u32,
@@ -593,6 +613,7 @@ impl Room {
             })
             .collect::<Vec<_>>();
         let next_obj = pickups.len() as u32;
+        let lobby = cfg.managed;
         let mut room = Room {
             rng: Rng::new(cfg.seed.wrapping_mul(31).wrapping_add(17)),
             left: cfg.time_limit,
@@ -615,6 +636,10 @@ impl Room {
             shells: Vec::new(),
             ring: None,
             intermission: None,
+            lobby,
+            countdown: None,
+            auto: false,
+            next: None,
             snap_acc: 0.0,
             out: Vec::new(),
             nav: std::sync::OnceLock::new(),
@@ -1350,6 +1375,14 @@ impl Room {
             self.enter(id);
             self.sys(format!("{name} が参加しました"));
         }
+        if self.lobby {
+            self.send(
+                Target::One(id),
+                ServerMsg::Sys {
+                    text: "待機中です。管理者が試合を開始するまでお待ちください".into(),
+                },
+            );
+        }
         self.pickups_dirty = true;
         Ok(id)
     }
@@ -1358,6 +1391,7 @@ impl Room {
     /// wait out the round watching.
     fn enter(&mut self, id: ClientId) {
         let running = !self.cfg.respawn
+            && !self.lobby
             && self.intermission.is_none()
             && self.cfg.time_limit - self.left > 10.0
             && self.players.values().any(|p| p.id != id && p.alive);
@@ -1452,6 +1486,7 @@ impl Room {
                 n += 1;
             }
             let bot = Bot {
+                level: None,
                 waypoint: Vec3::ZERO,
                 wander_timer: 0.0,
                 target: None,
@@ -1485,6 +1520,14 @@ impl Room {
     }
 
     fn spawn(&mut self, id: ClientId) {
+        if self.lobby {
+            // Waiting for the admin: no one on the field yet.
+            self.unseat(id);
+            if let Some(p) = self.players.get_mut(&id) {
+                p.alive = false;
+            }
+            return;
+        }
         let others: Vec<Vec3> = self
             .players
             .values()
@@ -1692,7 +1735,7 @@ impl Room {
                     },
                 );
             }
-            ClientMsg::Ping { id: n } => self.send(Target::One(id), ServerMsg::Pong { id: n }),
+            ClientMsg::Ping { id: n, .. } => self.send(Target::One(id), ServerMsg::Pong { id: n }),
             ClientMsg::Bots { n } => {
                 if self.cfg.practice && !self.cfg.range {
                     self.set_bots(n);
@@ -1816,10 +1859,21 @@ impl Room {
 
     pub fn tick(&mut self, dt: f32) {
         let dt = dt.clamp(0.0, 0.1);
-        if let Some(t) = &mut self.intermission {
+        if self.lobby {
+            if let Some(t) = &mut self.countdown {
+                *t -= dt;
+                if *t <= 0.0 {
+                    self.start_match();
+                }
+            }
+        } else if let Some(t) = &mut self.intermission {
             *t -= dt;
             if *t <= 0.0 {
-                self.start_match();
+                if self.cfg.managed && !self.auto {
+                    self.enter_lobby();
+                } else {
+                    self.start_match();
+                }
             }
         } else {
             self.left -= dt;
@@ -1829,7 +1883,7 @@ impl Room {
             }
         }
 
-        if self.intermission.is_none() {
+        if self.live() {
             self.think_bots(dt);
             let ids: Vec<ClientId> = self.players.keys().copied().collect();
             for id in ids {
@@ -1941,6 +1995,11 @@ impl Room {
 
     fn start_match(&mut self) {
         self.intermission = None;
+        self.lobby = false;
+        self.countdown = None;
+        if let Some(s) = self.next.take() {
+            self.apply_settings(&s);
+        }
         self.left = self.cfg.time_limit;
         let ids: Vec<ClientId> = self.players.keys().copied().collect();
         for id in &ids {
@@ -1965,7 +2024,375 @@ impl Room {
         self.pickups.retain(|p| p.dropped.is_none());
         self.pickups_dirty = true;
         self.roster_dirty = true;
-        self.send(Target::All, ServerMsg::MatchStart);
+        self.send(
+            Target::All,
+            ServerMsg::MatchStart {
+                respawn: self.cfg.respawn,
+                ring: self.cfg.ring,
+                time_limit: self.cfg.time_limit,
+                frag_limit: self.cfg.frag_limit,
+                bot_skill: self.cfg.bot_skill,
+            },
+        );
+    }
+
+    /// The match is being played (not waiting, counting down or showing
+    /// results).
+    pub fn live(&self) -> bool {
+        !self.lobby && self.intermission.is_none()
+    }
+
+    pub fn phase(&self) -> Phase {
+        if self.lobby {
+            if self.countdown.is_some() {
+                Phase::Countdown
+            } else {
+                Phase::Lobby
+            }
+        } else if self.intermission.is_some() {
+            Phase::Results
+        } else {
+            Phase::Live
+        }
+    }
+
+    /// Into the waiting room: everyone off the field, the field reset.
+    fn enter_lobby(&mut self) {
+        self.lobby = true;
+        self.intermission = None;
+        self.countdown = None;
+        self.grenades.clear();
+        self.bullets.clear();
+        self.shells.clear();
+        for p in self.players.values_mut() {
+            p.alive = false;
+            p.out = false;
+            p.out_at = 0.0;
+            p.reload = None;
+            p.heal = None;
+            p.input = InputState::default();
+        }
+        self.reset_field();
+        self.roster_dirty = true;
+        self.sys("待機中: 管理者が次の試合を開始するまでお待ちください".into());
+    }
+
+    fn apply_settings(&mut self, s: &MatchSettings) {
+        self.cfg.time_limit = (s.time_limit * 60.0).clamp(30.0, MAX_TIME_LIMIT * 60.0);
+        self.cfg.frag_limit = s.frag_limit.max(1);
+        self.cfg.bot_skill = s.bot_skill.clamp(1, 5);
+        self.cfg.respawn = s.respawn;
+        self.cfg.ring = s.ring;
+        self.cfg.tanks = s.tanks;
+        self.cfg.bots = s.bots.min(MAX_BOTS);
+        self.set_bots(self.cfg.bots);
+    }
+
+    /// The rules being played.
+    pub fn settings(&self) -> MatchSettings {
+        MatchSettings {
+            time_limit: self.cfg.time_limit / 60.0,
+            frag_limit: self.cfg.frag_limit,
+            bots: self.bots_wanted,
+            bot_skill: self.cfg.bot_skill,
+            respawn: self.cfg.respawn,
+            ring: self.cfg.ring,
+            tanks: self.cfg.tanks,
+        }
+    }
+
+    /// The rules of the next match.
+    pub fn next_settings(&self) -> MatchSettings {
+        let mut s = self.next.clone().unwrap_or_else(|| self.settings());
+        s.bots = self.bots_wanted;
+        s
+    }
+
+    /// The number of bots, at once (also in a match under way).
+    pub fn admin_bots(&mut self, n: u32) -> Result<String, String> {
+        let n = n.min(MAX_BOTS);
+        self.set_bots(n);
+        self.cfg.bots = n;
+        if let Some(s) = &mut self.next {
+            s.bots = n;
+        }
+        self.sys(format!("bot の数: {n}"));
+        Ok(format!("bot を {n} 体にしました"))
+    }
+
+    /// One bot's skill (None: back to the room's), at once.
+    pub fn admin_bot_level(&mut self, id: ClientId, level: Option<u8>) -> Result<String, String> {
+        let room = self.cfg.bot_skill;
+        let Some(p) = self.players.get_mut(&id) else {
+            return Err("その bot はいません".into());
+        };
+        let Some(b) = p.bot.as_mut() else {
+            return Err(format!("{} は bot ではありません", p.name));
+        };
+        if b.dummy.is_some() {
+            return Err("射撃訓練場の的です".into());
+        }
+        b.level = level.map(|l| l.clamp(1, 5));
+        let l = b.level.unwrap_or(room);
+        let text = format!(
+            "{} の強さ: {l} ({}){}",
+            p.name,
+            BOT_SKILL_NAMES[l as usize - 1],
+            if b.level.is_none() {
+                " · 全体の設定"
+            } else {
+                ""
+            }
+        );
+        self.sys(text.clone());
+        Ok(text)
+    }
+
+    // ------------------------------------------------------------ admin
+    //
+    // Only the host calls these (for its admin page and terminal); no
+    // player message reaches them.
+
+    /// Start a match after `countdown` seconds (0: at once).
+    pub fn admin_start(&mut self, countdown: f32) -> Result<String, String> {
+        match self.phase() {
+            Phase::Live => return Err("試合中です。先に終了してください".into()),
+            Phase::Countdown => return Err("もう開始の秒読み中です".into()),
+            Phase::Results => {
+                self.intermission = None;
+                self.lobby = true;
+            }
+            Phase::Lobby => {}
+        }
+        let players = self
+            .players
+            .values()
+            .filter(|p| !p.spectator && p.bot.is_none())
+            .count();
+        let t = if countdown.is_finite() {
+            countdown.clamp(0.0, MAX_COUNTDOWN)
+        } else {
+            0.0
+        };
+        if t <= 0.0 {
+            self.start_match();
+            return Ok(format!("試合を開始しました ({players} 人)"));
+        }
+        self.countdown = Some(t);
+        self.sys(format!(
+            "管理者が試合を開始しました: {} 秒後に始まります",
+            t.ceil()
+        ));
+        Ok(format!(
+            "{} 秒後に試合を開始します ({players} 人)",
+            t.ceil()
+        ))
+    }
+
+    /// Call off the countdown.
+    pub fn admin_cancel(&mut self) -> Result<String, String> {
+        if self.countdown.take().is_none() {
+            return Err("秒読み中ではありません".into());
+        }
+        self.sys("試合の開始が取り消されました".into());
+        Ok("開始を取り消しました".into())
+    }
+
+    /// End the match now: the results, then the waiting room.
+    pub fn admin_end(&mut self) -> Result<String, String> {
+        if !self.live() {
+            return Err("試合中ではありません".into());
+        }
+        self.sys("管理者が試合を終了しました".into());
+        self.end_match();
+        Ok("試合を終了しました".into())
+    }
+
+    /// Straight back to the waiting room (no results).
+    pub fn admin_lobby(&mut self) -> Result<String, String> {
+        if self.phase() == Phase::Lobby {
+            return Err("もう待機中です".into());
+        }
+        if self.live() {
+            self.sys("管理者が試合を中止しました".into());
+        }
+        self.enter_lobby();
+        Ok("待機中に戻しました".into())
+    }
+
+    /// Rules of the next match (in the waiting room: the one about to be
+    /// started).
+    pub fn admin_settings(&mut self, s: MatchSettings) -> Result<String, String> {
+        if !s.time_limit.is_finite() || s.time_limit <= 0.0 {
+            return Err("時間が正しくありません".into());
+        }
+        let s = MatchSettings {
+            time_limit: s.time_limit.clamp(0.5, MAX_TIME_LIMIT),
+            frag_limit: s.frag_limit.clamp(1, 999),
+            bots: s.bots.min(MAX_BOTS),
+            bot_skill: s.bot_skill.clamp(1, 5),
+            ..s
+        };
+        let text = format!(
+            "{} 分 · {} · bot {} 体 (強さ {}) · リング{} · 戦車{}",
+            s.time_limit,
+            if s.respawn {
+                format!("{} キル先取", s.frag_limit)
+            } else {
+                "復活なし".into()
+            },
+            s.bots,
+            s.bot_skill,
+            if s.ring { "あり" } else { "なし" },
+            if s.tanks { "あり" } else { "なし" },
+        );
+        // The number of bots changes at once (a match under way too).
+        self.set_bots(s.bots);
+        self.next = Some(s);
+        self.sys(format!("次の試合: {text}"));
+        Ok(format!("次の試合の設定: {text}"))
+    }
+
+    pub fn auto(&self) -> bool {
+        self.auto
+    }
+
+    pub fn set_auto(&mut self, on: bool) -> String {
+        self.auto = on;
+        if on {
+            "結果のあと、次の試合を自動で始めます".into()
+        } else {
+            "結果のあと、待機中に戻ります (管理者が開始)".into()
+        }
+    }
+
+    /// A player by id ("3", "#3") or name.
+    pub fn find(&self, who: &str) -> Option<ClientId> {
+        let w = who.trim().trim_start_matches('#');
+        if let Ok(id) = w.parse::<ClientId>()
+            && self.players.contains_key(&id)
+        {
+            return Some(id);
+        }
+        self.players
+            .values()
+            .find(|p| p.name == who.trim())
+            .map(|p| p.id)
+    }
+
+    pub fn name_of(&self, id: ClientId) -> Option<&str> {
+        self.players.get(&id).map(|p| p.name.as_str())
+    }
+
+    pub fn is_bot(&self, id: ClientId) -> bool {
+        self.players.get(&id).is_some_and(|p| p.bot.is_some())
+    }
+
+    /// Send the roster and the pickups again (a new admin page needs them).
+    pub fn refresh(&mut self) {
+        self.roster_dirty = true;
+        self.pickups_dirty = true;
+    }
+
+    /// Off the field and into the spectators.
+    pub fn admin_spectate(&mut self, id: ClientId) -> Result<String, String> {
+        let Some(p) = self.players.get(&id) else {
+            return Err("その人はいません".into());
+        };
+        if p.bot.is_some() {
+            return Err("bot は観戦にできません (bot の数で調整してください)".into());
+        }
+        if p.spectator {
+            return Err(format!("{} はもう観戦中です", p.name));
+        }
+        let name = p.name.clone();
+        self.handle(id, ClientMsg::Watch);
+        Ok(format!("{name} を観戦に回しました"))
+    }
+
+    /// A message to everyone from the admin.
+    pub fn announce(&mut self, from: &str, text: &str) -> Result<String, String> {
+        let text = sanitize(text, CHAT_MAX);
+        if text.is_empty() {
+            return Err("メッセージが空です".into());
+        }
+        let name = format!("管理者 {}", sanitize(from, NAME_MAX))
+            .trim()
+            .to_string();
+        self.send(
+            Target::All,
+            ServerMsg::Chat {
+                from: 0,
+                name,
+                text: text.clone(),
+            },
+        );
+        Ok(format!("送信しました: {text}"))
+    }
+
+    /// The match at a glance, for anyone (no names, no positions).
+    pub fn match_status(&self) -> MatchStatus {
+        MatchStatus {
+            phase: self.phase(),
+            countdown: self.countdown.map(|t| t.max(0.0).ceil()),
+            left: self.left.max(0.0).ceil(),
+            players: self
+                .players
+                .values()
+                .filter(|p| p.bot.is_none() && !p.spectator)
+                .count() as u32,
+            managed: self.cfg.managed,
+        }
+    }
+
+    /// Everything, for the admin (ping is filled in by the host).
+    pub fn admin_state(&self) -> AdminState {
+        let ranking = self.roster();
+        let players = ranking
+            .iter()
+            .filter_map(|r| self.players.get(&r.id))
+            .map(|p| AdminPlayer {
+                id: p.id,
+                name: p.name.clone(),
+                bot: p.bot.is_some(),
+                spectator: p.spectator,
+                out: p.out,
+                alive: p.alive,
+                hp: p.hp.max(0.0).ceil(),
+                kills: p.kills,
+                deaths: p.deaths,
+                x: r2(p.pos.x),
+                y: r2(p.pos.y),
+                z: r2(p.pos.z),
+                yaw: r2(p.yaw),
+                pitch: r2(p.pitch),
+                sneak: p.input.sneak,
+                ads: p.input.ads,
+                zoom: if p.input.ads { p.input.zoom.max(1) } else { 0 },
+                gun: p.inv.held_gun(),
+                tank: p.tank,
+                respawn: if p.alive { 0.0 } else { r2(p.respawn.max(0.0)) },
+                ping: None,
+                level: p
+                    .bot
+                    .as_ref()
+                    .map(|b| b.level.unwrap_or(self.cfg.bot_skill)),
+                own_level: p.bot.as_ref().is_some_and(|b| b.level.is_some()),
+            })
+            .collect();
+        AdminState {
+            phase: self.phase(),
+            left: self.left.max(0.0).ceil(),
+            countdown: self.countdown.map(|t| t.max(0.0).ceil()),
+            intermission: self.intermission.map(|t| t.max(0.0).ceil()),
+            auto: self.auto,
+            settings: self.settings(),
+            next: self.next_settings(),
+            players,
+            tanks: self.tank_states(),
+            grenades: self.grenade_states(),
+            ring: self.ring_state(),
+        }
     }
 
     fn update_player(&mut self, id: ClientId, dt: f32) {
@@ -2483,6 +2910,60 @@ impl Room {
         }
     }
 
+    fn grenade_states(&self) -> Vec<GrenadeState> {
+        self.grenades
+            .iter()
+            .map(|g| GrenadeState {
+                id: g.id,
+                x: r2(g.pos.x),
+                y: r2(g.pos.y),
+                z: r2(g.pos.z),
+            })
+            .collect()
+    }
+
+    fn tank_states(&self) -> Vec<TankState> {
+        self.tanks
+            .iter()
+            .filter(|t| t.alive)
+            .map(|t| TankState {
+                id: t.id,
+                x: r2(t.pos.x),
+                y: r2(t.pos.y),
+                z: r2(t.pos.z),
+                yaw: r2(t.yaw),
+                aim: r2(t.aim),
+                pitch: r2(t.pitch),
+                hp: t.hp.max(0.0).ceil(),
+                driver: t.driver,
+                reload: if t.cooldown > 0.0 {
+                    r2(1.0 - t.cooldown / SHELL_RELOAD)
+                } else {
+                    -1.0
+                },
+            })
+            .collect()
+    }
+
+    fn ring_state(&self) -> Option<RingState> {
+        self.ring.as_ref().map(|r| RingState {
+            x: r2(r.c.0),
+            z: r2(r.c.1),
+            r: r2(r.r),
+            nx: r2(r.to_c.0),
+            nz: r2(r.to_c.1),
+            nr: r2(r.to_r),
+            t: if r.stage < RING_RADII.len() {
+                r.timer.max(0.0).ceil()
+            } else {
+                -1.0
+            },
+            shrinking: r.shrinking,
+            dps: RING_DPS[r.stage.min(RING_DPS.len() - 1)],
+            stage: r.stage as u32,
+        })
+    }
+
     fn snapshot(&mut self) {
         let players: Vec<PlayerState> = self
             .players
@@ -2512,53 +2993,9 @@ impl Room {
                 ..st.clone()
             })
             .collect();
-        let grenades: Vec<GrenadeState> = self
-            .grenades
-            .iter()
-            .map(|g| GrenadeState {
-                id: g.id,
-                x: r2(g.pos.x),
-                y: r2(g.pos.y),
-                z: r2(g.pos.z),
-            })
-            .collect();
-        let tanks: Vec<TankState> = self
-            .tanks
-            .iter()
-            .filter(|t| t.alive)
-            .map(|t| TankState {
-                id: t.id,
-                x: r2(t.pos.x),
-                y: r2(t.pos.y),
-                z: r2(t.pos.z),
-                yaw: r2(t.yaw),
-                aim: r2(t.aim),
-                pitch: r2(t.pitch),
-                hp: t.hp.max(0.0).ceil(),
-                driver: t.driver,
-                reload: if t.cooldown > 0.0 {
-                    r2(1.0 - t.cooldown / SHELL_RELOAD)
-                } else {
-                    -1.0
-                },
-            })
-            .collect();
-        let ring = self.ring.as_ref().map(|r| RingState {
-            x: r2(r.c.0),
-            z: r2(r.c.1),
-            r: r2(r.r),
-            nx: r2(r.to_c.0),
-            nz: r2(r.to_c.1),
-            nr: r2(r.to_r),
-            t: if r.stage < RING_RADII.len() {
-                r.timer.max(0.0).ceil()
-            } else {
-                -1.0
-            },
-            shrinking: r.shrinking,
-            dps: RING_DPS[r.stage.min(RING_DPS.len() - 1)],
-            stage: r.stage as u32,
-        });
+        let grenades = self.grenade_states();
+        let tanks = self.tank_states();
+        let ring = self.ring_state();
         let humans: Vec<ClientId> = self
             .players
             .values()
@@ -2567,7 +3004,7 @@ impl Room {
             .collect();
         for id in humans {
             let p = &self.players[&id];
-            if p.watching() {
+            if p.watching() || self.lobby {
                 self.out.push((
                     Target::One(id),
                     ServerMsg::Snap {
@@ -2579,6 +3016,8 @@ impl Room {
                         watching: true,
                         tanks: tanks.clone(),
                         ring: ring.clone(),
+                        lobby: self.lobby,
+                        countdown: self.countdown.map(|t| t.max(0.0).ceil()),
                     },
                 ));
                 continue;
@@ -2612,6 +3051,8 @@ impl Room {
                     watching: false,
                     tanks: tanks.clone(),
                     ring: ring.clone(),
+                    lobby: false,
+                    countdown: None,
                 },
             ));
         }
@@ -2661,7 +3102,12 @@ impl Room {
             return;
         }
         let eye = me.pos + Vec3::new(0.0, 1.6, 0.0);
-        let skill = bot_skill(self.cfg.bot_skill);
+        let skill = bot_skill(
+            me.bot
+                .as_ref()
+                .and_then(|b| b.level)
+                .unwrap_or(self.cfg.bot_skill),
+        );
         // In a tank: its hull's heading, and shells instead of bullets.
         let hull = me
             .tank
@@ -4609,5 +5055,199 @@ mod tests {
         };
         let (weak, strong) = (boardings(2), boardings(5));
         assert!(strong > weak, "strong {strong} weak {weak}");
+    }
+
+    fn managed(bots: u32) -> Room {
+        Room::new(Config {
+            seed: 3,
+            managed: true,
+            bots,
+            ..Default::default()
+        })
+    }
+
+    fn alive(r: &Room, id: ClientId) -> bool {
+        r.players[&id].alive
+    }
+
+    #[test]
+    fn managed_room_waits_for_the_admin() {
+        let mut r = managed(2);
+        let a = r.join("alice", None, PROTOCOL, false).unwrap();
+        let b = r.join("bob", None, PROTOCOL, false).unwrap();
+        assert_eq!(r.phase(), Phase::Lobby);
+        // Long after: still nobody on the field, no clock running.
+        for _ in 0..600 {
+            r.tick(1.0 / 60.0);
+        }
+        assert_eq!(r.phase(), Phase::Lobby);
+        assert!(
+            r.players.values().all(|p| !p.alive),
+            "nobody spawns in the lobby"
+        );
+        assert_eq!(r.left, r.cfg.time_limit);
+        // Players see the waiting room (and watch).
+        let out = r.drain();
+        assert!(out.iter().any(|(to, m)| *to == Target::One(a)
+            && matches!(
+                m,
+                ServerMsg::Snap {
+                    lobby: true,
+                    watching: true,
+                    me: None,
+                    ..
+                }
+            )));
+        // Nothing a player sends starts it.
+        for m in [
+            ClientMsg::Play,
+            ClientMsg::Trigger,
+            ClientMsg::Bots { n: 9 },
+            ClientMsg::Use,
+        ] {
+            r.handle(b, m);
+        }
+        r.tick(1.0 / 60.0);
+        assert_eq!(r.phase(), Phase::Lobby);
+        assert!(!alive(&r, b));
+    }
+
+    #[test]
+    fn admin_starts_and_everyone_plays_every_match() {
+        let mut r = managed(1);
+        let a = r.join("alice", None, PROTOCOL, false).unwrap();
+        let b = r.join("bob", None, PROTOCOL, false).unwrap();
+        r.admin_start(3.0).unwrap();
+        assert_eq!(r.phase(), Phase::Countdown);
+        assert!(r.admin_start(3.0).is_err(), "already counting down");
+        // Someone joins during the countdown: in the match too.
+        let c = r.join("carol", None, PROTOCOL, false).unwrap();
+        for _ in 0..(3 * 60 + 2) {
+            r.tick(1.0 / 60.0);
+        }
+        assert_eq!(r.phase(), Phase::Live);
+        assert!(alive(&r, a) && alive(&r, b) && alive(&r, c));
+        assert!(
+            r.drain()
+                .iter()
+                .any(|(_, m)| matches!(m, ServerMsg::MatchStart { .. }))
+        );
+        // The admin ends it: results, then back to waiting (not a new match).
+        r.admin_end().unwrap();
+        assert_eq!(r.phase(), Phase::Results);
+        for _ in 0..((INTERMISSION * 60.0) as usize + 5) {
+            r.tick(1.0 / 60.0);
+        }
+        assert_eq!(r.phase(), Phase::Lobby);
+        assert!(r.players.values().all(|p| !p.alive));
+        // The second match: everyone in it together.
+        r.admin_start(0.0).unwrap();
+        assert_eq!(r.phase(), Phase::Live);
+        assert!(alive(&r, a) && alive(&r, b) && alive(&r, c));
+        assert_eq!(
+            r.players.values().filter(|p| p.alive).count(),
+            4,
+            "three people and a bot"
+        );
+    }
+
+    #[test]
+    fn second_no_respawn_round_takes_everyone() {
+        let mut r = Room::new(Config {
+            seed: 3,
+            managed: true,
+            respawn: false,
+            ..Default::default()
+        });
+        let a = r.join("alice", None, PROTOCOL, false).unwrap();
+        let b = r.join("bob", None, PROTOCOL, false).unwrap();
+        r.admin_start(0.0).unwrap();
+        // Well into the round, someone else turns up: they wait it out.
+        for _ in 0..(15 * 60) {
+            r.tick(1.0 / 60.0);
+        }
+        let c = r.join("carol", None, PROTOCOL, false).unwrap();
+        assert!(!alive(&r, c) && r.players[&c].out);
+        r.admin_end().unwrap();
+        for _ in 0..((INTERMISSION * 60.0) as usize + 5) {
+            r.tick(1.0 / 60.0);
+        }
+        r.admin_start(0.0).unwrap();
+        assert!(alive(&r, a) && alive(&r, b) && alive(&r, c));
+        assert!(r.players.values().all(|p| !p.out));
+    }
+
+    #[test]
+    fn admin_settings_apply_to_the_next_match() {
+        let mut r = managed(0);
+        r.join("alice", None, PROTOCOL, false).unwrap();
+        r.admin_start(0.0).unwrap();
+        let mut s = r.settings();
+        s.respawn = false;
+        s.time_limit = 3.0;
+        s.bots = 2;
+        r.admin_settings(s).unwrap();
+        // Not in the match being played.
+        assert!(r.cfg.respawn);
+        assert_eq!(r.next_settings().time_limit, 3.0);
+        r.admin_lobby().unwrap();
+        assert_eq!(r.phase(), Phase::Lobby);
+        r.admin_start(0.0).unwrap();
+        assert!(!r.cfg.respawn);
+        assert_eq!(r.cfg.time_limit, 180.0);
+        assert_eq!(r.players.values().filter(|p| p.bot.is_some()).count(), 2);
+        let out = r.drain();
+        assert!(
+            out.iter()
+                .any(|(_, m)| matches!(m, ServerMsg::MatchStart { respawn: false, .. }))
+        );
+    }
+
+    #[test]
+    fn cancel_and_auto() {
+        let mut r = managed(0);
+        let a = r.join("alice", None, PROTOCOL, false).unwrap();
+        r.admin_start(5.0).unwrap();
+        r.admin_cancel().unwrap();
+        for _ in 0..(6 * 60) {
+            r.tick(1.0 / 60.0);
+        }
+        assert_eq!(r.phase(), Phase::Lobby);
+        assert!(r.admin_end().is_err());
+        // With auto on, the next match follows the results by itself.
+        r.set_auto(true);
+        r.admin_start(0.0).unwrap();
+        r.admin_end().unwrap();
+        for _ in 0..((INTERMISSION * 60.0) as usize + 5) {
+            r.tick(1.0 / 60.0);
+        }
+        assert_eq!(r.phase(), Phase::Live);
+        assert!(alive(&r, a));
+        // Spectate moves a player off the field.
+        r.admin_spectate(a).unwrap();
+        assert!(r.players[&a].spectator && !alive(&r, a));
+        assert_eq!(r.admin_state().players.len(), 1);
+    }
+
+    #[test]
+    fn unmanaged_rooms_start_by_themselves() {
+        let mut r = room();
+        let a = r.join("alice", None, PROTOCOL, false).unwrap();
+        assert_eq!(r.phase(), Phase::Live);
+        assert!(alive(&r, a));
+    }
+
+    #[test]
+    fn public_status_tells_only_the_phase() {
+        let mut r = managed(2);
+        r.join("alice", None, PROTOCOL, false).unwrap();
+        r.join("watcher", None, PROTOCOL, true).unwrap();
+        let st = r.match_status();
+        assert_eq!((st.phase, st.players, st.managed), (Phase::Lobby, 1, true));
+        r.admin_start(5.0).unwrap();
+        let st = r.match_status();
+        assert_eq!((st.phase, st.countdown), (Phase::Countdown, Some(5.0)));
+        let json = serde_json::to_string(&st).unwrap();
+        assert!(!json.contains("alice"), "no names: {json}");
     }
 }

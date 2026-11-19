@@ -30,6 +30,9 @@ const VALUE_KEYS: &[&str] = &[
     "name",
     "web",
     "skin",
+    "admin",
+    "admin-port",
+    "admin-bind",
 ];
 /// `host` keys that are switches (`tunnel`, or `tunnel=on` / `tunnel=off`).
 const FLAG_KEYS: &[&str] = &[
@@ -39,6 +42,8 @@ const FLAG_KEYS: &[&str] = &[
     "no-tanks",
     "no-update-check",
     "no-network-check",
+    "admin-tunnel",
+    "autostart",
 ];
 /// What the browser reads (the host leaves these lines alone).
 const BROWSER_CMDS: &[&str] = &["set", "se", "skin", "custom"];
@@ -295,6 +300,8 @@ pub const TEMPLATE: &str = r#"" vim-fps の設定ファイル (.vimfpsrc)。Vim 
 " host time-limit=10 frag-limit=25
 " host no-respawn no-ring no-tanks
 " host tunnel password=合言葉
+" host admin=自分の名前:8文字以上の鍵      " 管理者 (試合を開始・終了する人)。複数書けます。書かなければ起動のたびに鍵を作って表示
+" host admin-port=7778                   " 管理ページを別のポートに (Codespaces ではこのポートを非公開のままにする)
 " host name=vim-fps\ サーバー           " 空白は \ を前に付ける
 " host skin=./my-skin                    " 全員に配るスキン (skin.json のあるフォルダー。このファイルからの相対パス)
 "#;

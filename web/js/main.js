@@ -50,6 +50,10 @@ const game = {
   me: null,
   left: 0,
   intermission: null,
+  // Waiting for the host's admin to start the match, and the countdown
+  // once they have.
+  lobby: false,
+  countdown: null,
   pos: { x: 0, y: 0, z: 0 },
   vel: { x: 0, z: 0 },
   yaw: 0,
@@ -118,6 +122,8 @@ function resetGame() {
     zoom: 0,
     turnLeft: 0,
     intermission: null,
+    lobby: false,
+    countdown: null,
     lastInput: '',
     watching: false,
     follow: null,
@@ -290,6 +296,7 @@ const HELP = [
   '  :set name=名前       名前             :set {opt}&     初期値に戻す',
   '  :ls                  スコア           :bots 5        bot の数 (練習のみ)',
   '  :connect URL         サーバーに接続    :practice      練習',
+  '  :join                このページのサーバーに参加 (練習中に試合が始まると自動で参加: :set noautojoin で切る)',
   '  :fs                  フルスクリーン   :q             タイトルへ',
   '  :watch               観戦に回る       :play          観戦から試合へ',
   '  :follow 名前         その人を観戦     :range         射撃訓練場',
@@ -548,6 +555,10 @@ function runCommand(line) {
       break;
     case 'practice':
       startPractice(args ? parseInt(args, 10) : 5);
+      break;
+    case 'join':
+      if (!serverInfo) balloon('E: このページはサーバーから開かれていません', ':connect URL で接続', 'err');
+      else connect('');
       break;
     case 'bots':
       if (game.practice && game.conn) game.conn.send({ t: 'bots', n: Math.max(0, Math.min(15, parseInt(args, 10) || 0)) });
@@ -1622,19 +1633,24 @@ const menu = { items: [], sel: 0 };
 
 function buildMenu() {
   menu.items = [];
+  // Offline games on a host's page are only for warming up: the label
+  // says they are not the server's match (that one the admin runs).
+  const off = serverInfo ? 'ひとりで (サーバーの試合とは別)' : 'オフライン';
   if (serverInfo) {
     const mode = serverInfo.respawn === false ? ' · 復活なし' : '';
+    const managed = serverInfo.managed ? ' · 試合は管理者が開始' : '';
     menu.items.push({
       label: 'このサーバーに参加',
-      sub: `${serverInfo.name} · v${serverInfo.version}${mode}${serverInfo.password ? ' · 合言葉あり' : ''}`,
+      sub: `${serverInfo.name} · v${serverInfo.version}${mode}${serverInfo.password ? ' · 合言葉あり' : ''}${managed}`,
       run: () => connect(''),
     });
     menu.items.push({ label: 'このサーバーを観戦', sub: '試合には出ずに見る (:play で途中参加)', run: () => connect('', true) });
   }
-  menu.items.push({ label: '射撃訓練場', sub: 'オフライン · 10〜400 m の的 · 全武器 · 弾無限', run: () => startPractice(0, { range: true }) });
-  menu.items.push({ label: 'カスタムマッチ', sub: 'オフライン · bot の数・強さ・ルール・時間を選ぶ', run: () => openCustom() });
-  menu.items.push({ label: '練習する', sub: 'オフライン · bot 5 体', run: () => startPractice(5) });
-  menu.items.push({ label: '練習する (復活なし)', sub: 'オフライン · bot 5 体 · 最後の 1 人が勝ち', run: () => startPractice(5, { noRespawn: true }) });
+  menu.items.push({ label: '射撃訓練場', sub: `${off} · 10〜400 m の的 · 全武器 · 弾無限`, run: () => startPractice(0, { range: true }) });
+  // A match with its own rules is the admin's business on a host.
+  if (!serverInfo) menu.items.push({ label: 'カスタムマッチ', sub: 'オフライン · bot の数・強さ・ルール・時間を選ぶ', run: () => openCustom() });
+  menu.items.push({ label: '練習する', sub: `${off} · bot 5 体`, run: () => startPractice(5) });
+  menu.items.push({ label: '練習する (復活なし)', sub: `${off} · bot 5 体 · 最後の 1 人が勝ち`, run: () => startPractice(5, { noRespawn: true }) });
   menu.items.push({ label: 'URL を指定して接続', sub: ':connect URL', run: () => openCommand('connect ') });
   menu.items.push({ label: '操作説明', sub: ':help', run: () => showMsg(':help', HELP) });
   menu.items.push({ label: '設定', sub: ':options', run: () => showMsg(':options — :set で変更できます', optionsHelp()) });
@@ -1651,6 +1667,9 @@ function renderMenu() {
     li.innerHTML = `${esc(it.label)}<span class="sub">${esc(it.sub)}</span>`;
     ol.appendChild(li);
   });
+  // A short screen scrolls the menu: keep the selected row in view.
+  const sel = ol.children[menu.sel];
+  if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: 'nearest' });
   const name = settings.get('name');
   $('title-name').innerHTML = `名前: <b>${esc(name || '(未設定 — :set name=名前)')}</b>`;
   $('title-version').textContent = `v${VERSION}`;
@@ -1659,7 +1678,7 @@ function renderMenu() {
 function showTitle() {
   show('title');
   show('hud', false);
-  for (const id of ['inventory', 'mapwin', 'chatwin', 'bsod', 'boot', 'resultwin', 'progress', 'customwin']) show(id, false);
+  for (const id of ['inventory', 'mapwin', 'chatwin', 'bsod', 'boot', 'resultwin', 'progress', 'customwin', 'lobbywin']) show(id, false);
   buildMenu();
   vim.setMode('menu');
 }
@@ -1712,9 +1731,61 @@ function connect(input, spectate = false) {
   conn.onopen = () => conn.send(joinMsg(pw ? decodeURIComponent(pw) : null, spectate));
 }
 
+// ---------------------------------------------------------------- joining from practice
+//
+// On a host's page, practising offline while the match waits for its
+// admin: the host's /match.json is checked every 1.5 s, and when the admin
+// starts a match the practice ends and the page joins it (:set noautojoin:
+// only a notice).
+
+const serverWatch = { phase: null, players: 0, busy: false };
+const SERVER_PHASES = { lobby: '待機中', countdown: 'まもなく開始', live: '試合中', results: '結果' };
+
+async function pollServer() {
+  if (!serverInfo || !serverInfo.managed || !game.practice || !game.map) {
+    serverWatch.phase = null;
+    return;
+  }
+  if (serverWatch.busy) return;
+  serverWatch.busy = true;
+  const conn = game.conn;
+  try {
+    const r = await fetch('match.json', { cache: 'no-store' });
+    const st = await r.json();
+    if (game.conn !== conn || !game.practice || !st.phase) return;
+    const was = serverWatch.phase;
+    serverWatch.phase = st.phase;
+    serverWatch.players = st.players;
+    const starting = st.phase === 'countdown' || (st.phase === 'live' && was != null && was !== 'live');
+    if (starting && was !== 'countdown') {
+      if (settings.get('autojoin')) {
+        balloon('サーバーの試合が始まります', `練習を終えて参加します${st.countdown != null ? ` (${st.countdown} 秒後に開始)` : ''}`);
+        sound.event('startup');
+        connect('');
+      } else balloon('サーバーの試合が始まります', ':join で参加 (:set autojoin で自動)');
+    } else if (was == null) {
+      balloon(
+        st.phase === 'live' ? 'サーバーは試合中です' : 'サーバーの試合を待っています',
+        st.phase === 'live' ? ':join で途中参加できます' : settings.get('autojoin') ? '管理者が試合を始めたら自動で参加します (:set noautojoin で切る)' : ':join で参加',
+      );
+    }
+  } catch {
+    // The host is gone or busy: try again next time.
+  } finally {
+    serverWatch.busy = false;
+  }
+}
+setInterval(pollServer, 1500);
+
 /// The task bar's ping: "練習 12 ms" offline (or the mode's name), "34 ms"
 /// on a server.
 function pingLabel() {
+  const base = pingBase();
+  if (!game.practice || !serverWatch.phase) return base;
+  return `${base} · サーバー ${SERVER_PHASES[serverWatch.phase] || ''} ${serverWatch.players} 人`;
+}
+
+function pingBase() {
   const tag = game.practice ? (game.offlineName || offlineName({})).short : '';
   if (game.ping == null) return tag;
   const ms = `${game.ping < 10 ? game.ping.toFixed(1) : Math.round(game.ping)} ms`;
@@ -1818,11 +1889,14 @@ function onMessage(m) {
       break;
     case 'shot': {
       const mine = m.id === game.myId;
+      // Through someone's eyes, their shots look and sound like your own.
+      const eyes = m.id === eyesId();
       if (!mine) game.shots.push({ x: m.from.x, z: m.from.z, id: m.id, t: performance.now() });
+      muzzleAt.set(m.id, performance.now());
       if (game.director) game.director.note('shot', m.id);
-      if (renderer) renderer.tracer(m.from, m.to, mine, m.vel, game.specs && game.specs.gravity);
-      sound.shot(m.gun, mine ? null : m.from);
-      if (mine) {
+      if (renderer) renderer.tracer(m.from, m.to, eyes, m.vel, game.specs && game.specs.gravity);
+      sound.shot(m.gun, eyes ? null : m.from);
+      if (eyes) {
         if (renderer) renderer.muzzle();
         if (settings.get('bob')) game.kick = 0.06;
       }
@@ -1830,16 +1904,23 @@ function onMessage(m) {
     }
     case 'shell': {
       const mine = m.id === game.myId;
+      const eyes = m.id === eyesId();
       if (!mine) game.shots.push({ x: m.from.x, z: m.from.z, id: m.id, t: performance.now() });
       if (game.director) game.director.note('shot', m.id);
       if (renderer) renderer.shell(m.from, m.to, m.vel, game.specs && game.specs.gravity);
-      sound.cannon(mine ? null : m.from);
-      if (mine && settings.get('bob')) game.kick = 0.12;
+      sound.cannon(eyes ? null : m.from);
+      if (eyes && settings.get('bob')) game.kick = 0.12;
       break;
     }
     case 'hit':
       if (game.director && m.victim) game.director.note('hit', m.attacker, m.victim);
-      if (m.attacker === game.myId && m.victim !== game.myId) {
+      if (m.victim && m.attacker !== m.victim) {
+        // Who is fighting whom (the card shows the other side's health).
+        const t = performance.now();
+        foes.set(m.attacker, { id: m.victim, t });
+        foes.set(m.victim, { id: m.attacker, t });
+      }
+      if (m.attacker === eyesId() && m.victim !== m.attacker) {
         const hm = $('hitmarker');
         hm.classList.toggle('head', m.head);
         show('hitmarker');
@@ -1849,6 +1930,11 @@ function onMessage(m) {
         const snap = game.snaps[game.snaps.length - 1];
         const v = snap && snap.players.get(m.victim);
         if (v && renderer && settings.get('dmgnum')) renderer.damageNumber({ x: v.x, y: v.y + (m.head ? 2.0 : 1.4), z: v.z }, m.dmg, m.head);
+      }
+      if (game.watching && m.victim === eyesId() && m.attacker !== m.victim) {
+        // The one you watch through was hit: the arc toward the shooter.
+        damageArc(m.from);
+        sound.hurt();
       }
       if (m.victim === game.myId) {
         damageArc(m.from);
@@ -1937,8 +2023,15 @@ function onMessage(m) {
       break;
     case 'match_start':
       show('resultwin', false);
+      showLobby(false);
       resetControls(true);
-      balloon('新しい試合が始まりました');
+      if (m.respawn !== undefined) game.respawnMode = m.respawn !== false;
+      balloon(
+        '試合が始まりました',
+        m.time_limit
+          ? `${Math.round(m.time_limit / 60)} 分 · ${m.respawn === false ? '復活なし (最後の 1 人が勝ち)' : m.frag_limit > 1e6 ? 'キル数の上限なし' : `${m.frag_limit} キル先取`}${m.ring ? ' · リングあり' : ''}`
+          : '',
+      );
       break;
     case 'pong': {
       const t = game.pings.get(m.id);
@@ -1956,6 +2049,124 @@ function onMessage(m) {
 }
 
 let hitTimer = null;
+
+/// Whose eyes the screen shows: yours while playing, the followed
+/// player's while watching through them (not the automatic, free or sky
+/// camera). null: nobody's.
+function eyesId() {
+  if (!game.watching) return game.myId;
+  if (game.auto || game.free || game.sky) return null;
+  return game.follow;
+}
+
+/// When each player last fired (the muzzle flash in the wipe).
+const muzzleAt = new Map();
+
+/// id -> {id, t}: whom each player last traded hits with, and when.
+const foes = new Map();
+
+/// The one the watched player is fighting: the automatic camera's rival,
+/// or whom they traded hits with in the last 8 seconds (alive).
+function opponentOf(id, view) {
+  const d = game.director;
+  if (game.auto && d && d.subject === id && d.rival != null && view.get(d.rival)?.alive) return d.rival;
+  const f = foes.get(id);
+  if (f && performance.now() - f.t < 8000 && view.get(f.id)?.alive) return f.id;
+  return null;
+}
+
+// ---------------------------------------------------------------- HUD layout
+//
+// The boxes along the top each have a place; on a narrow screen they would
+// land on one another. They are laid out in this order, so the compass and
+// the key line stay at the top and the card of whom you watch goes below:
+// the bars in the middle first step to the left of the box in the corner
+// (narrowing if they must), and anything that would still overlap a box
+// already placed goes down below it. (Semi-transparent read-outs such as
+// :set netstat may overlap.)
+const TOP_HUD = ['rank', 'compass', 'watchbar', 'lobbywin', 'followcard', 'fps'];
+/// In the corner: the bars in the middle step aside for these.
+const HUD_CORNER = new Set(['rank']);
+/// Centred bars that step aside rather than go down (the key line goes
+/// down: it is wide, and a narrower one wraps into more lines).
+const HUD_SIDESTEP = new Set(['compass']);
+let hudLaidAt = 0;
+
+function layoutHud(force = false) {
+  const now = performance.now();
+  if (!force && now - hudLaidAt < 150) return;
+  hudLaidAt = now;
+  const placed = [];
+  const hits = (r, top, p) => r.left < p.right + 4 && r.right > p.left - 4 && top < p.bottom + 4 && top + r.height > p.top - 4;
+  for (const id of TOP_HUD) {
+    const el = $(id);
+    if (!el) continue;
+    el.style.top = '';
+    if (HUD_SIDESTEP.has(id)) {
+      el.style.left = '';
+      el.style.width = '';
+    }
+    if (el.classList.contains('hidden') || !el.offsetParent) continue;
+    let r = el.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    const box = el.offsetParent.getBoundingClientRect();
+    if (HUD_SIDESTEP.has(id)) {
+      const corner = placed.find((p) => p.corner && hits(r, r.top, p));
+      if (corner) {
+        // Room from the left edge to the corner box.
+        const room = corner.left - 8 - (box.left + 12);
+        if (room >= Math.min(r.width, 150)) {
+          const w = Math.min(r.width, room);
+          if (w < r.width) el.style.width = `${Math.floor(w)}px`;
+          const centre = Math.min(box.left + box.width / 2, corner.left - 8 - w / 2);
+          el.style.left = `${Math.round(centre - box.left)}px`;
+          r = el.getBoundingClientRect();
+          // Never past the left edge (if it cannot narrow that far, it
+          // goes down below the corner instead).
+          if (r.left < box.left + 12) {
+            el.style.left = `${Math.round(12 + r.width / 2)}px`;
+            r = el.getBoundingClientRect();
+          }
+        }
+      }
+    }
+    let top = r.top;
+    for (let i = 0; i < TOP_HUD.length; i++) {
+      const hit = placed.find((p) => hits(r, top, p));
+      if (!hit) break;
+      top = hit.bottom + 6;
+    }
+    if (top !== r.top) el.style.top = `${Math.round(top - box.top)}px`;
+    placed.push({ left: r.left, right: r.right, top, bottom: top + r.height, corner: HUD_CORNER.has(id) });
+  }
+  // Notices (kills, items) on a touch screen: between the boxes along the
+  // top and the on-screen keys (older ones go first when it is tight).
+  const bal = $('balloons');
+  if (bal) {
+    bal.style.bottom = '';
+    bal.style.maxHeight = '';
+    if (document.body.classList.contains('touch')) {
+      const x0 = window.innerWidth - 340;
+      const keys = [...document.querySelectorAll('#touchpad button')]
+        .map((b) => b.getBoundingClientRect())
+        .filter((k) => k.width && k.right > x0);
+      const floor = keys.length ? Math.min(...keys.map((k) => k.top)) - 8 : bal.getBoundingClientRect().bottom;
+      const ceil = placed.filter((p) => p.right > x0).reduce((m, p) => Math.max(m, p.bottom), 0) + 8;
+      bal.style.bottom = `${Math.round(window.innerHeight - floor)}px`;
+      bal.style.maxHeight = `${Math.max(0, Math.round(floor - ceil))}px`;
+    }
+  }
+  // The chat log grows up from the bottom: it stops short of the boxes
+  // above it (older lines go first).
+  const log = $('chatlog');
+  if (log) {
+    log.style.maxHeight = '';
+    const r = log.getBoundingClientRect();
+    const above = placed.filter((p) => p.left < r.right && p.right > r.left).reduce((m, p) => Math.max(m, p.bottom), 0);
+    if (above && r.top < above + 6) log.style.maxHeight = `${Math.max(0, Math.round(r.bottom - above - 6))}px`;
+  }
+}
+window.addEventListener('resize', () => layoutHud(true));
 
 /// A fresh start (a respawn, a new match): nothing carries over from the
 /// life before — not VIEW (aiming), not an open inventory or map, and for a
@@ -2084,9 +2295,80 @@ function showResult(m) {
   hideDeath();
 }
 
+/// The clock in the task bar.
+function clockText() {
+  if (game.lobby) return game.countdown != null ? `開始 ${Math.ceil(game.countdown)}` : '待機中';
+  return game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left);
+}
+
+/// Under the result table: what follows it.
+function resultNext() {
+  const n = Math.ceil(game.intermission);
+  return serverInfo && serverInfo.managed && !game.practice ? `${n} 秒後に結果を閉じます (次の試合は管理者が開始)` : `${n} 秒後に次の試合`;
+}
+
+// ---------------------------------------------------------------- waiting room
+
+/// Into the waiting room: nobody is on the field, so the view starts high
+/// over the middle of the map (the watching keys move it).
+function enterLobby() {
+  show('resultwin', false);
+  hideDeath();
+  if (!game.watching) startWatching(null);
+  game.auto = false;
+  game.pos = { x: 0, y: 0, z: 0 };
+  startSky();
+  showLobby(true);
+}
+
+function showLobby(on) {
+  show('lobbywin', on);
+  if (!on) lobbyKey = '';
+}
+
+let lobbyKey = '';
+function renderLobby() {
+  const rows = [...game.roster.values()];
+  const playing = rows.filter((r) => !r.spectator);
+  const watching = rows.filter((r) => r.spectator && !r.bot);
+  const humans = playing.filter((r) => !r.bot).length;
+  const bots = playing.length - humans;
+  const cd = game.countdown;
+  const key = JSON.stringify([cd, rows.map((r) => [r.id, r.name, r.spectator, r.bot]), game.myId]);
+  if (key === lobbyKey) return;
+  lobbyKey = key;
+  const me = game.roster.get(game.myId);
+  setText($('lobby-title'), cd != null ? 'まもなく試合開始' : `待機中 — ${serverInfo ? serverInfo.name : 'サーバー'}`);
+  setText(
+    $('lobby-status'),
+    cd != null
+      ? me && me.spectator
+        ? '観戦で見ます (:play で試合に参加)'
+        : '試合が始まります。準備してください'
+      : `管理者が試合を開始するまでお待ちください · ${humans} 人${bots ? ` + bot ${bots}` : ''}${watching.length ? ` · 観戦 ${watching.length}` : ''}`,
+  );
+  const count = $('lobby-count');
+  show('lobby-count', cd != null);
+  if (cd != null) count.textContent = String(Math.max(0, Math.ceil(cd)));
+  const ul = $('lobby-list');
+  ul.innerHTML = '';
+  for (const r of [...playing.filter((r) => !r.bot), ...playing.filter((r) => r.bot), ...watching]) {
+    const li = document.createElement('li');
+    li.className = r.id === game.myId ? 'me' : r.bot ? 'bot' : r.spectator ? 'watch' : '';
+    li.textContent = `${r.name}${r.bot ? ' (bot)' : r.spectator ? ' (観戦)' : ''}`;
+    ul.appendChild(li);
+  }
+}
+
 function onSnap(m) {
   if (m.watching && !game.watching && !game.bsodPending) startWatching(null);
   if (!m.watching && game.watching && m.me) stopWatching();
+  const wasLobby = game.lobby;
+  game.lobby = !!m.lobby;
+  game.countdown = m.countdown ?? null;
+  if (game.lobby && !wasLobby) enterLobby();
+  else if (!game.lobby && wasLobby) showLobby(false);
+  if (game.lobby) renderLobby();
   game.me = m.me;
   game.left = m.left;
   game.intermission = m.intermission;
@@ -2669,9 +2951,11 @@ function frame(now) {
       pingTimer = 0;
       game.pingSeq += 1;
       game.pings.set(game.pingSeq, now);
-      game.conn.send({ t: 'ping', id: game.pingSeq });
+      // With the last round trip measured: the host shows it to its admin.
+      game.conn.send(game.ping != null ? { t: 'ping', id: game.pingSeq, rtt: Math.round(game.ping * 10) / 10 } : { t: 'ping', id: game.pingSeq });
     }
     updateHud(dt);
+    layoutHud();
     updateCompass(now);
     updateNetStats(now);
   }
@@ -3045,8 +3329,11 @@ function watchFrame(now, dt) {
     renderer.setHeld(null);
     const rect = target && target.alive ? pipRect() : null;
     if (rect) {
-      // The wipe: what the followed player sees.
-      inset = { cam: eyesOf(target), rect, hide: target.id };
+      // The wipe: what the followed player sees, gun and all.
+      const flash = performance.now() - (muzzleAt.get(target.id) || -1e9) < 50;
+      const inTank = target.tank != null;
+      const scope = target.ads && target.gun === 'sr';
+      inset = { cam: eyesOf(target), rect, hide: target.id, vm: { held: inTank ? null : target.gun, ads: target.ads ? 1 : 0, kick: flash ? 0.04 : 0, flash, hide: inTank || scope } };
     }
     showPip(rect, target ? nameOf(target.id) : '');
   } else if (game.sky) {
@@ -3105,7 +3392,8 @@ function watchFrame(now, dt) {
     scoped = target.ads && target.gun === 'sr' && !inTank;
     cam = eyesOf(target);
     renderer.setHeld(inTank ? null : target.gun || null);
-    vm = { ads: target.ads ? 1 : 0, hide: scoped || inTank, bob: 0, kick: 0 };
+    // Their shots kick the gun as your own do (see 'shot').
+    vm = { ads: target.ads ? 1 : 0, hide: scoped || inTank, bob: 0, kick: game.kick };
   }
   if (!auto) showPip(null);
   show('scope', scoped);
@@ -3117,6 +3405,7 @@ function watchFrame(now, dt) {
   game.yaw = cam.yaw;
   game.pitch = cam.pitch;
   game.fov = cam.fov;
+  game.kick = settings.get('bob') ? Math.max(0, game.kick - dt * 0.6) : 0;
   renderer.updateEffects(dt);
   renderer.render(cam, vm, inset);
   sound.listener(cam.x, cam.y, cam.z, cam.yaw, cam.pitch || 0);
@@ -3143,14 +3432,23 @@ function updateWatchHud() {
   if (t && !game.free && !game.sky) {
     const rr = game.roster.get(t.id);
     const hpv = t.hp != null ? Math.max(0, Math.round(t.hp)) : null;
-    const key = `${t.id}|${hpv}|${t.gun}|${rr ? `${rr.kills}/${rr.deaths}` : ''}|${t.ads}`;
+    // A fight: the other side's health too.
+    const oid = t.alive ? opponentOf(t.id, view) : null;
+    const o = oid != null ? view.get(oid) : null;
+    const ohp = o && o.hp != null ? Math.max(0, Math.round(o.hp)) : null;
+    const key = `${t.id}|${hpv}|${t.gun}|${rr ? `${rr.kills}/${rr.deaths}` : ''}|${t.ads}|${oid}|${ohp}`;
     if (card.dataset.key !== key) {
       card.dataset.key = key;
       card.innerHTML =
-        `<div class="titlebar"><span>${esc(nameOf(t.id))}</span></div><div class="body">` +
+        `<div class="titlebar"><span>${esc(nameOf(t.id))}${o ? ` vs ${esc(nameOf(oid))}` : ''}</span></div><div class="body">` +
         `<div class="hpbar big"><div style="width:${hpv ?? 0}%" class="${hpv != null && hpv <= 30 ? 'low' : ''}"></div></div>` +
         `<div class="row"><span>HP ${hpv ?? '?'}</span><span>${esc(gunName(t.gun))}${t.ads ? ' · 構え' : ''}</span>` +
-        `<span>${rr ? `${rr.kills} キル / ${rr.deaths} デス` : ''}</span></div></div>`;
+        `<span>${rr ? `${rr.kills} キル / ${rr.deaths} デス` : ''}</span></div>` +
+        (o
+          ? `<div class="foe"><span class="vsx">vs</span><b>${esc(nameOf(oid))}</b><span>HP ${ohp ?? '?'}</span>` +
+            `<div class="hpbar big"><div style="width:${ohp ?? 0}%"></div></div></div>`
+          : '') +
+        `</div>`;
     }
   }
   setText($('tb-weapon'), t && t.tank != null ? '戦車' : t && t.gun ? gunName(t.gun) : '観戦中');
@@ -3161,12 +3459,12 @@ function updateWatchHud() {
   setText($('hp-text'), t ? String(hp) : '—');
   setText($('tb-kd'), r ? `${r.kills} / ${r.deaths}` : '');
   setText($('tb-ping'), pingLabel());
-  setText($('clock'), game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left));
-  if (game.intermission != null) setText($('result-next'), `${Math.ceil(game.intermission)} 秒後に次の試合`);
+  setText($('clock'), clockText());
+  if (game.intermission != null) setText($('result-next'), resultNext());
   show('progress', false);
   const rows = [...game.roster.values()].filter((x) => !x.spectator);
   const alive = rows.filter((x) => !x.out).length;
-  setText($('rank'), (game.respawnMode ? `観戦中 · ${rows.length} 人` : `残り ${alive} 人 / ${rows.length} 人`) + ringLine());
+  setText($('rank'), game.lobby ? `待機中 · ${rows.length} 人` : (game.respawnMode ? `観戦中 · ${rows.length} 人` : `残り ${alive} 人 / ${rows.length} 人`) + ringLine());
   show('ringwarn', false);
   show('prompt', false);
 }
@@ -3305,8 +3603,8 @@ function updateHud() {
   const r = game.roster.get(game.myId);
   setText($('tb-kd'), r ? `${r.kills} / ${r.deaths}` : '');
   setText($('tb-ping'), pingLabel());
-  setText($('clock'), game.range ? '∞' : game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left));
-  if (game.intermission != null) setText($('result-next'), `${Math.ceil(game.intermission)} 秒後に次の試合`);
+  setText($('clock'), game.range ? '∞' : clockText());
+  if (game.intermission != null) setText($('result-next'), resultNext());
 
   // Reload / heal progress.
   const prog = tank ? (tank.reload >= 0 ? ['砲弾を装填中', tank.reload] : null) : me.reload >= 0 ? ['リロード', me.reload] : me.heal >= 0 ? ['回復中', me.heal] : null;
