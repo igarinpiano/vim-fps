@@ -13,7 +13,8 @@
 // and is taken out of the address bar at once (the page may be on a
 // stream).
 
-import { GUNS, TANK, eyeHeight, wrapAngle } from './world.js';
+import { GUNS, TANK, World, eyeHeight, wrapAngle } from './world.js';
+import { Director } from './director.js';
 import { VERSION } from './version.js';
 
 const $ = (id) => document.getElementById(id);
@@ -51,6 +52,14 @@ const S = {
   page: 0,
   cycle: 0,
   cycleAt: 0,
+  /// The camera tile: 'auto' (the director, as spectators see it),
+  /// 'free' (moved by hand) or 'off'. `free` is where the hand-moved camera
+  /// is; `held` the keys holding it in motion; `out` the director's last
+  /// pick ({subject, rival}).
+  cam: { mode: 'auto', free: { x: 0, y: 60, z: 120, yaw: 0, pitch: -0.4 }, held: new Map(), director: null, out: null },
+  world: null,
+  /// The monitor fills the page (F).
+  max: false,
   retry: null,
   refused: false,
   // Keys.
@@ -81,6 +90,7 @@ function loadView() {
     const v = JSON.parse(localStorage.getItem(VIEW_STORE) || '{}');
     if (PER_PAGE.includes(v.perPage)) S.perPage = v.perPage;
     if (CYCLES.includes(v.cycle)) S.cycle = v.cycle;
+    if (v.cam === 'auto' || v.cam === 'off') S.cam.mode = v.cam;
     if (typeof v.showBots === 'boolean') S.showBots = v.showBots;
   } catch {
     // No storage: the defaults.
@@ -89,7 +99,7 @@ function loadView() {
 
 function saveView() {
   try {
-    localStorage.setItem(VIEW_STORE, JSON.stringify({ perPage: S.perPage, cycle: S.cycle, showBots: S.showBots }));
+    localStorage.setItem(VIEW_STORE, JSON.stringify({ perPage: S.perPage, cycle: S.cycle, showBots: S.showBots, cam: S.cam.mode === 'off' ? 'off' : 'auto' }));
   } catch {
     // Not kept: fine for this visit.
   }
@@ -267,6 +277,7 @@ function onMessage(m) {
     case 'shot':
       S.action.set(m.id, performance.now());
       S.muzzle.set(m.id, performance.now());
+      if (S.cam.director) S.cam.director.note('shot', m.id);
       if (renderer) renderer.tracer(m.from, m.to, false, m.vel, S.specs && S.specs.gravity);
       break;
     case 'shell':
@@ -281,12 +292,14 @@ function onMessage(m) {
       S.action.set(m.victim, performance.now());
       // As in the player's own view: a mark when they hit, red edges when
       // they are hit.
+      if (S.cam.director && m.victim) S.cam.director.note('hit', m.attacker, m.victim);
       if (m.victim && m.attacker !== m.victim) {
         flashTile(m.attacker, m.head ? 'hithead' : 'hit', 160);
         flashTile(m.victim, 'hurt', 350);
       }
       break;
     case 'kill': {
+      if (S.cam.director) S.cam.director.note('kill', m.killer, m.victim);
       const how = m.cause === 'grenade' ? 'グレネード' : m.cause === 'tank' ? '戦車' : m.cause === 'ring' ? 'リングの外' : gunName(m.cause && m.cause.gun);
       const dist = m.killer !== m.victim && m.dist ? ` · ${Math.round(m.dist)} m` : '';
       const text =
@@ -322,6 +335,10 @@ async function onWelcome(m) {
   if (document.activeElement === $('signin-key')) $('signin-key').blur();
   const fresh = !S.map || S.map.seed !== m.map.seed;
   S.map = m.map;
+  if (fresh) {
+    S.world = new World(m.map);
+    S.cam.director = null;
+  }
   S.server = m.server;
   if (fresh) {
     mapImage = null;
@@ -385,7 +402,7 @@ function onState(st) {
     if (!S.view.has(p.id) || (was && !was.alive && p.alive)) S.view.set(p.id, { x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch });
   }
   for (const id of [...S.view.keys()]) if (!st.players.some((p) => p.id === id)) S.view.delete(id);
-  if (S.sel != null && !players().some((p) => p.id === S.sel)) S.sel = null;
+  if (S.sel != null && S.sel !== CAM && !players().some((p) => p.id === S.sel)) S.sel = null;
 
   renderAll();
   if (renderer) {
@@ -614,9 +631,25 @@ function pageCount() {
   return S.perPage > 0 ? Math.max(1, Math.ceil(viewable().length / S.perPage)) : 1;
 }
 
+/// The camera tile's id (players' tiles go by their numbers).
+const CAM = 'cam';
+
+function camOn() {
+  return S.cam.mode !== 'off';
+}
+
+/// The tiles on the monitor now: the camera (when on), then one page of
+/// players.
+function tileIds() {
+  if (S.solo === CAM) return [CAM];
+  const ps = shown().map((p) => p.id);
+  return S.solo == null && camOn() ? [CAM, ...ps] : ps;
+}
+
 /// Whose views are on the monitor now (one page of them).
 function shown() {
   const all = viewable();
+  if (S.solo === CAM) return [];
   if (S.solo != null) return all.filter((p) => p.id === S.solo);
   if (S.perPage <= 0) return all;
   S.page = clamp(S.page, 0, pageCount() - 1);
@@ -677,6 +710,7 @@ function renderMonitorBar() {
     ['page', 'ページ', S.solo != null ? '1 人' : `${S.page + 1} / ${pages}`, pages <= 1 || S.solo != null],
     ['cycle', '巡回', S.cycle > 0 ? `${S.cycle} 秒ごと` : 'しない', pages <= 1],
     ['bots', 'bot', S.showBots ? '出す' : '出さない', false],
+    ['cam', 'カメラ', { auto: '自動', free: '手動', off: '出さない' }[S.cam.mode], false],
   ];
   const key = JSON.stringify(items);
   if (bar._key === key) return;
@@ -691,7 +725,7 @@ $('monitor-bar').addEventListener('click', (e) => {
   const item = e.target.closest('[data-k]');
   if (!a || !item) return;
   const d = Number(a.dataset.d);
-  ({ per: () => stepPerPage(d), page: () => turnPage(d), cycle: () => stepCycle(d), bots: () => setShowBots(!S.showBots) })[item.dataset.k]();
+  ({ per: () => stepPerPage(d), page: () => turnPage(d), cycle: () => stepCycle(d), bots: () => setShowBots(!S.showBots), cam: () => stepCam(d) })[item.dataset.k]();
 });
 
 /// Lays the tiles out so all of them fit, each a 16:9 picture with its
@@ -703,17 +737,20 @@ function layoutTiles(force) {
   box.hidden = map;
   $('gl').hidden = map;
   $('bigmap').hidden = !map;
-  if (S.solo != null && !players().some((p) => p.id === S.solo)) S.solo = null;
-  const list = shown();
+  if (S.solo != null && S.solo !== CAM && !players().some((p) => p.id === S.solo)) S.solo = null;
+  if (S.solo === CAM && !camOn()) S.solo = null;
+  const ids = tileIds();
   const pages = pageCount();
   $('monitor-title').textContent = map
     ? 'モニター — マップ'
-    : S.solo != null
-      ? `モニター — ${nameOf(S.solo)} の視点`
-      : `モニター — 視点 (${viewable().length})${pages > 1 ? ` · ${S.page + 1} / ${pages} ページ` : ''}`;
+    : S.solo === CAM
+      ? 'モニター — カメラ'
+      : S.solo != null
+        ? `モニター — ${nameOf(S.solo)} の視点`
+        : `モニター — 視点 (${viewable().length})${pages > 1 ? ` · ${S.page + 1} / ${pages} ページ` : ''}`;
   renderMonitorBar();
   if (map) return;
-  const key = JSON.stringify([list.map((p) => p.id), S.solo, S.mode, S.perPage]);
+  const key = JSON.stringify([ids, S.solo, S.mode, S.perPage]);
   if (force || key !== tileKey) {
     tileKey = key;
     const W = box.clientWidth - 12;
@@ -721,7 +758,7 @@ function layoutTiles(force) {
     const gap = 6;
     const bars = 20 + 22 + 2;
     // A fixed number of views keeps one size from page to page.
-    const n = S.solo != null ? 1 : Math.max(1, S.perPage > 0 ? S.perPage : list.length);
+    const n = S.solo != null ? 1 : Math.max(1, (S.perPage > 0 ? S.perPage : shown().length) + (camOn() ? 1 : 0));
     let best = { cols: 1, w: 0 };
     for (let cols = 1; cols <= n; cols++) {
       const rows = Math.ceil(n / cols);
@@ -735,31 +772,21 @@ function layoutTiles(force) {
     box.style.gridTemplateColumns = `repeat(${best.cols}, ${w}px)`;
     box.style.gridAutoRows = `${Math.floor(w * (9 / 16)) + bars}px`;
     for (const [id, el] of tileEls) {
-      if (!list.some((p) => p.id === id)) {
+      if (!ids.includes(id)) {
         el.remove();
         tileEls.delete(id);
       }
     }
-    for (const p of list) {
-      let el = tileEls.get(p.id);
+    for (const id of ids) {
+      let el = tileEls.get(id);
       if (!el) {
-        el = document.createElement('div');
-        el.className = 'tile';
-        el.innerHTML =
-          '<div class="ttl"><span></span><em></em></div><div class="pic"><i class="xh"></i><i class="hm">✕</i><div class="over" hidden></div></div>' +
-          '<div class="sbar"><span class="hpp"><span class="xpbar"><div></div></span><b class="hpn"></b></span><span class="kd"></span><span class="ping"></span></div>';
-        const id = p.id;
-        el.addEventListener('click', () => {
-          setFocus(0);
-          S.sel = id;
-          toggleSolo(id);
-        });
-        tileEls.set(p.id, el);
+        el = id === CAM ? camTile() : playerTile(id);
+        tileEls.set(id, el);
       }
       box.appendChild(el);
     }
     let empty = box.querySelector('.empty');
-    if (!list.length) {
+    if (!ids.length) {
       if (!empty) {
         empty = document.createElement('p');
         empty.className = 'empty';
@@ -771,6 +798,174 @@ function layoutTiles(force) {
     } else if (empty) empty.remove();
   }
   updateTiles();
+}
+
+function playerTile(id) {
+  const el = document.createElement('div');
+  el.className = 'tile';
+  el.innerHTML =
+    '<div class="ttl"><span></span><em></em></div><div class="pic"><i class="xh"></i><i class="hm">✕</i><div class="over" hidden></div></div>' +
+    '<div class="sbar"><span class="hpp"><span class="xpbar"><div></div></span><b class="hpn"></b></span><span class="kd"></span><span class="ping"></span></div>';
+  el.addEventListener('click', () => {
+    setFocus(0);
+    S.sel = id;
+    toggleSolo(id);
+  });
+  return el;
+}
+
+/// The camera's tile: the automatic camera (or the hand-moved one), with
+/// both sides of the fight it shows under it.
+function camTile() {
+  const el = document.createElement('div');
+  el.className = 'tile cam';
+  const side = (c) => `<span class="${c}"><b></b><span class="xpbar"><div></div></span><i></i></span>`;
+  el.innerHTML =
+    '<div class="ttl"><span>カメラ</span><em></em></div><div class="pic"><div class="pad"><a data-m="up">▲</a><a data-m="fwd">前</a><a data-m="back">後</a><a data-m="down">▼</a></div></div>' +
+    `<div class="sbar vs">${side('a')}<span class="vsx">vs</span>${side('b')}</div>`;
+  const pic = el.querySelector('.pic');
+  // Drag to look around (the camera goes to hand control); wheel: forward.
+  let drag = null;
+  pic.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('.pad')) return;
+    drag = { x: e.clientX, y: e.clientY, moved: 0 };
+    pic.setPointerCapture(e.pointerId);
+  });
+  pic.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    drag.moved += Math.abs(dx) + Math.abs(dy);
+    drag.x = e.clientX;
+    drag.y = e.clientY;
+    if (drag.moved < 6) return;
+    if (S.cam.mode !== 'free') setCam('free');
+    const f = S.cam.free;
+    f.yaw = wrapAngle(f.yaw - dx * 0.006);
+    f.pitch = clamp(f.pitch - dy * 0.006, -1.5, 1.2);
+  });
+  pic.addEventListener('pointerup', () => {
+    el._dragged = drag && drag.moved >= 6;
+    drag = null;
+  });
+  pic.addEventListener(
+    'wheel',
+    (e) => {
+      e.preventDefault();
+      if (S.cam.mode !== 'free') setCam('free');
+      moveFree(-Math.sign(e.deltaY) * 4, 0, 0);
+    },
+    { passive: false },
+  );
+  // On a touch screen: held buttons move the hand camera.
+  for (const a of el.querySelectorAll('.pad a')) {
+    const on = (v) => (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (v && S.cam.mode !== 'free') setCam('free');
+      if (v) S.cam.held.set(`pad-${a.dataset.m}`, a.dataset.m);
+      else S.cam.held.delete(`pad-${a.dataset.m}`);
+    };
+    a.addEventListener('pointerdown', on(true));
+    a.addEventListener('pointerup', on(false));
+    a.addEventListener('pointerleave', on(false));
+    a.addEventListener('click', (e) => e.stopPropagation());
+  }
+  el.addEventListener('click', () => {
+    if (el._dragged) {
+      el._dragged = false;
+      return;
+    }
+    setFocus(0);
+    S.sel = CAM;
+    toggleSolo(CAM);
+  });
+  return el;
+}
+
+/// The camera: 'auto', 'free' or 'off'.
+function setCam(mode) {
+  const was = S.cam.mode;
+  S.cam.mode = mode;
+  if (mode === 'free' && was !== 'free' && S.cam.last) S.cam.free = { ...S.cam.last };
+  if (mode === 'auto' && S.cam.director && S.cam.last) {
+    S.cam.director.reset();
+    S.cam.director.start(S.cam.last);
+  }
+  if (mode !== 'free') S.cam.held.clear();
+  saveView();
+  note({ auto: 'カメラ: 自動 (見どころを追う)', free: 'カメラ: 手動 (hjkl 移動・旋回 · K/J 上下 · u/d 見上げる · ドラッグで向き · a で自動)', off: 'カメラを消しました' }[mode]);
+  layoutTiles(true);
+}
+
+function stepCam(d) {
+  const order = ['auto', 'free', 'off'];
+  setCam(order[(order.indexOf(S.cam.mode) + (d > 0 ? 1 : 2)) % 3]);
+}
+
+/// Moves the hand camera: forward, sideways (m), up (m).
+function moveFree(fwd, side, up) {
+  const f = S.cam.free;
+  f.x += -Math.sin(f.yaw) * fwd + Math.cos(f.yaw) * side;
+  f.z += -Math.cos(f.yaw) * fwd - Math.sin(f.yaw) * side;
+  f.y += up;
+  const half = S.map ? S.map.half : 200;
+  f.x = clamp(f.x, -half - 50, half + 50);
+  f.z = clamp(f.z, -half - 50, half + 50);
+  const ground = S.world ? S.world.height(f.x, f.z) : 0;
+  f.y = clamp(f.y, ground + 1.2, 400);
+}
+
+/// The camera this frame.
+function camPose(now, dt) {
+  const c = S.cam;
+  if (c.mode === 'free') {
+    const f = c.free;
+    const ground = S.world ? S.world.height(f.x, f.z) : 0;
+    // Faster the higher it is.
+    const speed = Math.max(12, (f.y - ground) * 0.7) * dt;
+    const h = new Set(c.held.values());
+    moveFree(((h.has('fwd') ? 1 : 0) - (h.has('back') ? 1 : 0)) * speed, ((h.has('right') ? 1 : 0) - (h.has('left') ? 1 : 0)) * speed, ((h.has('up') ? 1 : 0) - (h.has('down') ? 1 : 0)) * speed);
+    f.yaw = wrapAngle(f.yaw + ((h.has('turnl') ? 1 : 0) - (h.has('turnr') ? 1 : 0)) * 1.6 * dt);
+    f.pitch = clamp(f.pitch + ((h.has('tiltu') ? 1 : 0) - (h.has('tiltd') ? 1 : 0)) * 1.0 * dt, -1.5, 1.2);
+    c.out = null;
+    c.last = { ...f, fov: 70 };
+    return c.last;
+  }
+  if (!c.director || c.director.world !== S.world) c.director = new Director(S.world);
+  const live = S.state.phase === 'live' || S.state.phase === 'results';
+  const alive = live
+    ? players()
+        .filter((p) => p.alive && S.view.has(p.id))
+        .map((p) => ({ ...p, ...S.view.get(p.id) }))
+    : [];
+  const out = c.director.update(now / 1000, dt, alive);
+  if (out) {
+    c.out = out;
+    c.last = out.cam;
+    return out.cam;
+  }
+  // Nobody to show: a slow turn high over the middle of the field.
+  c.out = null;
+  const a = (now / 1000) * 0.05;
+  c.last = { x: Math.sin(a) * 150, y: 95, z: Math.cos(a) * 150, yaw: a, pitch: -0.5, fov: 60 };
+  return c.last;
+}
+
+/// The monitor over the whole page (F, or the □ button), and the screen
+/// itself when the browser lets it.
+function setMax(on) {
+  S.max = on;
+  document.body.classList.toggle('maxmon', on);
+  try {
+    if (on && document.fullscreenEnabled && !document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
+    if (!on && document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  } catch {
+    // No full screen here: the page is still filled.
+  }
+  setFocus(0);
+  note(on ? 'モニターを全画面にしました (F でもとに戻す)' : 'モニターをもとの大きさに戻しました');
+  layoutTiles(true);
 }
 
 /// A class on a player's tile for a moment (hit mark, being hit).
@@ -788,9 +983,38 @@ function toggleSolo(id) {
   layoutTiles(true);
 }
 
+function updateCamTile() {
+  const el = tileEls.get(CAM);
+  if (!el) return;
+  const c = S.cam;
+  const out = c.out;
+  el.classList.toggle('cur', S.sel === CAM);
+  el.classList.toggle('manual', c.mode === 'free');
+  el.querySelector('.ttl span').textContent = c.mode === 'free' ? 'カメラ — 手動' : 'カメラ — 自動';
+  const who = (id) => (id != null ? S.state.players.find((p) => p.id === id) : null);
+  const a = out ? who(out.subject) : null;
+  const b = out ? who(out.rival) : null;
+  el.querySelector('.ttl em').textContent = a ? `${a.name}${b ? ` vs ${b.name}` : ''}` : c.mode === 'free' ? 'ドラッグで向き · a で自動' : '';
+  const fill = (cls, p) => {
+    const box = el.querySelector(`.sbar .${cls}`);
+    box.hidden = !p;
+    if (!p) return;
+    const hp = p.alive ? Math.max(0, Math.round(p.hp)) : 0;
+    box.querySelector('b').textContent = p.name;
+    const bar = box.querySelector('.xpbar');
+    bar.firstChild.style.width = `${hp}%`;
+    bar.className = `xpbar ${hpClass(hp)}`;
+    box.querySelector('i').textContent = String(hp);
+  };
+  fill('a', a);
+  fill('b', b);
+  el.querySelector('.vsx').hidden = !(a && b);
+}
+
 function updateTiles() {
   const st = S.state;
   const now = performance.now();
+  updateCamTile();
   for (const p of shown()) {
     const el = tileEls.get(p.id);
     if (!el) continue;
@@ -887,8 +1111,15 @@ function drawTiles(dt) {
   r.setScissorTest(false);
   r.setClearColor(0x3a6ea5, 1);
   r.clear();
-  if (st.phase !== 'live' && st.phase !== 'results') return;
   const base = canvas.getBoundingClientRect();
+  const camEl = tileEls.get(CAM);
+  if (camEl) {
+    const pic = camEl.querySelector('.pic').getBoundingClientRect();
+    const rect = { x: pic.left - base.left, y: pic.top - base.top, w: pic.width, h: pic.height };
+    const cam = camPose(performance.now(), dt);
+    if (rect.w >= 8 && rect.h >= 8) renderer.renderInset({ cam, rect, hide: null });
+  }
+  if (st.phase !== 'live' && st.phase !== 'results') return;
   for (const p of shown()) {
     const el = tileEls.get(p.id);
     const v = S.view.get(p.id);
@@ -1156,6 +1387,11 @@ const HELP = `管理ページのキー (マウスでも操作できます)
 1 モニター   hjkl 選手を選ぶ · Enter 1 人を大きく · b bot の視点も出す
              + / - 一度に出す数 (= で自動: 全員が入る大きさ)
              ] / [ (Ctrl-f / Ctrl-b) 次 / 前のページ · c ページの巡回 (10 秒ごと)
+             a カメラを自動に (観戦の自動カメラと同じ: 見どころを追い、1 対 1 は両方の体力)
+             o カメラを手動に (CAMERA モード: k/j 前後 · h/l 旋回 · H/L 横 · K/J 上下
+               u/d 見上げる・見下ろす · O 真上から · a 自動に戻す · Esc 抜ける)
+               マウス・指ではカメラをドラッグで向き、ホイールで前後
+F            モニターを全画面に (もう一度でもとに戻す。Enter で 1 つだけ大きくすると全画面に 1 人)
 2 試合       開始 (h / l で秒読み) · 取り消し · 終了 · 待機に戻す · 自動で次へ
 3 マップ     j / k 選手を選ぶ · Enter モニターで大きく
 4 順位       Enter 視点を大きく · w 観戦に回す · dd 退出させる · h / l bot の強さ
@@ -1166,11 +1402,42 @@ const HELP = `管理ページのキー (マウスでも操作できます)
 コマンド (:)
   start [秒]   end   cancel   lobby   auto on|off   status
   bots 数      level 名前 1〜5|auto   set time=分 frags=数 skill=1〜5 respawn=on|off ring=on|off tanks=on|off
-  kick 名前    watch 名前   say 文   w (ルール保存)   q (ログオフ)   {n} (n 番のウィンドウへ)`;
+  kick 名前    watch 名前   say 文   w (ルール保存)   q (ログオフ)   {n} (n 番のウィンドウへ)
+  fs (全画面)  cam auto|free|off (カメラ)`;
 
 // ---------------------------------------------------------------- windows and modes
 
-const MODE_NAMES = { normal: 'NORMAL', command: 'COMMAND', insert: 'INSERT', msg: 'MESSAGE', confirm: 'CONFIRM' };
+const MODE_NAMES = { normal: 'NORMAL', command: 'COMMAND', insert: 'INSERT', msg: 'MESSAGE', confirm: 'CONFIRM', camera: 'CAMERA' };
+
+/// CAMERA mode: keys that move the hand camera while held (by e.code, so a
+/// released Shift does not leave one stuck).
+const CAM_KEYS = { k: 'fwd', j: 'back', h: 'turnl', l: 'turnr', H: 'left', L: 'right', K: 'up', J: 'down', u: 'tiltu', d: 'tiltd', ArrowUp: 'fwd', ArrowDown: 'back', ArrowLeft: 'turnl', ArrowRight: 'turnr' };
+
+/// High over where the camera is, looking down.
+function birdsEye() {
+  const f = S.cam.free;
+  const ground = S.world ? S.world.height(f.x, f.z) : 0;
+  f.y = ground + 150;
+  f.pitch = -1.45;
+}
+
+function cameraKey(e, escKey) {
+  if (escKey || e.key === ':') {
+    S.cam.held.clear();
+    setMode('normal');
+    if (e.key === ':') openCommand();
+    return;
+  }
+  if (e.key === 'a') {
+    setCam('auto');
+    setMode('normal');
+    return;
+  }
+  if (e.key === 'O') return birdsEye();
+  if (e.key === 'F') return setMax(!S.max);
+  const act = CAM_KEYS[e.key];
+  if (act) S.cam.held.set(e.code, act);
+}
 
 function setMode(m) {
   S.vmode = m;
@@ -1268,6 +1535,10 @@ function runCommand(line) {
   }
   if (l === 'help' || l === 'h') return showMessage(':help', HELP);
   if (l === 'q' || l === 'q!' || l === 'quit') return ask('管理ページからログオフしますか？ (試合はそのまま続きます)', signOut);
+  if (l === 'fs' || l === 'full') return setMax(!S.max);
+  if (l === 'cam' || l === 'cam auto') return setCam('auto');
+  if (l === 'cam off') return setCam('off');
+  if (l === 'cam free') return setCam('free');
   if (l === 'map' || l === 'tiles') {
     S.mode = l;
     return layoutTiles(true);
@@ -1311,18 +1582,34 @@ function windowKey(key, n, count) {
   const big = key === 'H' || key === 'L';
   const dir = key === 'h' || key === 'H' ? -1 : key === 'l' || key === 'L' ? 1 : 0;
   if (w === 'monitor') {
-    // Across every page: moving off this one turns to the next.
-    const list = viewable();
+    // Across every page: moving off this one turns to the next. The
+    // camera's tile comes first.
+    const cam = camOn() && S.solo == null ? 1 : 0;
+    const list = [...(cam ? [{ id: CAM }] : []), ...viewable()];
     const i = list.findIndex((p) => p.id === S.sel);
     const step = { h: -1, l: 1, k: -tileCols, j: tileCols }[key];
     if (step != null) {
       if (!list.length) return true;
-      const j = i < 0 ? S.page * Math.max(1, S.perPage) : clamp(i + step * n, 0, list.length - 1);
+      const j = i < 0 ? cam + S.page * Math.max(1, S.perPage) : clamp(i + step * n, 0, list.length - 1);
       select(list[j].id);
-      if (S.perPage > 0 && S.solo == null && Math.floor(j / S.perPage) !== S.page) {
-        S.page = Math.floor(j / S.perPage);
+      const pj = j - cam;
+      if (S.perPage > 0 && S.solo == null && pj >= 0 && Math.floor(pj / S.perPage) !== S.page) {
+        S.page = Math.floor(pj / S.perPage);
         layoutTiles(true);
       }
+      return true;
+    }
+    if (key === 'a') {
+      setCam('auto');
+      return true;
+    }
+    if (key === 'o' || key === 'O') {
+      // The camera by hand: CAMERA mode until Esc.
+      if (S.cam.mode !== 'free') setCam('free');
+      if (key === 'O') birdsEye();
+      S.sel = CAM;
+      setMode('camera');
+      layoutTiles(true);
       return true;
     }
     if (key === '+' || key === '-') {
@@ -1342,7 +1629,7 @@ function windowKey(key, n, count) {
       note(S.cycle > 0 ? `${S.cycle} 秒ごとに次のページへ` : 'ページの巡回を止めました');
       return true;
     }
-    if (key === 'Enter' || key === 'o') {
+    if (key === 'Enter') {
       if (S.solo != null) toggleSolo(null);
       else if (S.sel != null) toggleSolo(S.sel);
       return true;
@@ -1501,8 +1788,12 @@ function normalKey(e) {
       S.mode = S.mode === 'map' ? 'tiles' : 'map';
       layoutTiles(true);
       return true;
+    case 'F':
+      setMax(!S.max);
+      return true;
     case 'Escape':
       if (S.solo != null) toggleSolo(null);
+      else if (S.max) setMax(false);
       return true;
     default:
       if (k === 'ArrowDown') k = 'j';
@@ -1549,6 +1840,11 @@ document.addEventListener('keydown', (e) => {
     else if (e.key === 'n' || e.key === 'N' || escKey) answer(false);
     return;
   }
+  if (m === 'camera') {
+    e.preventDefault();
+    cameraKey(e, escKey);
+    return;
+  }
   if (m === 'msg') {
     e.preventDefault();
     const body = $('msg-body');
@@ -1564,6 +1860,9 @@ document.addEventListener('keydown', (e) => {
   }
   if (normalKey(e)) e.preventDefault();
 });
+
+document.addEventListener('keyup', (e) => S.cam.held.delete(e.code));
+window.addEventListener('blur', () => S.cam.held.clear());
 
 // ---------------------------------------------------------------- mouse
 
@@ -1603,6 +1902,10 @@ $('minimap').addEventListener('click', (e) => mapClick($('minimap'), e));
 $('minimap').addEventListener('dblclick', () => S.sel != null && toggleSolo(S.sel));
 $('bigmap').addEventListener('click', (e) => mapClick($('bigmap'), e));
 $('start').addEventListener('click', () => showMessage(':help', HELP));
+$('btn-max').addEventListener('click', (e) => {
+  e.stopPropagation();
+  setMax(!S.max);
+});
 $('cmdbtn').addEventListener('click', () => openCommand());
 $('btn-say').addEventListener('click', () => openSay());
 $('rank-acts').addEventListener('click', (e) => {

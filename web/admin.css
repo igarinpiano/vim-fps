@@ -119,6 +119,25 @@ code { font-family: var(--mono); font-size: 12px; }
 .tile.scoped .pic::after { content: ""; position: absolute; inset: 0; pointer-events: none;
   background: radial-gradient(circle at 50% 50%, transparent 0 34%, #000 35%),
     linear-gradient(#000, #000) 50% 50% / 1px 68% no-repeat, linear-gradient(#000, #000) 50% 50% / 38% 1px no-repeat; }
+/* The camera's tile: the two sides of the fight under it. */
+.tile.cam .ttl { background: linear-gradient(180deg, #4fb35f 0%, #2f8a3c 15%, #2f8a3c 70%, #1f6a2a 100%); text-shadow: 1px 1px 0 #0d3a14; }
+.tile.cam { border-color: #1f6a2a; }
+.tile.cam .pic { cursor: grab; touch-action: none; }
+.sbar.vs { grid-template-columns: 1fr auto 1fr; }
+.sbar.vs > span.a, .sbar.vs > span.b { min-width: 0; }
+.sbar.vs b { font-weight: 700; overflow: hidden; text-overflow: ellipsis; max-width: 7em; }
+.sbar.vs i { font-style: normal; }
+.sbar.vs .vsx { border: 0; font-weight: 700; color: #a00; padding: 0 2px; }
+.tile.cam .pad { display: none; position: absolute; right: 6px; bottom: 6px; gap: 4px; }
+.tile.cam.manual .pad { display: none; }
+@media (pointer: coarse) { .tile.cam.manual .pad { display: flex; } }
+.tile.cam .pad a { display: grid; place-items: center; min-width: 40px; height: 40px; border: 1px solid #003c74; border-radius: 3px; background: linear-gradient(180deg, #fff, #ece9d8); color: #000; font-weight: 700; user-select: none; touch-action: none; }
+/* F: the monitor over the whole page. */
+body.maxmon #desk { grid-template-columns: 1fr; }
+body.maxmon #side { display: none; }
+body.maxmon #w-monitor { position: fixed !important; top: 0 !important; left: 0 !important; right: 0 !important; bottom: 34px !important; z-index: 45; border-radius: 0; }
+body.maxmon #w-monitor .hint { display: none; }
+#btn-max { cursor: pointer; }
 /* Status bar under the picture. */
 .sbar { display: grid; grid-template-columns: 1fr auto auto; gap: 2px; height: 22px; padding: 2px; background: var(--window); font-size: 11px; color: #000; }
 .sbar > * { display: flex; align-items: center; gap: 4px; padding: 0 5px; border: 1px solid; border-color: #aca899 #fff #fff #aca899; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -231,3 +250,4 @@ body[data-phase="countdown"] #phase-clock { color: #b36b00; }
   #tasks { display: none; }
   #tray #admin-name { display: none; }
 }
+#start[data-mode="CAMERA"] { background: linear-gradient(180deg, #6fc6d8 0%, #2b8aa8 15%, #1d6f8a 85%, #134e63 100%); }

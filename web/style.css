@@ -67,6 +67,14 @@ kbd { font-family: var(--mono); background: #fff; border: 1px solid #aaa; border
 .listview li.disabled { color: #999; }
 .listview li .sub { color: #777; font-size: 12px; margin-left: 8px; }
 .listview li.sel .sub { color: #dde8ff; }
+/* The title menu: the explanation goes under the name and wraps inside
+   the window (a phone is narrower than the longest one). */
+#menu li { white-space: normal; }
+/* Taller than a phone's screen: the window keeps its title bar and the
+   inside scrolls (the menu follows the selected row). */
+#title { display: flex; flex-direction: column; max-height: calc(100vh - 50px); max-height: calc(100dvh - 50px); }
+#title .body { overflow-y: auto; min-height: 0; }
+#menu li .sub { display: block; margin-left: 0; line-height: 1.35; }
 
 /* ---------- title ---------- */
 #customwin { left: 50%; top: 45%; transform: translate(-50%, -50%); width: min(520px, calc(100vw - 32px)); z-index: 25; }
@@ -103,7 +111,7 @@ body.uianim #dmgdir .arc { animation: fade 0.7s ease-out forwards; }
 .xpbar { width: 200px; height: 16px; border: 1px solid #686868; background: #fff; padding: 2px; border-radius: 2px; }
 .xpbar > div { height: 100%; width: 0; background: repeating-linear-gradient(90deg, #2bb52b 0 8px, transparent 8px 10px); }
 
-#chatlog { position: absolute; left: 12px; bottom: 46px; width: min(460px, calc(100vw - 32px)); z-index: 3; font-size: 13px; pointer-events: none; }
+#chatlog { position: absolute; left: 12px; bottom: 46px; width: min(460px, calc(100vw - 32px)); z-index: 3; font-size: 13px; pointer-events: none; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; }
 #chatlog div { color: #fff; text-shadow: 0 0 3px #000, 1px 1px 0 #000; margin-top: 2px; word-break: break-all; }
 #chatlog div b { color: #ffe27a; }
 #chatlog div.sys { color: #bfe3ff; }
@@ -218,7 +226,7 @@ body.uianim #boot .boot-bar i { animation: bootbar 1.2s linear infinite; }
 #watchbar { position: absolute; left: 50%; top: 50px; transform: translateX(-50%); z-index: 3; max-width: calc(100vw - 24px);
   background: #ffffe1; color: #000; border: 1px solid #000; border-radius: 6px; padding: 4px 12px; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #start[data-mode="SPECTATE"] { background: linear-gradient(180deg, #6fc6d8 0%, #2b8aa8 15%, #1d6f8a 85%, #134e63 100%); }
-@media (max-width: 640px) { #watchbar { top: 102px; font-size: 11px; white-space: normal; } }
+@media (max-width: 640px) { #watchbar { font-size: 11px; white-space: normal; } }
 
 #followcard { left: 12px; top: 10px; width: 260px; z-index: 3; }
 #followcard .body { padding: 6px 8px; }
@@ -235,7 +243,15 @@ body.uianim #boot .boot-bar i { animation: bootbar 1.2s linear infinite; }
 #netstat { position: absolute; right: 12px; top: 44px; z-index: 4; margin: 0; padding: 4px 8px; font: 11px/1.4 var(--mono);
   color: #fff; background: rgba(0,0,0,0.55); border-radius: 4px; pointer-events: none; white-space: pre; }
 @media (max-width: 640px) { #netstat { top: 128px; font-size: 10px; } }
-@media (max-width: 640px) { #followcard { top: 120px; width: 200px; } }
+@media (max-width: 640px) { #followcard { width: min(260px, calc(100vw - 24px)); } }
+#followcard .row { flex-wrap: wrap; }
+#followcard .row span { white-space: nowrap; }
+/* Watching a fight: the other side's name and health under the card. */
+#followcard .foe { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 6px; margin-top: 6px; padding-top: 5px; border-top: 1px solid #c9c4b0; font-size: 12px; }
+#followcard .foe .vsx { color: #a00; font-weight: 700; }
+#followcard .foe b { grid-column: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#followcard .foe .hpbar.big { grid-column: 1 / -1; height: 10px; }
+#followcard .foe .hpbar.big > div { background: linear-gradient(180deg, #ff9a7a, #d1301a); }
 
 /* ---------- compass (spotting) ---------- */
 #compass { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); width: min(520px, calc(100vw - 230px)); height: 34px; z-index: 3;
@@ -280,7 +296,7 @@ body.uianim #ringwarn { animation: ringpulse 1s ease-in-out infinite alternate; 
 body.touch #chatlog { bottom: 220px; }
 body.touch #balloons { bottom: 380px; }
 @media (max-width: 640px) {
-  #compass { width: calc(100vw - 24px); top: 62px; }
+  #compass { width: calc(100vw - 24px); }
   #rank { font-size: 11px; top: 6px; }
   #touchpad .pad.left { grid-template-columns: repeat(var(--cols, 3), 48px); }
   #touchpad .pad.right { grid-template-columns: repeat(var(--cols, 3), 42px); }
@@ -298,3 +314,5 @@ body.touch #balloons { bottom: 380px; }
   .tb { padding: 0 6px; }
   .hpbar { width: 44px; }
 }
+/* A short screen: the title window centred between the top and the task bar. */
+@media (max-height: 760px) { #title { top: calc(50% - 17px); } }

@@ -29,7 +29,7 @@
 <div id="desk" hidden>
   <!-- 1: everyone's view -->
   <section id="w-monitor" class="window" data-win="1" data-title="モニター">
-    <div class="titlebar"><span><b class="wn">1</b> <span id="monitor-title">モニター</span></span><span class="tb-btns"><i>_</i><i>□</i></span></div>
+    <div class="titlebar"><span><b class="wn">1</b> <span id="monitor-title">モニター</span></span><span class="tb-btns"><i>_</i><i id="btn-max" title="全画面 (F)">□</i></span></div>
     <div class="body">
       <div id="monitor-bar" class="mbar"></div>
       <div id="screens">
@@ -37,8 +37,8 @@
         <div id="tiles"></div>
         <canvas id="bigmap" hidden></canvas>
       </div>
-      <div class="hint keys" id="monitor-hint"><kbd>hjkl</kbd> 選ぶ · <kbd>Enter</kbd> 1 人を大きく · <kbd>+</kbd>/<kbd>-</kbd> 表示数 (<kbd>=</kbd> 自動) · <kbd>]</kbd>/<kbd>[</kbd> ページ · <kbd>c</kbd> 巡回 · <kbd>b</kbd> bot · <kbd>m</kbd> マップ · <kbd>Esc</kbd> 一覧へ</div>
-      <div class="hint touchonly">タイルをタップで 1 人を大きく (もう一度で一覧へ)</div>
+      <div class="hint keys" id="monitor-hint"><kbd>hjkl</kbd> 選ぶ · <kbd>Enter</kbd> 1 人を大きく · <kbd>+</kbd>/<kbd>-</kbd> 表示数 (<kbd>=</kbd> 自動) · <kbd>]</kbd>/<kbd>[</kbd> ページ · <kbd>c</kbd> 巡回 · <kbd>b</kbd> bot · <kbd>a</kbd>/<kbd>o</kbd> カメラ 自動 / 手動 · <kbd>F</kbd> 全画面 · <kbd>m</kbd> マップ · <kbd>Esc</kbd> 一覧へ</div>
+      <div class="hint touchonly">タイルをタップで 1 人を大きく (もう一度で一覧へ) · カメラはドラッグで向き、ボタンで移動 · □ で全画面</div>
     </div>
   </section>
 

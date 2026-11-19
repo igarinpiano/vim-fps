@@ -1667,6 +1667,9 @@ function renderMenu() {
     li.innerHTML = `${esc(it.label)}<span class="sub">${esc(it.sub)}</span>`;
     ol.appendChild(li);
   });
+  // A short screen scrolls the menu: keep the selected row in view.
+  const sel = ol.children[menu.sel];
+  if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: 'nearest' });
   const name = settings.get('name');
   $('title-name').innerHTML = `名前: <b>${esc(name || '(未設定 — :set name=名前)')}</b>`;
   $('title-version').textContent = `v${VERSION}`;
@@ -1911,6 +1914,12 @@ function onMessage(m) {
     }
     case 'hit':
       if (game.director && m.victim) game.director.note('hit', m.attacker, m.victim);
+      if (m.victim && m.attacker !== m.victim) {
+        // Who is fighting whom (the card shows the other side's health).
+        const t = performance.now();
+        foes.set(m.attacker, { id: m.victim, t });
+        foes.set(m.victim, { id: m.attacker, t });
+      }
       if (m.attacker === eyesId() && m.victim !== m.attacker) {
         const hm = $('hitmarker');
         hm.classList.toggle('head', m.head);
@@ -2052,6 +2061,95 @@ function eyesId() {
 
 /// When each player last fired (the muzzle flash in the wipe).
 const muzzleAt = new Map();
+
+/// id -> {id, t}: whom each player last traded hits with, and when.
+const foes = new Map();
+
+/// The one the watched player is fighting: the automatic camera's rival,
+/// or whom they traded hits with in the last 8 seconds (alive).
+function opponentOf(id, view) {
+  const d = game.director;
+  if (game.auto && d && d.subject === id && d.rival != null && view.get(d.rival)?.alive) return d.rival;
+  const f = foes.get(id);
+  if (f && performance.now() - f.t < 8000 && view.get(f.id)?.alive) return f.id;
+  return null;
+}
+
+// ---------------------------------------------------------------- HUD layout
+//
+// The boxes along the top each have a place; on a narrow screen they would
+// land on one another. They are laid out in this order, so the compass and
+// the key line stay at the top and the card of whom you watch goes below:
+// the bars in the middle first step to the left of the box in the corner
+// (narrowing if they must), and anything that would still overlap a box
+// already placed goes down below it. (Semi-transparent read-outs such as
+// :set netstat may overlap.)
+const TOP_HUD = ['rank', 'compass', 'watchbar', 'lobbywin', 'followcard', 'fps'];
+/// In the corner: the bars in the middle step aside for these.
+const HUD_CORNER = new Set(['rank']);
+/// Centred bars that step aside rather than go down (the key line goes
+/// down: it is wide, and a narrower one wraps into more lines).
+const HUD_SIDESTEP = new Set(['compass']);
+let hudLaidAt = 0;
+
+function layoutHud(force = false) {
+  const now = performance.now();
+  if (!force && now - hudLaidAt < 150) return;
+  hudLaidAt = now;
+  const placed = [];
+  const hits = (r, top, p) => r.left < p.right + 4 && r.right > p.left - 4 && top < p.bottom + 4 && top + r.height > p.top - 4;
+  for (const id of TOP_HUD) {
+    const el = $(id);
+    if (!el) continue;
+    el.style.top = '';
+    if (HUD_SIDESTEP.has(id)) {
+      el.style.left = '';
+      el.style.width = '';
+    }
+    if (el.classList.contains('hidden') || !el.offsetParent) continue;
+    let r = el.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    const box = el.offsetParent.getBoundingClientRect();
+    if (HUD_SIDESTEP.has(id)) {
+      const corner = placed.find((p) => p.corner && hits(r, r.top, p));
+      if (corner) {
+        // Room from the left edge to the corner box.
+        const room = corner.left - 8 - (box.left + 12);
+        if (room >= Math.min(r.width, 150)) {
+          const w = Math.min(r.width, room);
+          if (w < r.width) el.style.width = `${Math.floor(w)}px`;
+          const centre = Math.min(box.left + box.width / 2, corner.left - 8 - w / 2);
+          el.style.left = `${Math.round(centre - box.left)}px`;
+          r = el.getBoundingClientRect();
+          // Never past the left edge (if it cannot narrow that far, it
+          // goes down below the corner instead).
+          if (r.left < box.left + 12) {
+            el.style.left = `${Math.round(12 + r.width / 2)}px`;
+            r = el.getBoundingClientRect();
+          }
+        }
+      }
+    }
+    let top = r.top;
+    for (let i = 0; i < TOP_HUD.length; i++) {
+      const hit = placed.find((p) => hits(r, top, p));
+      if (!hit) break;
+      top = hit.bottom + 6;
+    }
+    if (top !== r.top) el.style.top = `${Math.round(top - box.top)}px`;
+    placed.push({ left: r.left, right: r.right, top, bottom: top + r.height, corner: HUD_CORNER.has(id) });
+  }
+  // The chat log grows up from the bottom: it stops short of the boxes
+  // above it (older lines go first).
+  const log = $('chatlog');
+  if (log) {
+    log.style.maxHeight = '';
+    const r = log.getBoundingClientRect();
+    const above = placed.filter((p) => p.left < r.right && p.right > r.left).reduce((m, p) => Math.max(m, p.bottom), 0);
+    if (above && r.top < above + 6) log.style.maxHeight = `${Math.max(0, Math.round(r.bottom - above - 6))}px`;
+  }
+}
+window.addEventListener('resize', () => layoutHud(true));
 
 /// A fresh start (a respawn, a new match): nothing carries over from the
 /// life before — not VIEW (aiming), not an open inventory or map, and for a
@@ -2840,6 +2938,7 @@ function frame(now) {
       game.conn.send(game.ping != null ? { t: 'ping', id: game.pingSeq, rtt: Math.round(game.ping * 10) / 10 } : { t: 'ping', id: game.pingSeq });
     }
     updateHud(dt);
+    layoutHud();
     updateCompass(now);
     updateNetStats(now);
   }
@@ -3316,14 +3415,23 @@ function updateWatchHud() {
   if (t && !game.free && !game.sky) {
     const rr = game.roster.get(t.id);
     const hpv = t.hp != null ? Math.max(0, Math.round(t.hp)) : null;
-    const key = `${t.id}|${hpv}|${t.gun}|${rr ? `${rr.kills}/${rr.deaths}` : ''}|${t.ads}`;
+    // A fight: the other side's health too.
+    const oid = t.alive ? opponentOf(t.id, view) : null;
+    const o = oid != null ? view.get(oid) : null;
+    const ohp = o && o.hp != null ? Math.max(0, Math.round(o.hp)) : null;
+    const key = `${t.id}|${hpv}|${t.gun}|${rr ? `${rr.kills}/${rr.deaths}` : ''}|${t.ads}|${oid}|${ohp}`;
     if (card.dataset.key !== key) {
       card.dataset.key = key;
       card.innerHTML =
-        `<div class="titlebar"><span>${esc(nameOf(t.id))}</span></div><div class="body">` +
+        `<div class="titlebar"><span>${esc(nameOf(t.id))}${o ? ` vs ${esc(nameOf(oid))}` : ''}</span></div><div class="body">` +
         `<div class="hpbar big"><div style="width:${hpv ?? 0}%" class="${hpv != null && hpv <= 30 ? 'low' : ''}"></div></div>` +
         `<div class="row"><span>HP ${hpv ?? '?'}</span><span>${esc(gunName(t.gun))}${t.ads ? ' · 構え' : ''}</span>` +
-        `<span>${rr ? `${rr.kills} キル / ${rr.deaths} デス` : ''}</span></div></div>`;
+        `<span>${rr ? `${rr.kills} キル / ${rr.deaths} デス` : ''}</span></div>` +
+        (o
+          ? `<div class="foe"><span class="vsx">vs</span><b>${esc(nameOf(oid))}</b><span>HP ${ohp ?? '?'}</span>` +
+            `<div class="hpbar big"><div style="width:${ohp ?? 0}%"></div></div></div>`
+          : '') +
+        `</div>`;
     }
   }
   setText($('tb-weapon'), t && t.tank != null ? '戦車' : t && t.gun ? gunName(t.gun) : '観戦中');
