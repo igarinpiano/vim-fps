@@ -18,8 +18,15 @@ pub fn find_url(line: &str) -> Option<&str> {
 }
 
 /// Starts the tunnel. The child is killed when the returned value is
-/// dropped (i.e. when the host exits).
-pub async fn start(port: u16, fragment: String) -> Option<Child> {
+/// dropped (i.e. when the host exits). `label` names it in what is printed;
+/// `qr`: print a QR code of the URL. Returns the child and the tunnel's URL
+/// (None if it did not come).
+pub async fn start(
+    port: u16,
+    fragment: String,
+    label: &str,
+    qr: bool,
+) -> Option<(Child, Option<String>)> {
     let spawned = Command::new("cloudflared")
         .args([
             "tunnel",
@@ -46,7 +53,7 @@ pub async fn start(port: u16, fragment: String) -> Option<Child> {
             return None;
         }
     };
-    println!("  トンネル: 起動中…");
+    println!("  {label}: 起動中…");
     let stderr = child.stderr.take()?;
     let (url_tx, url_rx) = tokio::sync::oneshot::channel::<String>();
     tokio::spawn(async move {
@@ -73,19 +80,25 @@ pub async fn start(port: u16, fragment: String) -> Option<Child> {
             eprintln!("  (~/.cloudflared/config.yml があると Quick Tunnel は起動しません)");
         }
     });
-    match tokio::time::timeout(std::time::Duration::from_secs(30), url_rx).await {
+    let url = match tokio::time::timeout(std::time::Duration::from_secs(30), url_rx).await {
         Ok(Ok(url)) => {
-            let full = format!("{url}/{fragment}");
-            println!("  インターネット: {full}");
-            if let Ok(code) = QrCode::new(full.as_bytes()) {
-                let qr = code.render::<unicode::Dense1x2>().quiet_zone(true).build();
-                println!("{qr}");
+            if qr {
+                let full = format!("{url}/{fragment}");
+                println!("  {label}: {full}");
+                if let Ok(code) = QrCode::new(full.as_bytes()) {
+                    let qr = code.render::<unicode::Dense1x2>().quiet_zone(true).build();
+                    println!("{qr}");
+                }
+                println!("  (Quick Tunnel の URL は起動のたびに変わります)");
             }
-            println!("  (Quick Tunnel の URL は起動のたびに変わります)");
+            Some(url)
         }
-        _ => eprintln!("  トンネル: URL を取得できませんでした"),
-    }
-    Some(child)
+        _ => {
+            eprintln!("  {label}: URL を取得できませんでした");
+            None
+        }
+    };
+    Some((child, url))
 }
 
 #[cfg(test)]

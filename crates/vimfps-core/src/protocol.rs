@@ -8,10 +8,18 @@ use crate::weapons::{Gun, Inventory, Slot};
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a message changes shape. Client and server must agree.
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
 
 fn default_bot_skill() -> u8 {
     3
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn default_countdown() -> f32 {
+    5.0
 }
 
 pub type ClientId = u32;
@@ -72,6 +80,10 @@ pub enum ClientMsg {
     },
     Ping {
         id: u32,
+        /// The round trip this client measured last (ms): the host shows it
+        /// to its admin.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rtt: Option<f32>,
     },
     /// Practice mode only: number of bots.
     Bots {
@@ -321,6 +333,13 @@ pub enum ServerMsg {
         tanks: Vec<TankState>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ring: Option<RingState>,
+        /// Waiting for the host's admin to start the match (no one is on
+        /// the field; everyone watches).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lobby: bool,
+        /// Seconds until the match the admin started begins.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        countdown: Option<f32>,
     },
     Roster {
         players: Vec<RosterEntry>,
@@ -386,9 +405,173 @@ pub enum ServerMsg {
         ranking: Vec<RosterEntry>,
         next_in: f32,
     },
-    MatchStart,
+    /// A match began: its rules (the admin may have changed them).
+    MatchStart {
+        #[serde(default = "yes")]
+        respawn: bool,
+        #[serde(default)]
+        ring: bool,
+        #[serde(default)]
+        time_limit: f32,
+        #[serde(default)]
+        frag_limit: u32,
+        #[serde(default = "default_bot_skill")]
+        bot_skill: u8,
+    },
     Pong {
         id: u32,
+    },
+}
+
+// ---------------------------------------------------------------- admin
+//
+// The host's admin does not play: they watch everything and run the
+// matches, from the admin page (`/admin.html`, with a key) or the host's
+// terminal. Players have no message that starts, ends or changes a match.
+
+/// The rules of a match that the admin may change. They take effect when
+/// the next match starts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchSettings {
+    /// Minutes.
+    pub time_limit: f32,
+    pub frag_limit: u32,
+    pub bots: u32,
+    pub bot_skill: u8,
+    pub respawn: bool,
+    pub ring: bool,
+    pub tanks: bool,
+}
+
+/// From the admin page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum AdminMsg {
+    /// First message: the admin key.
+    Hello { key: String },
+    /// Start the match after `countdown` seconds (from the waiting room or
+    /// the result screen).
+    Start {
+        #[serde(default = "default_countdown")]
+        countdown: f32,
+    },
+    /// Call off the countdown.
+    Cancel,
+    /// End the match now (results, then the waiting room).
+    End,
+    /// Back to the waiting room at once (no results).
+    Lobby,
+    /// Rules of the next match.
+    Settings { settings: MatchSettings },
+    /// Go on to the next match by itself after the results.
+    Auto { on: bool },
+    /// The number of bots, at once.
+    Bots { n: u32 },
+    /// One bot's skill 1..=5, at once (None: the room's skill).
+    BotLevel {
+        id: ClientId,
+        #[serde(default)]
+        level: Option<u8>,
+    },
+    /// Disconnect a player.
+    Kick { id: ClientId },
+    /// Move a player to the spectators.
+    Spectate { id: ClientId },
+    /// A message to everyone, from the admin.
+    Say { text: String },
+    /// A command line, as typed into the host's terminal (`start 5`,
+    /// `set time=5`, `status` ...).
+    Command { line: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    /// Waiting for the admin to start.
+    Lobby,
+    /// Started: counting down.
+    Countdown,
+    Live,
+    /// The result screen after a match.
+    Results,
+}
+
+/// Everything about one player, for the admin.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminPlayer {
+    pub id: ClientId,
+    pub name: String,
+    pub bot: bool,
+    pub spectator: bool,
+    pub out: bool,
+    pub alive: bool,
+    pub hp: f32,
+    pub kills: u32,
+    pub deaths: u32,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub sneak: bool,
+    pub ads: bool,
+    /// 0 hip, 1 ADS, 2 scope.
+    pub zoom: u8,
+    pub gun: Option<Gun>,
+    pub tank: Option<u32>,
+    /// Seconds until respawn while dead.
+    pub respawn: f32,
+    /// Round trip to the host (ms), measured by the host. None for bots.
+    #[serde(default)]
+    pub ping: Option<f32>,
+    /// A bot's skill 1..=5 (None for people).
+    #[serde(default)]
+    pub level: Option<u8>,
+    /// The bot has a skill of its own (not the room's).
+    #[serde(default)]
+    pub own_level: bool,
+}
+
+/// The whole match at a glance, sent to admins 20 times a second.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminState {
+    pub phase: Phase,
+    /// Seconds left in the match.
+    pub left: f32,
+    pub countdown: Option<f32>,
+    pub intermission: Option<f32>,
+    /// Next match starts by itself after the results.
+    pub auto: bool,
+    /// Rules of the match being played (or the last one).
+    pub settings: MatchSettings,
+    /// Rules of the next match.
+    pub next: MatchSettings,
+    /// Ranked as in the match.
+    pub players: Vec<AdminPlayer>,
+    pub tanks: Vec<TankState>,
+    pub grenades: Vec<GrenadeState>,
+    pub ring: Option<RingState>,
+}
+
+/// To the admin page (besides every message sent to all players).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum AdminOut {
+    AdminWelcome {
+        /// Who this key belongs to.
+        name: String,
+        server: String,
+        version: String,
+        map: Box<Map>,
+        specs: Box<Specs>,
+    },
+    AdminState {
+        #[serde(flatten)]
+        state: Box<AdminState>,
+    },
+    AdminReply {
+        ok: bool,
+        text: String,
     },
 }
 
@@ -415,5 +598,16 @@ mod tests {
         assert_eq!(t, ClientMsg::Throw { power: 4 });
         let s: ClientMsg = serde_json::from_str(r#"{"t":"select","slot":"medkit"}"#).unwrap();
         assert_eq!(s, ClientMsg::Select { slot: Slot::Medkit });
+    }
+
+    #[test]
+    fn admin_json_shape() {
+        let m: AdminMsg = serde_json::from_str(r#"{"t":"start"}"#).unwrap();
+        assert_eq!(m, AdminMsg::Start { countdown: 5.0 });
+        let m: AdminMsg = serde_json::from_str(r#"{"t":"kick","id":3}"#).unwrap();
+        assert_eq!(m, AdminMsg::Kick { id: 3 });
+        // A bare match_start (older shape) still reads.
+        let s: ServerMsg = serde_json::from_str(r#"{"t":"match_start"}"#).unwrap();
+        assert!(matches!(s, ServerMsg::MatchStart { respawn: true, .. }));
     }
 }

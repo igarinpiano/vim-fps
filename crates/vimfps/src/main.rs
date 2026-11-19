@@ -5,6 +5,7 @@
 //!   vimfps update [--check] [--yes]
 //!   vimfps uninstall [--yes]
 
+mod admin;
 mod firewall;
 mod flow;
 mod rc;

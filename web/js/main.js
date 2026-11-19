@@ -50,6 +50,10 @@ const game = {
   me: null,
   left: 0,
   intermission: null,
+  // Waiting for the host's admin to start the match, and the countdown
+  // once they have.
+  lobby: false,
+  countdown: null,
   pos: { x: 0, y: 0, z: 0 },
   vel: { x: 0, z: 0 },
   yaw: 0,
@@ -118,6 +122,8 @@ function resetGame() {
     zoom: 0,
     turnLeft: 0,
     intermission: null,
+    lobby: false,
+    countdown: null,
     lastInput: '',
     watching: false,
     follow: null,
@@ -1622,19 +1628,24 @@ const menu = { items: [], sel: 0 };
 
 function buildMenu() {
   menu.items = [];
+  // Offline games on a host's page are only for warming up: the label
+  // says they are not the server's match (that one the admin runs).
+  const off = serverInfo ? 'ひとりで (サーバーの試合とは別)' : 'オフライン';
   if (serverInfo) {
     const mode = serverInfo.respawn === false ? ' · 復活なし' : '';
+    const managed = serverInfo.managed ? ' · 試合は管理者が開始' : '';
     menu.items.push({
       label: 'このサーバーに参加',
-      sub: `${serverInfo.name} · v${serverInfo.version}${mode}${serverInfo.password ? ' · 合言葉あり' : ''}`,
+      sub: `${serverInfo.name} · v${serverInfo.version}${mode}${serverInfo.password ? ' · 合言葉あり' : ''}${managed}`,
       run: () => connect(''),
     });
     menu.items.push({ label: 'このサーバーを観戦', sub: '試合には出ずに見る (:play で途中参加)', run: () => connect('', true) });
   }
-  menu.items.push({ label: '射撃訓練場', sub: 'オフライン · 10〜400 m の的 · 全武器 · 弾無限', run: () => startPractice(0, { range: true }) });
-  menu.items.push({ label: 'カスタムマッチ', sub: 'オフライン · bot の数・強さ・ルール・時間を選ぶ', run: () => openCustom() });
-  menu.items.push({ label: '練習する', sub: 'オフライン · bot 5 体', run: () => startPractice(5) });
-  menu.items.push({ label: '練習する (復活なし)', sub: 'オフライン · bot 5 体 · 最後の 1 人が勝ち', run: () => startPractice(5, { noRespawn: true }) });
+  menu.items.push({ label: '射撃訓練場', sub: `${off} · 10〜400 m の的 · 全武器 · 弾無限`, run: () => startPractice(0, { range: true }) });
+  // A match with its own rules is the admin's business on a host.
+  if (!serverInfo) menu.items.push({ label: 'カスタムマッチ', sub: 'オフライン · bot の数・強さ・ルール・時間を選ぶ', run: () => openCustom() });
+  menu.items.push({ label: '練習する', sub: `${off} · bot 5 体`, run: () => startPractice(5) });
+  menu.items.push({ label: '練習する (復活なし)', sub: `${off} · bot 5 体 · 最後の 1 人が勝ち`, run: () => startPractice(5, { noRespawn: true }) });
   menu.items.push({ label: 'URL を指定して接続', sub: ':connect URL', run: () => openCommand('connect ') });
   menu.items.push({ label: '操作説明', sub: ':help', run: () => showMsg(':help', HELP) });
   menu.items.push({ label: '設定', sub: ':options', run: () => showMsg(':options — :set で変更できます', optionsHelp()) });
@@ -1659,7 +1670,7 @@ function renderMenu() {
 function showTitle() {
   show('title');
   show('hud', false);
-  for (const id of ['inventory', 'mapwin', 'chatwin', 'bsod', 'boot', 'resultwin', 'progress', 'customwin']) show(id, false);
+  for (const id of ['inventory', 'mapwin', 'chatwin', 'bsod', 'boot', 'resultwin', 'progress', 'customwin', 'lobbywin']) show(id, false);
   buildMenu();
   vim.setMode('menu');
 }
@@ -1937,8 +1948,15 @@ function onMessage(m) {
       break;
     case 'match_start':
       show('resultwin', false);
+      showLobby(false);
       resetControls(true);
-      balloon('新しい試合が始まりました');
+      if (m.respawn !== undefined) game.respawnMode = m.respawn !== false;
+      balloon(
+        '試合が始まりました',
+        m.time_limit
+          ? `${Math.round(m.time_limit / 60)} 分 · ${m.respawn === false ? '復活なし (最後の 1 人が勝ち)' : m.frag_limit > 1e6 ? 'キル数の上限なし' : `${m.frag_limit} キル先取`}${m.ring ? ' · リングあり' : ''}`
+          : '',
+      );
       break;
     case 'pong': {
       const t = game.pings.get(m.id);
@@ -2084,9 +2102,80 @@ function showResult(m) {
   hideDeath();
 }
 
+/// The clock in the task bar.
+function clockText() {
+  if (game.lobby) return game.countdown != null ? `開始 ${Math.ceil(game.countdown)}` : '待機中';
+  return game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left);
+}
+
+/// Under the result table: what follows it.
+function resultNext() {
+  const n = Math.ceil(game.intermission);
+  return serverInfo && serverInfo.managed && !game.practice ? `${n} 秒後に結果を閉じます (次の試合は管理者が開始)` : `${n} 秒後に次の試合`;
+}
+
+// ---------------------------------------------------------------- waiting room
+
+/// Into the waiting room: nobody is on the field, so the view starts high
+/// over the middle of the map (the watching keys move it).
+function enterLobby() {
+  show('resultwin', false);
+  hideDeath();
+  if (!game.watching) startWatching(null);
+  game.auto = false;
+  game.pos = { x: 0, y: 0, z: 0 };
+  startSky();
+  showLobby(true);
+}
+
+function showLobby(on) {
+  show('lobbywin', on);
+  if (!on) lobbyKey = '';
+}
+
+let lobbyKey = '';
+function renderLobby() {
+  const rows = [...game.roster.values()];
+  const playing = rows.filter((r) => !r.spectator);
+  const watching = rows.filter((r) => r.spectator && !r.bot);
+  const humans = playing.filter((r) => !r.bot).length;
+  const bots = playing.length - humans;
+  const cd = game.countdown;
+  const key = JSON.stringify([cd, rows.map((r) => [r.id, r.name, r.spectator, r.bot]), game.myId]);
+  if (key === lobbyKey) return;
+  lobbyKey = key;
+  const me = game.roster.get(game.myId);
+  setText($('lobby-title'), cd != null ? 'まもなく試合開始' : `待機中 — ${serverInfo ? serverInfo.name : 'サーバー'}`);
+  setText(
+    $('lobby-status'),
+    cd != null
+      ? me && me.spectator
+        ? '観戦で見ます (:play で試合に参加)'
+        : '試合が始まります。準備してください'
+      : `管理者が試合を開始するまでお待ちください · ${humans} 人${bots ? ` + bot ${bots}` : ''}${watching.length ? ` · 観戦 ${watching.length}` : ''}`,
+  );
+  const count = $('lobby-count');
+  show('lobby-count', cd != null);
+  if (cd != null) count.textContent = String(Math.max(0, Math.ceil(cd)));
+  const ul = $('lobby-list');
+  ul.innerHTML = '';
+  for (const r of [...playing.filter((r) => !r.bot), ...playing.filter((r) => r.bot), ...watching]) {
+    const li = document.createElement('li');
+    li.className = r.id === game.myId ? 'me' : r.bot ? 'bot' : r.spectator ? 'watch' : '';
+    li.textContent = `${r.name}${r.bot ? ' (bot)' : r.spectator ? ' (観戦)' : ''}`;
+    ul.appendChild(li);
+  }
+}
+
 function onSnap(m) {
   if (m.watching && !game.watching && !game.bsodPending) startWatching(null);
   if (!m.watching && game.watching && m.me) stopWatching();
+  const wasLobby = game.lobby;
+  game.lobby = !!m.lobby;
+  game.countdown = m.countdown ?? null;
+  if (game.lobby && !wasLobby) enterLobby();
+  else if (!game.lobby && wasLobby) showLobby(false);
+  if (game.lobby) renderLobby();
   game.me = m.me;
   game.left = m.left;
   game.intermission = m.intermission;
@@ -2669,7 +2758,8 @@ function frame(now) {
       pingTimer = 0;
       game.pingSeq += 1;
       game.pings.set(game.pingSeq, now);
-      game.conn.send({ t: 'ping', id: game.pingSeq });
+      // With the last round trip measured: the host shows it to its admin.
+      game.conn.send(game.ping != null ? { t: 'ping', id: game.pingSeq, rtt: Math.round(game.ping * 10) / 10 } : { t: 'ping', id: game.pingSeq });
     }
     updateHud(dt);
     updateCompass(now);
@@ -3161,12 +3251,12 @@ function updateWatchHud() {
   setText($('hp-text'), t ? String(hp) : '—');
   setText($('tb-kd'), r ? `${r.kills} / ${r.deaths}` : '');
   setText($('tb-ping'), pingLabel());
-  setText($('clock'), game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left));
-  if (game.intermission != null) setText($('result-next'), `${Math.ceil(game.intermission)} 秒後に次の試合`);
+  setText($('clock'), clockText());
+  if (game.intermission != null) setText($('result-next'), resultNext());
   show('progress', false);
   const rows = [...game.roster.values()].filter((x) => !x.spectator);
   const alive = rows.filter((x) => !x.out).length;
-  setText($('rank'), (game.respawnMode ? `観戦中 · ${rows.length} 人` : `残り ${alive} 人 / ${rows.length} 人`) + ringLine());
+  setText($('rank'), game.lobby ? `待機中 · ${rows.length} 人` : (game.respawnMode ? `観戦中 · ${rows.length} 人` : `残り ${alive} 人 / ${rows.length} 人`) + ringLine());
   show('ringwarn', false);
   show('prompt', false);
 }
@@ -3305,8 +3395,8 @@ function updateHud() {
   const r = game.roster.get(game.myId);
   setText($('tb-kd'), r ? `${r.kills} / ${r.deaths}` : '');
   setText($('tb-ping'), pingLabel());
-  setText($('clock'), game.range ? '∞' : game.intermission != null ? `次 ${fmtTime(game.intermission)}` : fmtTime(game.left));
-  if (game.intermission != null) setText($('result-next'), `${Math.ceil(game.intermission)} 秒後に次の試合`);
+  setText($('clock'), game.range ? '∞' : clockText());
+  if (game.intermission != null) setText($('result-next'), resultNext());
 
   // Reload / heal progress.
   const prog = tank ? (tank.reload >= 0 ? ['砲弾を装填中', tank.reload] : null) : me.reload >= 0 ? ['リロード', me.reload] : me.heal >= 0 ? ['回復中', me.heal] : null;

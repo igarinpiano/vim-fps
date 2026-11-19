@@ -99,7 +99,7 @@ vimfps host --no-config # 設定ファイルを読まずに起動
 - `tunnel` のようなスイッチは名前だけ書きます。`tunnel=off` と書けばその行では付けません
 - `skin=` の相対パスは、設定ファイルのある場所から数えます
 - 知らない項目や値の無い項目は、行番号つきの警告を出して飛ばします
-- `host password=…` は平文でファイルに残ります。人に渡すファイルには書かないでください
+- `host password=…` と `host admin=…` は平文でファイルに残ります。人に渡すファイルには書かないでください
 - 引数なしで起動 (ダブルクリック) したときも `~/.vimfpsrc` を読みます
 
 ### host の項目
@@ -126,6 +126,11 @@ vimfps host --no-config # 設定ファイルを読まずに起動
 | `web` | `web=embedded` | 配信する Web クライアント |
 | `no-update-check` | `no-update-check` | 起動時に新しい版を確認しない |
 | `no-network-check` | `no-network-check` | macOS: ファイアウォールの確認をしない |
+| `admin` | `admin=igarin:8文字以上の鍵` | 管理者 (試合を開始・終了する人)。何回でも書けます。書かなければ起動のたびに鍵を作って表示 |
+| `admin-port` | `admin-port=7778` | 管理ページを別のポートで配信 |
+| `admin-bind` | `admin-bind=0.0.0.0` | 管理ページのポートの待ち受けアドレス (既定 `127.0.0.1`) |
+| `admin-tunnel` | `admin-tunnel` | 管理ページを別の Quick Tunnel で公開 |
+| `autostart` | `autostart` | 管理者を待たずに試合を始め、自動で次の試合へ (以前の動き) |
 
 ---
 
