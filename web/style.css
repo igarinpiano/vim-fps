@@ -144,7 +144,7 @@ body:not(.touch) .btnrow { display: none; }
    clear of the on-screen keyboard), with large buttons. */
 body.touch #chatwin, body.touch #cmdwin { top: 56px; bottom: auto; z-index: 45; }
 body.touch .xpbtn { min-height: 40px; font-size: 15px; flex: 1; }
-#msgwin { left: 50%; top: 45%; transform: translate(-50%, -50%); max-width: calc(100vw - 32px); }
+#msgwin { left: 50%; top: 45%; transform: translate(-50%, -50%); max-width: calc(100vw - 32px); z-index: 26; }
 #msg-body { margin: 0; font: 13px/1.5 var(--mono); background: #fff; border: 1px solid #7f9db9; padding: 8px 10px; max-height: calc(100vh - 200px); max-width: calc(100vw - 60px); overflow: auto; white-space: pre; min-width: min(560px, calc(100vw - 60px)); }
 #msg-body .err { color: #c00000; }
 /* Death: stop screen and reboot (they cover everything, the taskbar too). */
