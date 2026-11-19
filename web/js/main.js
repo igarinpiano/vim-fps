@@ -287,6 +287,7 @@ const HELP = [
   '  :set nonameplates    頭上の名前を消す :set nohpbars  頭上の体力ゲージを消す',
   '  :texture             自分の画像を地面・壁などに貼る (:texture だけで使い方と一覧)',
   '  :sounds              起動音・エラー音・終了音のファイルの状態',
+  '  :speakers            サラウンド (5.1 / 7.1 など) の設定とスピーカーのテスト (:speakers test)',
   '  :eq                  イコライザー (低音を強くするなど。:eq bass  :eq steps  :eq off  :eq load でファイル)',
   '  :skin                スキン (テクスチャ・効果音・UI の色をまとめたもの)',
   '  :mkvimrc             設定を .vimfpsrc に書き出す  :source  .vimfpsrc を読み込む (:help config)',
@@ -582,6 +583,11 @@ function runCommand(line) {
       break;
     case 'eq':
       eqCommand(args.trim());
+      break;
+    case 'speaker':
+    case 'speakers':
+    case 'spk':
+      speakersCommand(args.trim());
       break;
     case 'fs':
     case 'fullscreen':
@@ -1068,6 +1074,61 @@ function showEq() {
   L.push('');
   L.push(':mkvimrc で .vimfpsrc に set eq=… として書き出され、:source で読み込めます。音割れ防止のリミッターが掛かります。');
   showMsg(':eq — イコライザー', L);
+}
+
+/// :speakers — how the sound goes out (headphones or N speakers), the
+/// channels in order, and `:speakers test` (noise on each in turn).
+/// `:speakers 5.1` sets it (as `:set speakers=`).
+function speakersCommand(arg) {
+  sound.wake();
+  if (arg === 'test') {
+    const info = sound.outputInfo();
+    const total = sound.speakerTest((label, k, n) => balloon(`スピーカーのテスト ${k + 1} / ${n}`, label));
+    if (total) balloon(`スピーカーのテスト (${info.mode})`, `${Math.round(total)} 秒。鳴っている場所と表示が合っているか確かめてください`);
+    return undefined;
+  }
+  if (arg) {
+    const r = settings.command([`speakers=${arg}`]);
+    if (r.error) return balloon(r.error, '', 'err');
+    if (!r.changed.length) sound.rebuild();
+  } else {
+    // The OS output may have changed since (stereo → 5.1): look again.
+    sound.rebuild();
+  }
+  // After the sound has rebuilt (its listener runs after this one).
+  setTimeout(showSpeakers, 0);
+  return undefined;
+}
+
+function showSpeakers() {
+  const info = sound.outputInfo();
+  const L = [`設定: speakers=${info.setting}  →  今の出し方: ${info.mode}`];
+  if (info.note) L.push(`  ${info.note}`);
+  L.push(`  このブラウザーの出力: 最大 ${info.max} チャンネル`);
+  L.push('');
+  if (info.layout) {
+    L.push('チャンネルの順番 (この順に音声機器へ送ります):');
+    info.layout.forEach((sp, i) => L.push(`  ${String(i + 1).padStart(2)}. ${sp.name.padEnd(4)} ${sp.label}${sp.lfe ? '  (全部の音の低音を少し)' : `  ${sp.az}°`}`));
+    L.push('');
+    L.push('  銃声・足音などは、その方向の両隣のスピーカーから鳴ります (高さは使いません)。');
+    L.push('  起動音・被弾音など方向のない音は左右のフロントから鳴ります。');
+  } else {
+    L.push('  ヘッドホン用の立体音響 (HRTF) で、左右・前後・上下を 2 チャンネルに収めて鳴らします。');
+  }
+  L.push('');
+  L.push('切り替え (:speakers 名前 / :set speakers=名前):');
+  L.push('  headphones  ヘッドホン (2 チャンネルの立体音響。初期値)');
+  L.push('  stereo      スピーカー 2 本 (左右に振り分け。立体音響の加工なし)');
+  L.push('  quad        スピーカー 4 本 (前 2・後ろ 2)');
+  L.push('  5.1         5.1ch (L R C LFE SL SR)');
+  L.push('  7.1         7.1ch (L R C LFE BL BR SL SR)');
+  L.push('  auto        出力のチャンネル数で選ぶ (8 → 7.1、6 → 5.1、4 → quad、2 → headphones)');
+  L.push('');
+  L.push('  :speakers test   各スピーカーから順に音を出して確かめる');
+  L.push('');
+  L.push('5.1 / 7.1 で鳴らすには、OS の音声出力を 5.1 / 7.1 にしてください (Windows: サウンドの設定 → スピーカーの構成)。');
+  L.push('出力が 2 チャンネルのままだと、ブラウザーは 2 チャンネルしか出せません (上の「最大」の数)。');
+  showMsg(':speakers — サラウンド', L);
 }
 
 /// An Equalizer APO / AutoEq file → `:set eq=`.
@@ -2297,6 +2358,12 @@ for (const ev of ['mousedown', 'wheel', 'contextmenu']) {
 }
 
 settings.onChange((k, v) => {
+  if (k === 'speakers' && sound.ctx) {
+    setTimeout(() => {
+      const info = sound.outputInfo();
+      if (info.note) balloon(`speakers: ${info.mode} で鳴らします`, info.note, 'err');
+    }, 0);
+  }
   if (k === 'uianim') document.body.classList.toggle('uianim', v);
   if (k === 'showfps') show('fps', v);
   if (k === 'name' && vim.mode === 'menu') renderMenu();

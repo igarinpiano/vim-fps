@@ -25,6 +25,7 @@ vim-fps で自分好みに変えられるものは、次の 2 つにまとまっ
 set adssens=30 forward=j      " :set と同じ。1 行に何個でも
 set nocompass
 set fov=150                   " 視野角 (40〜360。120 を超えると魚眼)
+set speakers=5.1              " サラウンド (headphones / stereo / quad / 5.1 / 7.1 / auto)
 set eq=ls100:+6,pk3k:+3:1.4   " イコライザー (プリセット名でも: set eq=bass)
 skin neon                     " このブラウザーに入れたスキンを使う
 custom bots=8 skill=4 rule=last time=15

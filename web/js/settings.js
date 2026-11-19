@@ -3,6 +3,7 @@
 // Pure module (storage is passed in) so it can be tested with node --test.
 
 import { eqError } from './eq.js';
+import { SPEAKER_MODES } from './surround.js';
 
 export const OPTIONS = {
   name: { type: 'string', def: '', desc: 'プレイヤー名 (次の接続から)' },
@@ -21,6 +22,7 @@ export const OPTIONS = {
   fov: { type: 'number', def: 80, min: 40, max: 360, desc: '視野角 (度、画面の縦方向)。120 を超えると魚眼になり、360 で全方向が見える' },
   timeoutlen: { type: 'number', def: 1000, min: 50, max: 10000, alias: ['tm'], desc: 'dd や gt の 2 打目を待つ時間 (ミリ秒)' },
   volume: { type: 'number', def: 70, min: 0, max: 100, alias: ['vol'], desc: '音量 (0-100)' },
+  speakers: { type: 'enum', values: SPEAKER_MODES, def: 'headphones', alias: ['spk'], desc: '音の出し方: headphones (ヘッドホンで立体音響) / stereo / quad / 5.1 / 7.1 (スピーカーの数だけチャンネルを出す) / auto (出力のチャンネル数で選ぶ)。:speakers で確認とテスト' },
   eq: { type: 'string', def: 'off', maxlen: 600, validate: eqError, desc: 'イコライザー: プリセット名 (bass / steps など) か ls100:+6,pk3k:+3:1.4 のようなフィルターの並び (:eq で一覧とグラフ)' },
   showcmd: { type: 'bool', def: true, alias: ['sc'], desc: '入力途中のキーを表示' },
   showfps: { type: 'bool', def: false, desc: 'FPS を表示' },
