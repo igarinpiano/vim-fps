@@ -296,6 +296,7 @@ const HELP = [
   '  :set name=名前       名前             :set {opt}&     初期値に戻す',
   '  :ls                  スコア           :bots 5        bot の数 (練習のみ)',
   '  :connect URL         サーバーに接続    :practice      練習',
+  '  :join                このページのサーバーに参加 (練習中に試合が始まると自動で参加: :set noautojoin で切る)',
   '  :fs                  フルスクリーン   :q             タイトルへ',
   '  :watch               観戦に回る       :play          観戦から試合へ',
   '  :follow 名前         その人を観戦     :range         射撃訓練場',
@@ -554,6 +555,10 @@ function runCommand(line) {
       break;
     case 'practice':
       startPractice(args ? parseInt(args, 10) : 5);
+      break;
+    case 'join':
+      if (!serverInfo) balloon('E: このページはサーバーから開かれていません', ':connect URL で接続', 'err');
+      else connect('');
       break;
     case 'bots':
       if (game.practice && game.conn) game.conn.send({ t: 'bots', n: Math.max(0, Math.min(15, parseInt(args, 10) || 0)) });
@@ -1723,9 +1728,61 @@ function connect(input, spectate = false) {
   conn.onopen = () => conn.send(joinMsg(pw ? decodeURIComponent(pw) : null, spectate));
 }
 
+// ---------------------------------------------------------------- joining from practice
+//
+// On a host's page, practising offline while the match waits for its
+// admin: the host's /match.json is checked every 1.5 s, and when the admin
+// starts a match the practice ends and the page joins it (:set noautojoin:
+// only a notice).
+
+const serverWatch = { phase: null, players: 0, busy: false };
+const SERVER_PHASES = { lobby: '待機中', countdown: 'まもなく開始', live: '試合中', results: '結果' };
+
+async function pollServer() {
+  if (!serverInfo || !serverInfo.managed || !game.practice || !game.map) {
+    serverWatch.phase = null;
+    return;
+  }
+  if (serverWatch.busy) return;
+  serverWatch.busy = true;
+  const conn = game.conn;
+  try {
+    const r = await fetch('match.json', { cache: 'no-store' });
+    const st = await r.json();
+    if (game.conn !== conn || !game.practice || !st.phase) return;
+    const was = serverWatch.phase;
+    serverWatch.phase = st.phase;
+    serverWatch.players = st.players;
+    const starting = st.phase === 'countdown' || (st.phase === 'live' && was != null && was !== 'live');
+    if (starting && was !== 'countdown') {
+      if (settings.get('autojoin')) {
+        balloon('サーバーの試合が始まります', `練習を終えて参加します${st.countdown != null ? ` (${st.countdown} 秒後に開始)` : ''}`);
+        sound.event('startup');
+        connect('');
+      } else balloon('サーバーの試合が始まります', ':join で参加 (:set autojoin で自動)');
+    } else if (was == null) {
+      balloon(
+        st.phase === 'live' ? 'サーバーは試合中です' : 'サーバーの試合を待っています',
+        st.phase === 'live' ? ':join で途中参加できます' : settings.get('autojoin') ? '管理者が試合を始めたら自動で参加します (:set noautojoin で切る)' : ':join で参加',
+      );
+    }
+  } catch {
+    // The host is gone or busy: try again next time.
+  } finally {
+    serverWatch.busy = false;
+  }
+}
+setInterval(pollServer, 1500);
+
 /// The task bar's ping: "練習 12 ms" offline (or the mode's name), "34 ms"
 /// on a server.
 function pingLabel() {
+  const base = pingBase();
+  if (!game.practice || !serverWatch.phase) return base;
+  return `${base} · サーバー ${SERVER_PHASES[serverWatch.phase] || ''} ${serverWatch.players} 人`;
+}
+
+function pingBase() {
   const tag = game.practice ? (game.offlineName || offlineName({})).short : '';
   if (game.ping == null) return tag;
   const ms = `${game.ping < 10 ? game.ping.toFixed(1) : Math.round(game.ping)} ms`;

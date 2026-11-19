@@ -177,7 +177,11 @@ struct AppState {
     admin: bool,
     /// The admin port's listener: `/` is the admin page.
     admin_root: bool,
+    /// `/match.json`: the match's phase (kept up to date by the game loop).
+    status: Status,
 }
+
+type Status = Arc<std::sync::RwLock<Arc<str>>>;
 
 /// The skin folder: resolved, with a readable skin.json. Returns (folder,
 /// the skin's name).
@@ -316,6 +320,7 @@ async fn host(args: HostArgs) -> i32 {
     let web: crate::webclient::Shared = Arc::new(std::sync::RwLock::new(Arc::new(files)));
     crate::webclient::spawn_refresh(args.web.clone(), web.clone());
     let gate = Arc::new(crate::admin::Gate::new(admins));
+    let status: Status = Arc::new(std::sync::RwLock::new(Arc::from("{}")));
     let state = AppState {
         web,
         events: ev_tx.clone(),
@@ -325,14 +330,16 @@ async fn host(args: HostArgs) -> i32 {
         gate: gate.clone(),
         admin: admin_listener.is_none(),
         admin_root: false,
+        status: status.clone(),
     };
     let server_name = args.name.clone();
-    tokio::spawn(game_loop(cfg.clone(), ev_rx, server_name));
+    tokio::spawn(game_loop(cfg.clone(), ev_rx, server_name, status));
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/admin/ws", get(admin_ws_handler))
         .route("/server-info.json", get(server_info))
+        .route("/match.json", get(match_status))
         .route("/skin/{*path}", get(skin_file))
         .fallback(static_file)
         .with_state(state.clone());
@@ -546,6 +553,18 @@ async fn server_info(State(st): State<AppState>) -> Response {
         [(header::CACHE_CONTROL, "no-store")],
         [(header::CONTENT_TYPE, "application/json")],
         st.info.to_string(),
+    )
+        .into_response()
+}
+
+/// The match's phase, for pages practising offline (they join when the
+/// admin starts a match).
+async fn match_status(State(st): State<AppState>) -> Response {
+    let body = st.status.read().map(|s| s.to_string()).unwrap_or_default();
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
     )
         .into_response()
 }
@@ -888,7 +907,12 @@ fn run_line(
     }
 }
 
-async fn game_loop(cfg: Config, mut events: mpsc::Receiver<Event>, server_name: String) {
+async fn game_loop(
+    cfg: Config,
+    mut events: mpsc::Receiver<Event>,
+    server_name: String,
+    status: Status,
+) {
     let mut room = Room::new(cfg);
     let mut clients: HashMap<ClientId, mpsc::Sender<Arc<str>>> = HashMap::new();
     let mut admins: HashMap<u32, AdminConn> = HashMap::new();
@@ -1009,6 +1033,13 @@ async fn game_loop(cfg: Config, mut events: mpsc::Receiver<Event>, server_name: 
                                 }
                         }
                     }
+                }
+                // The public status, a few times a second.
+                if ticks.is_multiple_of(10)
+                    && let Some(s) = json(&room.match_status())
+                    && let Ok(mut w) = status.write()
+                {
+                    *w = s;
                 }
                 // Admins: the whole state 20 times a second.
                 if !admins.is_empty() && ticks.is_multiple_of(3)

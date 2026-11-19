@@ -62,6 +62,29 @@ code { font-family: var(--mono); font-size: 12px; }
 #gl, #bigmap { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 #tiles { position: absolute; inset: 0; display: grid; gap: 6px; padding: 6px; align-content: center; justify-content: center; }
 #w-monitor .hint { margin-top: 6px; }
+/* Monitor toolbar: how many views, which page, cycling, bots. */
+.mbar { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; margin-bottom: 6px; font-size: 12px; }
+.mbar > span { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
+.mbar b { font-weight: 400; color: #444; margin-right: 4px; }
+.mbar a { cursor: pointer; padding: 1px 5px; border: 1px solid #7f9db9; border-radius: 2px; background: linear-gradient(180deg, #fff, #ece9d8); color: #000; text-decoration: none; }
+.mbar a:active { background: linear-gradient(180deg, #e3e0d0, #f3f1e8); }
+.mbar i { font-style: normal; min-width: 4.5em; text-align: center; font-variant-numeric: tabular-nums; }
+.mbar .off i { color: #888; }
+.acts { margin-top: 8px; flex-wrap: wrap; justify-content: flex-start; }
+.acts .xpbtn { min-width: 0; }
+#cmdbtn { cursor: pointer; font-family: var(--mono); flex: none; }
+.touchonly { display: none; }
+/* Fingers: no keyboard, bigger targets. */
+@media (pointer: coarse) {
+  .keys { display: none; }
+  .touchonly { display: inline; }
+  div.touchonly { display: block; }
+  .listview.plain li { min-height: 40px; }
+  .listview li .val a { padding: 8px 12px; margin: -8px 0; }
+  .mbar a { padding: 6px 12px; }
+  .grid td { padding: 9px 6px; }
+  .acts .xpbtn { min-height: 40px; flex: 1; }
+}
 
 /* A player: a little window. */
 .tile { display: flex; flex-direction: column; border: 2px solid var(--window-edge); border-top: 0; border-radius: 5px 5px 1px 1px; background: transparent; cursor: pointer; min-width: 0; }
@@ -176,7 +199,16 @@ body[data-phase="countdown"] #phase-clock { color: #b36b00; }
 @media (max-width: 900px) {
   html, body.admin { overflow: auto; height: auto; }
   #desk { position: static; display: flex; flex-direction: column; padding: 10px 10px 50px; }
-  #side { overflow: visible; }
+  /* One column, in the order a phone needs them: run the match first. */
+  #side { display: contents; }
+  #w-match { order: 1; }
+  #w-monitor { order: 2; }
+  #w-rank { order: 3; }
+  #w-bots { order: 4; }
+  #w-rules { order: 5; }
+  #w-map { order: 6; }
+  #w-log { order: 7; }
+  #taskbar { order: 8; }
   #screens { flex: none; height: 70vh; min-height: 300px; }
   #tasks { display: none; }
   #tray #admin-name { display: none; }

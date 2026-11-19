@@ -2330,6 +2330,21 @@ impl Room {
         Ok(format!("送信しました: {text}"))
     }
 
+    /// The match at a glance, for anyone (no names, no positions).
+    pub fn match_status(&self) -> MatchStatus {
+        MatchStatus {
+            phase: self.phase(),
+            countdown: self.countdown.map(|t| t.max(0.0).ceil()),
+            left: self.left.max(0.0).ceil(),
+            players: self
+                .players
+                .values()
+                .filter(|p| p.bot.is_none() && !p.spectator)
+                .count() as u32,
+            managed: self.cfg.managed,
+        }
+    }
+
     /// Everything, for the admin (ping is filled in by the host).
     pub fn admin_state(&self) -> AdminState {
         let ranking = self.roster();
@@ -5220,5 +5235,19 @@ mod tests {
         let a = r.join("alice", None, PROTOCOL, false).unwrap();
         assert_eq!(r.phase(), Phase::Live);
         assert!(alive(&r, a));
+    }
+
+    #[test]
+    fn public_status_tells_only_the_phase() {
+        let mut r = managed(2);
+        r.join("alice", None, PROTOCOL, false).unwrap();
+        r.join("watcher", None, PROTOCOL, true).unwrap();
+        let st = r.match_status();
+        assert_eq!((st.phase, st.players, st.managed), (Phase::Lobby, 1, true));
+        r.admin_start(5.0).unwrap();
+        let st = r.match_status();
+        assert_eq!((st.phase, st.countdown), (Phase::Countdown, Some(5.0)));
+        let json = serde_json::to_string(&st).unwrap();
+        assert!(!json.contains("alice"), "no names: {json}");
     }
 }

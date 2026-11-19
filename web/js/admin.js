@@ -43,6 +43,12 @@ const S = {
   /// Monitor: 'tiles' (everyone's view) or 'map'.
   mode: 'tiles',
   showBots: false,
+  /// Views on the monitor at once (0: as many as there are, sized to fit),
+  /// the page shown, and seconds between pages (0: no cycling).
+  perPage: 0,
+  page: 0,
+  cycle: 0,
+  cycleAt: 0,
   retry: null,
   refused: false,
   // Keys.
@@ -62,6 +68,30 @@ const S = {
 
 let renderer = null;
 let mapImage = null;
+
+/// How the monitor is laid out is this viewer's own (kept in this browser).
+const VIEW_STORE = 'vimfps-admin-view';
+const PER_PAGE = [0, 1, 2, 3, 4, 6, 9, 12, 16];
+const CYCLES = [0, 5, 10, 20, 30];
+
+function loadView() {
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEW_STORE) || '{}');
+    if (PER_PAGE.includes(v.perPage)) S.perPage = v.perPage;
+    if (CYCLES.includes(v.cycle)) S.cycle = v.cycle;
+    if (typeof v.showBots === 'boolean') S.showBots = v.showBots;
+  } catch {
+    // No storage: the defaults.
+  }
+}
+
+function saveView() {
+  try {
+    localStorage.setItem(VIEW_STORE, JSON.stringify({ perPage: S.perPage, cycle: S.cycle, showBots: S.showBots }));
+  } catch {
+    // Not kept: fine for this visit.
+  }
+}
 
 function storeGet() {
   try {
@@ -566,12 +596,94 @@ let tileKey = '';
 const tileEls = new Map();
 let tileCols = 1;
 
-/// Whose views are on the monitor.
-function shown() {
-  let list = players().filter((p) => S.showBots || !p.bot);
-  if (S.solo != null) list = list.filter((p) => p.id === S.solo);
-  return list;
+/// Everyone whose view may be on the monitor (bots if asked for).
+function viewable() {
+  return players().filter((p) => S.showBots || !p.bot);
 }
+
+function pageCount() {
+  return S.perPage > 0 ? Math.max(1, Math.ceil(viewable().length / S.perPage)) : 1;
+}
+
+/// Whose views are on the monitor now (one page of them).
+function shown() {
+  const all = viewable();
+  if (S.solo != null) return all.filter((p) => p.id === S.solo);
+  if (S.perPage <= 0) return all;
+  S.page = clamp(S.page, 0, pageCount() - 1);
+  return all.slice(S.page * S.perPage, (S.page + 1) * S.perPage);
+}
+
+/// More or fewer views at once (`+` / `-`), or sized to fit (`=`).
+function setPerPage(v) {
+  const sel = S.sel;
+  S.perPage = v;
+  S.page = 0;
+  if (sel != null && v > 0) {
+    const i = viewable().findIndex((p) => p.id === sel);
+    if (i >= 0) S.page = Math.floor(i / v);
+  }
+  saveView();
+  note(v > 0 ? `表示数: ${v}` : '表示数: 自動 (全員が入る大きさ)');
+  layoutTiles(true);
+}
+
+function stepPerPage(d) {
+  const i = PER_PAGE.indexOf(S.perPage);
+  setPerPage(PER_PAGE[clamp((i < 0 ? 0 : i) + d, 0, PER_PAGE.length - 1)]);
+}
+
+function turnPage(d) {
+  const n = pageCount();
+  if (n <= 1) {
+    note('ページは 1 つだけです (表示数を減らすとページに分かれます)');
+    return;
+  }
+  S.page = (((S.page + d) % n) + n) % n;
+  S.cycleAt = performance.now() + S.cycle * 1000;
+  layoutTiles(true);
+}
+
+function stepCycle(d) {
+  const i = CYCLES.indexOf(S.cycle);
+  S.cycle = CYCLES[clamp((i < 0 ? 0 : i) + d, 0, CYCLES.length - 1)];
+  S.cycleAt = performance.now() + S.cycle * 1000;
+  saveView();
+  renderMonitorBar();
+}
+
+function setShowBots(on) {
+  S.showBots = on;
+  saveView();
+  layoutTiles(true);
+}
+
+/// The toolbar over the monitor (◀ ▶ work with a click or a tap).
+function renderMonitorBar() {
+  const bar = $('monitor-bar');
+  const n = viewable().length;
+  const pages = pageCount();
+  const items = [
+    ['per', '表示数', S.perPage > 0 ? `${S.perPage}` : `自動 (${n})`, false],
+    ['page', 'ページ', S.solo != null ? '1 人' : `${S.page + 1} / ${pages}`, pages <= 1 || S.solo != null],
+    ['cycle', '巡回', S.cycle > 0 ? `${S.cycle} 秒ごと` : 'しない', pages <= 1],
+    ['bots', 'bot', S.showBots ? '出す' : '出さない', false],
+  ];
+  const key = JSON.stringify(items);
+  if (bar._key === key) return;
+  bar._key = key;
+  bar.innerHTML = items
+    .map(([k, label, val, off]) => `<span class="${off ? 'off' : ''}" data-k="${k}"><b>${label}</b><a data-d="-1">◀</a><i>${esc(val)}</i><a data-d="1">▶</a></span>`)
+    .join('');
+}
+
+$('monitor-bar').addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-d]');
+  const item = e.target.closest('[data-k]');
+  if (!a || !item) return;
+  const d = Number(a.dataset.d);
+  ({ per: () => stepPerPage(d), page: () => turnPage(d), cycle: () => stepCycle(d), bots: () => setShowBots(!S.showBots) })[item.dataset.k]();
+});
 
 /// Lays the tiles out so all of them fit, each a 16:9 picture with its
 /// title and status bars.
@@ -582,18 +694,25 @@ function layoutTiles(force) {
   box.hidden = map;
   $('gl').hidden = map;
   $('bigmap').hidden = !map;
-  $('monitor-title').textContent = map ? 'モニター — マップ' : S.solo != null ? `モニター — ${nameOf(S.solo)} の視点` : `モニター — 視点 (${shown().length})`;
-  if (map) return;
   if (S.solo != null && !players().some((p) => p.id === S.solo)) S.solo = null;
   const list = shown();
-  const key = JSON.stringify([list.map((p) => p.id), S.solo, S.mode]);
+  const pages = pageCount();
+  $('monitor-title').textContent = map
+    ? 'モニター — マップ'
+    : S.solo != null
+      ? `モニター — ${nameOf(S.solo)} の視点`
+      : `モニター — 視点 (${viewable().length})${pages > 1 ? ` · ${S.page + 1} / ${pages} ページ` : ''}`;
+  renderMonitorBar();
+  if (map) return;
+  const key = JSON.stringify([list.map((p) => p.id), S.solo, S.mode, S.perPage]);
   if (force || key !== tileKey) {
     tileKey = key;
     const W = box.clientWidth - 12;
     const H = box.clientHeight - 12;
     const gap = 6;
     const bars = 20 + 22 + 2;
-    const n = Math.max(1, list.length);
+    // A fixed number of views keeps one size from page to page.
+    const n = S.solo != null ? 1 : Math.max(1, S.perPage > 0 ? S.perPage : list.length);
     let best = { cols: 1, w: 0 };
     for (let cols = 1; cols <= n; cols++) {
       const rows = Math.ceil(n / cols);
@@ -713,6 +832,11 @@ function frame(now) {
       v.z += (p.z - v.z) * k;
       v.yaw = wrapAngle(v.yaw + wrapAngle(p.yaw - v.yaw) * k);
       v.pitch += (p.pitch - v.pitch) * k;
+    }
+    // Pages turn by themselves when cycling.
+    if (S.cycle > 0 && S.solo == null && S.mode === 'tiles' && pageCount() > 1 && now >= S.cycleAt) {
+      if (S.cycleAt) turnPage(1);
+      S.cycleAt = now + S.cycle * 1000;
     }
     if (S.mode === 'tiles' && renderer && S.map) drawTiles(dt);
     if (S.mode === 'map') drawMap($('bigmap'), true);
@@ -1006,6 +1130,8 @@ const HELP = `管理ページのキー (マウスでも操作できます)
   Enter            実行
 
 1 モニター   hjkl 選手を選ぶ · Enter 1 人を大きく · b bot の視点も出す
+             + / - 一度に出す数 (= で自動: 全員が入る大きさ)
+             ] / [ (Ctrl-f / Ctrl-b) 次 / 前のページ · c ページの巡回 (10 秒ごと)
 2 試合       開始 (h / l で秒読み) · 取り消し · 終了 · 待機に戻す · 自動で次へ
 3 マップ     j / k 選手を選ぶ · Enter モニターで大きく
 4 順位       Enter 視点を大きく · w 観戦に回す · dd 退出させる · h / l bot の強さ
@@ -1161,13 +1287,35 @@ function windowKey(key, n, count) {
   const big = key === 'H' || key === 'L';
   const dir = key === 'h' || key === 'H' ? -1 : key === 'l' || key === 'L' ? 1 : 0;
   if (w === 'monitor') {
-    const list = shown();
+    // Across every page: moving off this one turns to the next.
+    const list = viewable();
     const i = list.findIndex((p) => p.id === S.sel);
     const step = { h: -1, l: 1, k: -tileCols, j: tileCols }[key];
     if (step != null) {
       if (!list.length) return true;
-      const j = i < 0 ? 0 : clamp(i + step * n, 0, list.length - 1);
+      const j = i < 0 ? S.page * Math.max(1, S.perPage) : clamp(i + step * n, 0, list.length - 1);
       select(list[j].id);
+      if (S.perPage > 0 && S.solo == null && Math.floor(j / S.perPage) !== S.page) {
+        S.page = Math.floor(j / S.perPage);
+        layoutTiles(true);
+      }
+      return true;
+    }
+    if (key === '+' || key === '-') {
+      stepPerPage(key === '+' ? n : -n);
+      return true;
+    }
+    if (key === '=') {
+      setPerPage(0);
+      return true;
+    }
+    if (key === ']' || key === '[') {
+      turnPage(key === ']' ? n : -n);
+      return true;
+    }
+    if (key === 'c') {
+      stepCycle(S.cycle > 0 ? -CYCLES.length : 2);
+      note(S.cycle > 0 ? `${S.cycle} 秒ごとに次のページへ` : 'ページの巡回を止めました');
       return true;
     }
     if (key === 'Enter' || key === 'o') {
@@ -1176,9 +1324,8 @@ function windowKey(key, n, count) {
       return true;
     }
     if (key === 'b') {
-      S.showBots = !S.showBots;
+      setShowBots(!S.showBots);
       note(S.showBots ? 'bot の視点も出します' : 'bot の視点を隠します');
-      layoutTiles(true);
       return true;
     }
     return false;
@@ -1267,6 +1414,11 @@ function normalKey(e) {
     else if (key === 'w' || (e.ctrlKey && key === 'w')) setFocus(S.focus + 1);
     else if (key === 'W') setFocus(S.focus - 1);
     showcmd();
+    return true;
+  }
+  // Ctrl-f / Ctrl-b: pages of views (monitor).
+  if (e.ctrlKey && (key === 'f' || key === 'b') && WINDOWS[S.focus] === 'monitor') {
+    turnPage(key === 'f' ? 1 : -1);
     return true;
   }
   if (e.ctrlKey && key === 'w') {
@@ -1427,6 +1579,18 @@ $('minimap').addEventListener('click', (e) => mapClick($('minimap'), e));
 $('minimap').addEventListener('dblclick', () => S.sel != null && toggleSolo(S.sel));
 $('bigmap').addEventListener('click', (e) => mapClick($('bigmap'), e));
 $('start').addEventListener('click', () => showMessage(':help', HELP));
+$('cmdbtn').addEventListener('click', () => openCommand());
+$('btn-say').addEventListener('click', () => openSay());
+$('rank-acts').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-act]');
+  if (!b) return;
+  setFocus(WINDOWS.indexOf('rank'));
+  if (S.sel == null) {
+    note('E: 先に順位の表で選手を選んでください', true);
+    return;
+  }
+  windowKey({ solo: 'Enter', watch: 'w', kick: 'dd' }[b.dataset.act], 1, 0);
+});
 $('cmdwin').querySelector('.x').addEventListener('click', closeCommand);
 $('saywin').querySelector('.x').addEventListener('click', closeSay);
 $('msgwin').querySelector('.x').addEventListener('click', () => answer(false));
@@ -1447,6 +1611,7 @@ window.addEventListener('resize', () => layoutTiles(true));
     history.replaceState(null, '', location.pathname + location.search);
   }
   key = key || storeGet();
+  loadView();
   setFocus(1);
   setMode('normal');
   if (key) signIn(key);

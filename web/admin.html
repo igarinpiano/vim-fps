@@ -31,12 +31,14 @@
   <section id="w-monitor" class="window" data-win="1" data-title="モニター">
     <div class="titlebar"><span><b class="wn">1</b> <span id="monitor-title">モニター</span></span><span class="tb-btns"><i>_</i><i>□</i></span></div>
     <div class="body">
+      <div id="monitor-bar" class="mbar"></div>
       <div id="screens">
         <canvas id="gl"></canvas>
         <div id="tiles"></div>
         <canvas id="bigmap" hidden></canvas>
       </div>
-      <div class="hint" id="monitor-hint"><kbd>hjkl</kbd> 選ぶ · <kbd>Enter</kbd> 1 人を大きく · <kbd>m</kbd> 視点 / マップ · <kbd>b</kbd> bot の視点 · <kbd>Esc</kbd> 一覧へ</div>
+      <div class="hint keys" id="monitor-hint"><kbd>hjkl</kbd> 選ぶ · <kbd>Enter</kbd> 1 人を大きく · <kbd>+</kbd>/<kbd>-</kbd> 表示数 (<kbd>=</kbd> 自動) · <kbd>]</kbd>/<kbd>[</kbd> ページ · <kbd>c</kbd> 巡回 · <kbd>b</kbd> bot · <kbd>m</kbd> マップ · <kbd>Esc</kbd> 一覧へ</div>
+      <div class="hint touchonly">タイルをタップで 1 人を大きく (もう一度で一覧へ)</div>
     </div>
   </section>
 
@@ -47,7 +49,7 @@
       <div class="body">
         <div id="phase"><i></i><span id="phase-name">接続中</span><b id="phase-clock">--:--</b></div>
         <ol id="match-list" class="listview plain"></ol>
-        <div class="hint"><kbd>j</kbd>/<kbd>k</kbd> 選ぶ · <kbd>Enter</kbd> 実行 · <kbd>h</kbd>/<kbd>l</kbd> 秒読み・切り替え</div>
+        <div class="hint keys"><kbd>j</kbd>/<kbd>k</kbd> 選ぶ · <kbd>Enter</kbd> 実行 · <kbd>h</kbd>/<kbd>l</kbd> 秒読み・切り替え</div>
       </div>
     </section>
 
@@ -55,7 +57,7 @@
     <section id="w-map" class="window" data-win="3" data-title="マップ">
       <div class="titlebar"><span><b class="wn">3</b> マップ</span><span class="tb-btns"><i>_</i></span></div>
       <div class="body"><canvas id="minimap" width="560" height="560"></canvas>
-        <div class="hint"><kbd>j</kbd>/<kbd>k</kbd> 選手を選ぶ · <kbd>Enter</kbd> モニターで大きく · 扇は見ている向き · 赤い縁は撃ち合い中</div></div>
+        <div class="hint"><span class="keys"><kbd>j</kbd>/<kbd>k</kbd> 選手を選ぶ · <kbd>Enter</kbd> モニターで大きく · </span>扇は見ている向き · 赤い縁は撃ち合い中</div></div>
     </section>
 
     <!-- 4: ranking -->
@@ -67,7 +69,12 @@
           <tbody></tbody>
         </table>
         <p id="watchers" class="hint"></p>
-        <div class="hint"><kbd>j</kbd>/<kbd>k</kbd> 選ぶ · <kbd>Enter</kbd> 視点を大きく · <kbd>w</kbd> 観戦に回す · <kbd>dd</kbd> 退出させる</div>
+        <div class="btns acts" id="rank-acts">
+          <button type="button" class="xpbtn" data-act="solo">視点を大きく (Enter)</button>
+          <button type="button" class="xpbtn" data-act="watch">観戦に回す (w)</button>
+          <button type="button" class="xpbtn" data-act="kick">退出させる (dd)</button>
+        </div>
+        <div class="hint keys"><kbd>j</kbd>/<kbd>k</kbd> 選ぶ · <kbd>h</kbd>/<kbd>l</kbd> bot の強さ · ボタンは選んだ人に</div>
       </div>
     </section>
 
@@ -76,7 +83,7 @@
       <div class="titlebar"><span><b class="wn">5</b> bot</span><span class="tb-btns"><i>_</i></span></div>
       <div class="body">
         <ol id="bot-list" class="listview plain"></ol>
-        <div class="hint"><kbd>j</kbd>/<kbd>k</kbd> 選ぶ · <kbd>h</kbd>/<kbd>l</kbd> 数・強さ (<kbd>H</kbd>/<kbd>L</kbd> で 5 ずつ) · <kbd>a</kbd> 全体の強さに戻す · すぐ反映</div>
+        <div class="hint"><span class="keys"><kbd>j</kbd>/<kbd>k</kbd> 選ぶ · <kbd>h</kbd>/<kbd>l</kbd> 数・強さ (<kbd>H</kbd>/<kbd>L</kbd> で 5 ずつ) · <kbd>a</kbd> 全体の強さに戻す · </span>◀ ▶ で変更 · すぐ反映</div>
       </div>
     </section>
 
@@ -86,7 +93,7 @@
       <div class="body">
         <ol id="rules-list" class="listview plain"></ol>
         <p id="rules-note" class="hint"></p>
-        <div class="hint"><kbd>j</kbd>/<kbd>k</kbd> 項目 · <kbd>h</kbd>/<kbd>l</kbd> 変更 · <kbd>Enter</kbd> または <kbd>:w</kbd> で保存 · <kbd>u</kbd> 元に戻す</div>
+        <div class="hint"><span class="keys"><kbd>j</kbd>/<kbd>k</kbd> 項目 · <kbd>h</kbd>/<kbd>l</kbd> 変更 · <kbd>Enter</kbd> または <kbd>:w</kbd> で保存 · <kbd>u</kbd> 元に戻す</span><span class="touchonly">◀ ▶ で変更して「保存する」</span></div>
       </div>
     </section>
 
@@ -95,7 +102,8 @@
       <div class="titlebar"><span><b class="wn">7</b> ログ</span><span class="tb-btns"><i>_</i></span></div>
       <div class="body">
         <ol id="log"></ol>
-        <div class="hint"><kbd>i</kbd> 全員にメッセージ · <kbd>j</kbd>/<kbd>k</kbd> スクロール</div>
+        <div class="btns acts"><button type="button" class="xpbtn" id="btn-say">全員にメッセージ (i)</button></div>
+        <div class="hint keys"><kbd>j</kbd>/<kbd>k</kbd> スクロール</div>
       </div>
     </section>
   </div>
@@ -128,7 +136,8 @@
   </div>
 
   <div id="taskbar">
-    <div id="start"><span class="flag"></span><span id="mode">NORMAL</span></div>
+    <div id="start" title="キーの一覧 (?)"><span class="flag"></span><span id="mode">NORMAL</span></div>
+    <div class="tb" id="cmdbtn" title="コマンド (:)">: コマンド</div>
     <div id="tasks"></div>
     <div class="tb grow" id="showcmd"></div>
     <div id="tray"><span id="link"></span><span id="admin-name"></span><span id="clock">--:--</span></div>

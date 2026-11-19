@@ -32,6 +32,7 @@ export const OPTIONS = {
   markers: { type: 'bool', def: true, desc: '見えている敵の頭上に ▼ を表示' },
   touch: { type: 'enum', values: ['auto', 'on', 'off'], def: 'auto', desc: 'タッチ操作パッド (auto: タッチ端末で表示)' },
   killcam: { type: 'bool', def: true, desc: '復活なしで倒されたら、倒した相手の視点で観戦 (off: 自由視点)' },
+  autojoin: { type: 'bool', def: true, desc: 'ホストのページでオフライン練習中に、管理者がサーバーの試合を始めたら自動で参加する (off: 知らせるだけ。:join で参加)' },
   autocam: { type: 'bool', def: true, desc: '観戦を自動カメラ (3D の中継視点。選手を自動で切り替え) で始める (観戦中は a で切り替え)' },
   autopip: { type: 'bool', def: true, desc: '自動カメラ中、追っている選手の視点を小窓 (ワイプ) で表示 (画面が広いときだけ)' },
   dmgnum: { type: 'bool', def: true, desc: '当てたダメージを数字で表示' },

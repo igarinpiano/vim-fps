@@ -496,6 +496,21 @@ pub enum Phase {
     Results,
 }
 
+/// What anyone may know about the host's match (`/match.json`): a page
+/// practising offline watches it to join when the admin starts a match.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MatchStatus {
+    pub phase: Phase,
+    /// Seconds until the match starts (counting down).
+    pub countdown: Option<f32>,
+    /// Seconds left in the match.
+    pub left: f32,
+    /// People in the match (not bots, not spectators).
+    pub players: u32,
+    /// Matches wait for an admin.
+    pub managed: bool,
+}
+
 /// Everything about one player, for the admin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdminPlayer {
