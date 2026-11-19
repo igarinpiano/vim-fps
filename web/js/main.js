@@ -222,8 +222,9 @@ function showMsg(title, lines, isError = false) {
   body.scrollLeft = 0;
   msgReturn = vim.mode === 'command' ? cmdReturn : vim.mode;
   if (msgReturn === 'msg') msgReturn = game.map ? 'normal' : 'menu';
-  // The title window would cover it.
-  show('title', false);
+  // The screen it opened over (the title menu, the custom match form)
+  // goes away until it closes: two windows at once would overlap.
+  showBase(null);
   vim.setMode('msg');
 }
 let msgReturn = 'menu';
@@ -231,9 +232,19 @@ let msgReturn = 'menu';
 function closeMsg() {
   show('msgwin', false);
   const back = msgReturn || (game.map ? 'normal' : 'menu');
-  if (back === 'menu') show('title');
+  showBase(back);
   vim.setMode(back);
   syncMode();
+}
+
+/// The window that belongs to a mode, back on screen (and only that one):
+/// the title menu for MENU, the custom match form for FORM. null: neither
+/// (a message or the game covers the screen). Whatever covered it (a
+/// message, the command line) puts it back through here, so leaving one
+/// never leaves an empty screen.
+function showBase(mode) {
+  show('title', mode === 'menu');
+  show('customwin', mode === 'form');
 }
 
 const HELP = [
@@ -401,8 +412,11 @@ let histPos = 0;
 function openCommand(prefill = '') {
   cmdReturn = vim.mode === 'command' ? cmdReturn : vim.mode;
   if (cmdReturn === 'msg') {
+    // Typing a command closes the message: back to what it covered (a
+    // command that opens a new message covers that again).
     show('msgwin', false);
     cmdReturn = msgReturn;
+    showBase(cmdReturn);
   }
   vim.setMode('command');
   show('cmdwin');
