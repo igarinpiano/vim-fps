@@ -69,6 +69,7 @@ test('rc: :mkvimrc output reads back into the same state', () => {
   const a = new Settings(null);
   a.command('adssens=30 nocompass accel=inf forward=j');
   a.command(['name=a b']);
+  a.command('eq=bass,pk3k:+3:1.4,pre-2');
   const custom = { ...CUSTOM_DEFAULTS, bots: 9, rule: 'last' };
   const text = buildRc({ set: a.changedArgs(), skin: 'my skin', custom, host: ['host bots=5 tunnel'] });
   assert.match(text, /^set all&$/m);
@@ -86,7 +87,7 @@ test('rc: :mkvimrc output reads back into the same state', () => {
     host: (raw) => (host.push(raw), null),
   });
   assert.deepEqual(errors, []);
-  for (const k of ['adssens', 'compass', 'accel', 'forward', 'name', 'sensitivity']) assert.equal(b.get(k), a.get(k), k);
+  for (const k of ['adssens', 'compass', 'accel', 'forward', 'name', 'sensitivity', 'eq']) assert.equal(b.get(k), a.get(k), k);
   assert.equal(b.get('name'), 'a b');
   assert.equal(skin, 'my skin');
   assert.deepEqual(c2, custom);

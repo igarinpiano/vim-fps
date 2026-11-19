@@ -3,6 +3,8 @@
 // spawning, being killed, taking damage and the end of a match (see
 // EVENT_SOUNDS).
 
+import { parseEq, isFlat, biquad } from './eq.js';
+
 /// Event sounds: files named by the skins (skin.js: "sounds" in
 /// skin.json). Without a skin.json, web/assets/sounds/<event>.wav (or .mp3 /
 /// .ogg). Without a file the moment passes in silence.
@@ -41,12 +43,73 @@ export class Sound {
     if (!AC) return;
     this.ctx = new AC();
     this.master = this.ctx.createGain();
-    this.master.connect(this.ctx.destination);
+    // master → (EQ) → speakers. The EQ follows `:set eq`.
+    this.eqNodes = [];
+    this.applyEq();
+    this.s.onChange((k) => {
+      if (k === 'eq') this.applyEq();
+    });
     const len = this.ctx.sampleRate;
     this.noise = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
     const d = this.noise.getChannelData(0);
     for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
     this.loadSamples();
+  }
+
+  /// Rebuilds the EQ from `:set eq`: master → preamp → filters → limiter
+  /// → speakers, or master → speakers when the curve is flat.
+  applyEq() {
+    if (!this.ctx) return;
+    let eq;
+    try {
+      eq = parseEq(this.s.get('eq') === 'off' ? '' : this.s.get('eq'));
+    } catch {
+      eq = { pre: 0, bands: [] };
+    }
+    this.master.disconnect();
+    for (const n of this.eqNodes) n.disconnect();
+    this.eqNodes = [];
+    if (isFlat(eq)) {
+      this.master.connect(this.ctx.destination);
+      return;
+    }
+    const fs = this.ctx.sampleRate;
+    const pre = this.ctx.createGain();
+    pre.gain.value = 10 ** (eq.pre / 20);
+    const chain = [pre];
+    for (const band of eq.bands) {
+      const { b, a } = biquad(band, fs);
+      let node;
+      if (this.ctx.createIIRFilter) node = this.ctx.createIIRFilter(b, a);
+      else {
+        // No IIRFilterNode (old browsers): Web Audio's own biquads (their
+        // shelves ignore Q).
+        node = this.ctx.createBiquadFilter();
+        node.type = { pk: 'peaking', ls: 'lowshelf', hs: 'highshelf', lp: 'lowpass', hp: 'highpass' }[band.type];
+        node.frequency.value = Math.min(band.freq, fs * 0.49);
+        node.gain.value = band.gain;
+        node.Q.value = band.type === 'lp' || band.type === 'hp' ? 20 * Math.log10(band.q) : band.q;
+      }
+      chain.push(node);
+    }
+    // Boosts can go over full scale: a limiter keeps them from clipping.
+    const lim = this.ctx.createDynamicsCompressor();
+    lim.threshold.value = -1;
+    lim.knee.value = 0;
+    lim.ratio.value = 20;
+    lim.attack.value = 0.002;
+    lim.release.value = 0.15;
+    chain.push(lim);
+    // The compressor adds makeup gain, (1 / its gain at full scale)^0.6
+    // (Web Audio spec): taken back off so quiet sounds pass unchanged.
+    const atFull = lim.threshold.value * (1 - 1 / lim.ratio.value);
+    const post = this.ctx.createGain();
+    post.gain.value = 10 ** ((0.6 * atFull) / 20);
+    chain.push(post);
+    this.master.connect(chain[0]);
+    for (let i = 0; i + 1 < chain.length; i++) chain[i].connect(chain[i + 1]);
+    post.connect(this.ctx.destination);
+    this.eqNodes = chain;
   }
 
   /// Where the event sounds come from (from the skins): { event: URL |
