@@ -459,6 +459,8 @@ struct Tank {
 struct Shell {
     owner: ClientId,
     tank: u32,
+    /// Where the tank stood when it fired (for the kill distance).
+    fired_at: Vec3,
     pos: Vec3,
     vel: Vec3,
     age: f32,
@@ -495,6 +497,9 @@ enum Struck {
 struct Grenade {
     id: u32,
     owner: ClientId,
+    /// Where the thrower stood (for the kill distance: they may be dead or
+    /// elsewhere by the time it goes off).
+    thrown_at: Vec3,
     pos: Vec3,
     vel: Vec3,
     fuse: f32,
@@ -757,7 +762,7 @@ impl Room {
         }
         self.ring = Some(ring);
         for (id, dmg, from) in burn {
-            self.damage(id, id, dmg, false, Cause::Ring, from);
+            self.damage(id, id, dmg, false, Cause::Ring, from, None);
         }
     }
 
@@ -934,7 +939,7 @@ impl Room {
                 .map(|o| o.id)
                 .collect();
             for v in hit {
-                self.damage(v, id, TANK_RAM_DAMAGE, false, Cause::Tank, q);
+                self.damage(v, id, TANK_RAM_DAMAGE, false, Cause::Tank, q, None);
             }
         }
         if wants_fire {
@@ -958,6 +963,7 @@ impl Room {
         self.shells.push(Shell {
             owner: id,
             tank: tid,
+            fired_at: tpos,
             pos: from,
             vel,
             age: 0.0,
@@ -1083,21 +1089,52 @@ impl Room {
             let pos = s.pos + dir * (at - 0.3).max(0.0);
             match struck {
                 Some((_, Struck::Player(v, _))) => {
-                    self.damage(v, s.owner, SHELL_DAMAGE * 2.0, false, Cause::Tank, s.pos);
+                    self.damage(
+                        v,
+                        s.owner,
+                        SHELL_DAMAGE * 2.0,
+                        false,
+                        Cause::Tank,
+                        s.pos,
+                        Some(s.fired_at),
+                    );
                 }
                 Some((_, Struck::Tank(i))) => {
-                    self.damage_tank(i, s.owner, SHELL_DIRECT, Cause::Tank, s.pos);
+                    self.damage_tank(
+                        i,
+                        s.owner,
+                        SHELL_DIRECT,
+                        Cause::Tank,
+                        s.pos,
+                        Some(s.fired_at),
+                    );
                 }
                 None => {}
             }
-            self.blast(s.owner, pos, SHELL_RADIUS, SHELL_DAMAGE, Cause::Tank);
+            self.blast(
+                s.owner,
+                pos,
+                SHELL_RADIUS,
+                SHELL_DAMAGE,
+                Cause::Tank,
+                Some(s.fired_at),
+            );
         }
         self.shells.extend(keep);
     }
 
     /// An explosion at `pos`: everyone in the open within `radius` (and in
     /// line of sight) is hurt, less the farther away; tanks too.
-    fn blast(&mut self, owner: ClientId, pos: Vec3, radius: f32, max: f32, cause: Cause) {
+    /// `launched`: where the owner stood when it was thrown or fired.
+    fn blast(
+        &mut self,
+        owner: ClientId,
+        pos: Vec3,
+        radius: f32,
+        max: f32,
+        cause: Cause,
+        launched: Option<Vec3>,
+    ) {
         self.send(Target::All, ServerMsg::Explode { pos });
         let c = pos + Vec3::new(0.0, 0.3, 0.0);
         let victims: Vec<(ClientId, f32)> = self
@@ -1112,7 +1149,7 @@ impl Room {
             })
             .collect();
         for (v, d) in victims {
-            self.damage(v, owner, d, false, cause.clone(), pos);
+            self.damage(v, owner, d, false, cause.clone(), pos, launched);
         }
         let tanks: Vec<(usize, f32)> = self
             .tanks
@@ -1126,11 +1163,19 @@ impl Room {
             })
             .collect();
         for (i, d) in tanks {
-            self.damage_tank(i, owner, d, cause.clone(), pos);
+            self.damage_tank(i, owner, d, cause.clone(), pos, launched);
         }
     }
 
-    fn damage_tank(&mut self, idx: usize, attacker: ClientId, dmg: f32, cause: Cause, from: Vec3) {
+    fn damage_tank(
+        &mut self,
+        idx: usize,
+        attacker: ClientId,
+        dmg: f32,
+        cause: Cause,
+        from: Vec3,
+        launched: Option<Vec3>,
+    ) {
         let t = &mut self.tanks[idx];
         if !t.alive || dmg <= 0.0 {
             return;
@@ -1175,7 +1220,7 @@ impl Room {
                 p.tank = None;
                 p.protect = 0.0;
             }
-            self.damage(d, attacker, 10_000.0, false, cause.clone(), from);
+            self.damage(d, attacker, 10_000.0, false, cause.clone(), from, launched);
         }
         self.blast(
             attacker,
@@ -1183,6 +1228,7 @@ impl Room {
             TANK_BLAST_RADIUS,
             TANK_BLAST_DAMAGE,
             cause,
+            launched,
         );
     }
 
@@ -1702,6 +1748,7 @@ impl Room {
         let g = Grenade {
             id: self.next_obj,
             owner: id,
+            thrown_at: p.pos,
             pos: eye + dir * 0.5,
             vel: dir * speed + Vec3::new(p.vel.x, 0.0, p.vel.z),
             fuse: GRENADE_FUSE,
@@ -2251,13 +2298,14 @@ impl Room {
         }
         self.bullets = keep;
         for ((attacker, victim), (d, head, gun, origin)) in hits {
-            self.damage(victim, attacker, d, head, Cause::Gun(gun), origin);
+            self.damage(victim, attacker, d, head, Cause::Gun(gun), origin, None);
         }
         for ((attacker, tank), (d, gun, origin)) in tank_hits {
-            self.damage_tank(tank, attacker, d, Cause::Gun(gun), origin);
+            self.damage_tank(tank, attacker, d, Cause::Gun(gun), origin, None);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn damage(
         &mut self,
         victim: ClientId,
@@ -2266,6 +2314,10 @@ impl Room {
         head: bool,
         cause: Cause,
         from: Vec3,
+        // Where a grenade or shell was thrown / fired from: the kill distance
+        // is measured from there (the attacker may be dead or have respawned
+        // since). None: from where the attacker is now.
+        launched: Option<Vec3>,
     ) {
         let Some(v) = self.players.get_mut(&victim) else {
             return;
@@ -2328,6 +2380,8 @@ impl Room {
             self.roster_dirty = true;
             let dist = if attacker == victim {
                 0.0
+            } else if let Some(at) = launched {
+                r2(at.distance(pos))
             } else {
                 self.players
                     .get(&attacker)
@@ -2351,7 +2405,7 @@ impl Room {
         for g in &mut self.grenades {
             g.fuse -= dt;
             if g.fuse <= 0.0 {
-                boom.push((g.owner, g.pos));
+                boom.push((g.owner, g.pos, g.thrown_at));
                 continue;
             }
             g.vel.y -= GRAVITY * dt;
@@ -2397,8 +2451,15 @@ impl Room {
             g.pos = n;
         }
         self.grenades.retain(|g| g.fuse > 0.0);
-        for (owner, pos) in boom {
-            self.blast(owner, pos, GRENADE_RADIUS, GRENADE_DAMAGE, Cause::Grenade);
+        for (owner, pos, thrown_at) in boom {
+            self.blast(
+                owner,
+                pos,
+                GRENADE_RADIUS,
+                GRENADE_DAMAGE,
+                Cause::Grenade,
+                Some(thrown_at),
+            );
         }
     }
 
@@ -3574,6 +3635,156 @@ mod tests {
         assert!(exploded);
     }
 
+    /// Two (or three) players on a flat walled field; everyone's spawn
+    /// protection off and health low enough for one grenade.
+    fn grenade_room(respawn: bool, n: usize) -> (Room, Vec<ClientId>) {
+        let spawns = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(30.0, 0.0, 0.0),
+            Vec3::new(-30.0, 0.0, 30.0),
+        ];
+        let mut r = walled_room(Vec::new(), spawns);
+        r.cfg.respawn = respawn;
+        let ids: Vec<ClientId> = (0..n)
+            .map(|i| r.join(&format!("p{i}"), None, PROTOCOL, false).unwrap())
+            .collect();
+        for (i, id) in ids.iter().enumerate() {
+            let p = r.players.get_mut(id).unwrap();
+            p.protect = 0.0;
+            p.hp = 20.0;
+            p.pos = Vec3::new(30.0 * i as f32, 0.0, 0.0);
+        }
+        r.drain();
+        (r, ids)
+    }
+
+    /// `owner`'s grenade, thrown from `from`, going off at `at` next tick.
+    fn grenade_at(r: &mut Room, owner: ClientId, from: Vec3, at: Vec3) {
+        r.grenades.push(Grenade {
+            id: 999,
+            owner,
+            thrown_at: from,
+            pos: at,
+            vel: Vec3::ZERO,
+            fuse: 0.001,
+        });
+    }
+
+    /// Ticks once; the kill messages: (killer, victim, cause, dist).
+    fn tick_kills(r: &mut Room) -> Vec<(ClientId, ClientId, Cause, f32)> {
+        r.tick(1.0 / 60.0);
+        r.drain()
+            .into_iter()
+            .filter_map(|(_, m)| match m {
+                ServerMsg::Kill {
+                    killer,
+                    victim,
+                    cause,
+                    dist,
+                    ..
+                } => Some((killer, victim, cause, dist)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn kills_in_roster(r: &Room, id: ClientId) -> u32 {
+        r.roster().iter().find(|e| e.id == id).unwrap().kills
+    }
+
+    #[test]
+    fn grenade_kills_count() {
+        let (mut r, ids) = grenade_room(true, 2);
+        let (a, b) = (ids[0], ids[1]);
+        grenade_at(
+            &mut r,
+            a,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(30.0, 0.1, 0.5),
+        );
+        let kills = tick_kills(&mut r);
+        assert_eq!(kills.len(), 1, "{kills:?}");
+        let (killer, victim, cause, dist) = &kills[0];
+        assert_eq!((*killer, *victim), (a, b));
+        assert_eq!(*cause, Cause::Grenade);
+        assert!((dist - 30.0).abs() < 0.05, "dist {dist}");
+        assert_eq!(r.players[&a].kills, 1);
+        assert_eq!(r.players[&b].deaths, 1);
+        assert_eq!(kills_in_roster(&r, a), 1, "the scoreboard has it");
+    }
+
+    #[test]
+    fn grenade_kills_count_after_the_thrower_died() {
+        let (mut r, ids) = grenade_room(true, 2);
+        let (a, b) = (ids[0], ids[1]);
+        // a throws from the origin, then dies (and is carried far off, as a
+        // respawn would) before it goes off next to b.
+        grenade_at(
+            &mut r,
+            a,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(30.0, 0.1, 0.5),
+        );
+        r.damage(a, a, 1000.0, false, Cause::Ring, Vec3::ZERO, None);
+        assert!(!r.players[&a].alive);
+        r.players.get_mut(&a).unwrap().pos = Vec3::new(-80.0, 0.0, -80.0);
+        r.drain();
+        let kills = tick_kills(&mut r);
+        assert_eq!(kills.len(), 1, "{kills:?}");
+        let (killer, victim, cause, dist) = &kills[0];
+        assert_eq!((*killer, *victim, cause), (a, b, &Cause::Grenade));
+        assert!(
+            (dist - 30.0).abs() < 0.05,
+            "measured from where it was thrown: {dist}"
+        );
+        assert_eq!(r.players[&a].kills, 1);
+        assert_eq!(r.players[&a].deaths, 1);
+        assert_eq!(kills_in_roster(&r, a), 1);
+    }
+
+    #[test]
+    fn grenade_kills_count_when_the_thrower_is_out() {
+        // No respawn, three players: a throws, is knocked out, and the
+        // grenade still takes b (c is alive, so the round goes on).
+        let (mut r, ids) = grenade_room(false, 3);
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        grenade_at(
+            &mut r,
+            a,
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(30.0, 0.1, 0.5),
+        );
+        r.damage(a, c, 1000.0, false, Cause::Ring, Vec3::ZERO, None);
+        assert!(r.players[&a].out);
+        r.drain();
+        let kills = tick_kills(&mut r);
+        assert_eq!(kills.len(), 1, "{kills:?}");
+        assert_eq!((kills[0].0, kills[0].1), (a, b));
+        assert_eq!(r.players[&a].kills, 1);
+        assert_eq!(kills_in_roster(&r, a), 1);
+        assert_eq!(kills_in_roster(&r, c), 1);
+    }
+
+    #[test]
+    fn grenade_that_takes_its_thrower_too_still_counts_the_other() {
+        let (mut r, ids) = grenade_room(true, 2);
+        let (a, b) = (ids[0], ids[1]);
+        // Both stand by it: b is a kill for a, a's own death is no kill.
+        r.players.get_mut(&a).unwrap().pos = Vec3::new(29.0, 0.0, 0.0);
+        grenade_at(
+            &mut r,
+            a,
+            Vec3::new(29.0, 0.0, 0.0),
+            Vec3::new(29.5, 0.1, 0.0),
+        );
+        let kills = tick_kills(&mut r);
+        assert_eq!(kills.len(), 2, "{kills:?}");
+        assert_eq!(r.players[&a].kills, 1);
+        assert_eq!(r.players[&a].deaths, 1);
+        assert_eq!(r.players[&b].deaths, 1);
+        assert_eq!(kills_in_roster(&r, a), 1);
+    }
+
     #[test]
     fn bots_play_a_match() {
         let mut r = Room::new(Config {
@@ -3758,7 +3969,7 @@ mod tests {
         r.handle(me, ClientMsg::Trigger);
         r.tick(1.0 / 60.0);
         assert!(r.players[&me].heal.is_some(), "healing");
-        r.damage(me, me, 10.0, false, Cause::Ring, Vec3::ZERO);
+        r.damage(me, me, 10.0, false, Cause::Ring, Vec3::ZERO, None);
         assert!(r.players[&me].heal.is_some(), "still healing after a hit");
         for _ in 0..(60 * 2) {
             r.tick(1.0 / 60.0);
@@ -3924,7 +4135,7 @@ mod tests {
         r.handle(a, ClientMsg::Use);
         r.teleport(b, Vec3::new(20.0, 0.0, 80.0), 0.0);
         r.drain();
-        r.damage_tank(0, b, TANK_HP + 1.0, Cause::Grenade, Vec3::ZERO);
+        r.damage_tank(0, b, TANK_HP + 1.0, Cause::Grenade, Vec3::ZERO, None);
         assert!(!r.tanks[0].alive);
         assert!(!r.players[&a].alive && r.players[&a].tank.is_none());
         assert_eq!(r.player_kills(b), Some(1));
