@@ -2139,6 +2139,23 @@ function layoutHud(force = false) {
     if (top !== r.top) el.style.top = `${Math.round(top - box.top)}px`;
     placed.push({ left: r.left, right: r.right, top, bottom: top + r.height, corner: HUD_CORNER.has(id) });
   }
+  // Notices (kills, items) on a touch screen: between the boxes along the
+  // top and the on-screen keys (older ones go first when it is tight).
+  const bal = $('balloons');
+  if (bal) {
+    bal.style.bottom = '';
+    bal.style.maxHeight = '';
+    if (document.body.classList.contains('touch')) {
+      const x0 = window.innerWidth - 340;
+      const keys = [...document.querySelectorAll('#touchpad button')]
+        .map((b) => b.getBoundingClientRect())
+        .filter((k) => k.width && k.right > x0);
+      const floor = keys.length ? Math.min(...keys.map((k) => k.top)) - 8 : bal.getBoundingClientRect().bottom;
+      const ceil = placed.filter((p) => p.right > x0).reduce((m, p) => Math.max(m, p.bottom), 0) + 8;
+      bal.style.bottom = `${Math.round(window.innerHeight - floor)}px`;
+      bal.style.maxHeight = `${Math.max(0, Math.round(floor - ceil))}px`;
+    }
+  }
   // The chat log grows up from the bottom: it stops short of the boxes
   // above it (older lines go first).
   const log = $('chatlog');
