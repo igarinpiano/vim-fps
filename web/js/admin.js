@@ -46,7 +46,10 @@ const S = {
   /// Monitor: 'tiles' (everyone's view) or 'map'.
   mode: 'tiles',
   showBots: false,
-  /// Views on the monitor at once (0: as many as there are, sized to fit),
+  /// Tiles in ranking order ('rank') or by name ('name': kana in 五十音
+  /// order, letters A–Z, numbers by value).
+  order: 'rank',
+  /// Views on the monitor at once (0: as many as fit the screen),
   /// the page shown, and seconds between pages (0: no cycling).
   perPage: 0,
   page: 0,
@@ -82,13 +85,15 @@ let mapImage = null;
 
 /// How the monitor is laid out is this viewer's own (kept in this browser).
 const VIEW_STORE = 'vimfps-admin-view';
-const PER_PAGE = [0, 1, 2, 3, 4, 6, 9, 12, 16];
+/// Most views a page may be set to hold.
+const MAX_PER_PAGE = 64;
 const CYCLES = [0, 5, 10, 20, 30];
 
 function loadView() {
   try {
     const v = JSON.parse(localStorage.getItem(VIEW_STORE) || '{}');
-    if (PER_PAGE.includes(v.perPage)) S.perPage = v.perPage;
+    if (Number.isInteger(v.perPage) && v.perPage >= 0 && v.perPage <= MAX_PER_PAGE) S.perPage = v.perPage;
+    if (v.order === 'rank' || v.order === 'name') S.order = v.order;
     if (CYCLES.includes(v.cycle)) S.cycle = v.cycle;
     if (v.cam === 'auto' || v.cam === 'off') S.cam.mode = v.cam;
     if (typeof v.showBots === 'boolean') S.showBots = v.showBots;
@@ -99,7 +104,7 @@ function loadView() {
 
 function saveView() {
   try {
-    localStorage.setItem(VIEW_STORE, JSON.stringify({ perPage: S.perPage, cycle: S.cycle, showBots: S.showBots, cam: S.cam.mode === 'off' ? 'off' : 'auto' }));
+    localStorage.setItem(VIEW_STORE, JSON.stringify({ perPage: S.perPage, cycle: S.cycle, showBots: S.showBots, order: S.order, cam: S.cam.mode === 'off' ? 'off' : 'auto' }));
   } catch {
     // Not kept: fine for this visit.
   }
@@ -134,6 +139,10 @@ function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
 }
 
+/// Names in the order a Japanese reader looks them up: kana by 五十音,
+/// letters A–Z (either case), numbers by value (bot-2 before bot-10).
+const byName = new Intl.Collator('ja', { numeric: true, sensitivity: 'base' });
+
 function nameOf(id) {
   const p = S.state && S.state.players.find((q) => q.id === id);
   if (p) return p.name;
@@ -159,11 +168,12 @@ function players() {
   return S.state ? S.state.players.filter((p) => !p.spectator) : [];
 }
 
-/// The bots, in the order they came (not by score: rows stay put).
+/// The bots by their numbers (bot-1, bot-2 ...; not by score: rows stay
+/// put during a match, where the numbers do not change).
 function bots() {
   return players()
     .filter((p) => p.bot)
-    .sort((a, b) => a.id - b.id);
+    .sort((a, b) => byName.compare(a.name, b.name) || a.id - b.id);
 }
 
 // ---------------------------------------------------------------- log on
@@ -426,24 +436,40 @@ function rulesText(s) {
   return `${s.time_limit} 分 · ${s.respawn ? `${s.frag_limit} キル先取` : '復活なし'} · 強さ ${s.bot_skill} · リング${s.ring ? 'あり' : 'なし'} · 戦車${s.tanks ? 'あり' : 'なし'}`;
 }
 
+/// Waiting or counting down: the rules edited are those of the match
+/// about to start (they apply at once). During a match and its results:
+/// the next one's.
+function prematch() {
+  return !!S.state && (S.state.phase === 'lobby' || S.state.phase === 'countdown');
+}
+
+const ORDER_NAMES = { strong: '強い順', weak: '弱い順', random: 'ランダム' };
+const ORDERS = ['strong', 'weak', 'random'];
+
 // ---------------------------------------------------------------- list windows
 
 /// Draws rows into a list (only when something changed, so a click is
 /// never lost to a redraw). Row: {label, sub, val, ok, danger, dirty}.
 function renderList(ol, rows, cur) {
-  const key = JSON.stringify([rows.map((r) => [r.label, r.sub, r.val, r.ok, r.danger, r.dirty]), cur]);
+  const key = JSON.stringify([rows.map((r) => [r.label, r.sub, r.val, r.ok, r.danger, r.dirty, r.sep]), cur]);
   if (ol._key === key) return;
   ol._key = key;
   ol.innerHTML = '';
   rows.forEach((r, i) => {
     const li = document.createElement('li');
-    li.className = [i === cur ? 'sel' : '', r.ok === false ? 'disabled' : '', r.danger ? 'danger' : '', r.dirty ? 'dirty' : ''].join(' ');
+    li.className = [i === cur ? 'sel' : '', r.ok === false ? 'disabled' : '', r.danger ? 'danger' : '', r.dirty ? 'dirty' : '', r.sep ? 'sep' : ''].join(' ');
     li.innerHTML = `${esc(r.label)}${r.sub ? `<span class="sub">${esc(r.sub)}</span>` : ''}${
       r.val != null ? `<span class="val">${r.adj ? '<a data-d="-1">◀</a>' : ''}${esc(r.val)}${r.adj ? '<a data-d="1">▶</a>' : ''}</span>` : ''
     }`;
     li.dataset.i = i;
     ol.appendChild(li);
   });
+  // A list that scrolls (hundreds of bots) keeps the cursor in sight.
+  const sel = ol.children[cur];
+  if (sel && ol.scrollHeight > ol.clientHeight) {
+    if (sel.offsetTop < ol.scrollTop) ol.scrollTop = sel.offsetTop;
+    else if (sel.offsetTop + sel.offsetHeight > ol.scrollTop + ol.clientHeight) ol.scrollTop = sel.offsetTop + sel.offsetHeight - ol.clientHeight;
+  }
 }
 
 // 2: the match
@@ -532,12 +558,63 @@ function sendPending(key, value, msg) {
   renderBots();
 }
 
+/// How many bots of each skill: [skill 1, ..., skill 5].
+function botMix() {
+  const st = S.state;
+  if (st && Array.isArray(st.bot_mix) && st.bot_mix.length === 5) return st.bot_mix;
+  const mix = [0, 0, 0, 0, 0];
+  for (const b of bots()) mix[(b.level || 3) - 1] += 1;
+  return mix;
+}
+
 function botRows() {
   const st = S.state;
-  const n = pendingOr('bots', st ? st.next.bots : 0);
   const max = S.maxBots || 500;
-  const rows = [{ label: 'bot の数', sub: n > 150 ? '多いとホストが追いつかず試合が遅くなります' : '', val: `${n} 体`, adj: (d) => sendPending('bots', clamp(n + d, 0, max), { t: 'bots', n: clamp(n + d, 0, max) }) }];
-  for (const b of bots()) {
+  const host = botMix();
+  const mix = JSON.parse(pendingOr('mix', JSON.stringify(host)));
+  const total = mix.reduce((a, n) => a + n, 0);
+  const skill = st ? st.settings.bot_skill : 3;
+  const setMix = (lv, n) => {
+    const next = mix.slice();
+    next[lv - 1] = Math.max(0, n);
+    const sum = next.reduce((a, v) => a + v, 0);
+    if (sum > max) next[lv - 1] -= sum - max;
+    if (next[lv - 1] === mix[lv - 1]) return;
+    pending.delete('bots');
+    sendPending('mix', JSON.stringify(next), { t: 'bot_mix', counts: next });
+  };
+  const rows = [];
+  // Strongest first, as the counts are usually thought of.
+  for (let lv = 5; lv >= 1; lv--) {
+    rows.push({
+      label: `強さ ${lv}`,
+      sub: SKILL_NAMES[lv - 1],
+      val: `${mix[lv - 1]} 体`,
+      adj: (d) => setMix(lv, mix[lv - 1] + d),
+      group: true,
+    });
+  }
+  const n = pending.has('mix') ? total : pendingOr('bots', total);
+  rows.push({
+    label: '合計',
+    sub: n > 150 ? '多いとホストが追いつかず試合が遅くなります' : `増やすと強さ ${skill} (全体) で加わります`,
+    val: `${n} 体`,
+    adj: (d) => {
+      pending.delete('mix');
+      sendPending('bots', clamp(n + d, 0, max), { t: 'bots', n: clamp(n + d, 0, max) });
+    },
+    sep: true,
+  });
+  const order = st ? st.bot_order || 'strong' : 'strong';
+  rows.push({
+    label: '番号の振り方',
+    sub: prematch() ? '' : '次の試合の開始時に振り直します',
+    val: ORDER_NAMES[order],
+    adj: (d) => send({ t: 'bot_order', order: ORDERS[(ORDERS.indexOf(order) + (d > 0 ? 1 : 2)) % 3] }),
+    run: () => send({ t: 'bot_order', order: ORDERS[(ORDERS.indexOf(order) + 1) % 3] }),
+  });
+  const list = bots();
+  list.forEach((b, i) => {
     const l = pendingOr(b.id, b.level || 3);
     const set = (v) => sendPending(b.id, v, { t: 'bot_level', id: b.id, level: v });
     rows.push({
@@ -547,9 +624,10 @@ function botRows() {
       adj: (d) => set(clamp(l + Math.sign(d) * Math.min(4, Math.abs(d)), 1, 5)),
       reset: () => send({ t: 'bot_level', id: b.id, level: null }),
       id: b.id,
+      sep: i === 0,
     });
-  }
-  if (rows.length === 1) rows.push({ label: 'bot はいません (h / l で数を変える)', ok: false });
+  });
+  if (!list.length) rows.push({ label: 'bot はいません (強さの行で h / l)', ok: false, sep: true });
   return rows;
 }
 
@@ -559,7 +637,7 @@ function renderBots() {
   renderList($('bot-list'), rows, S.cur.bots);
 }
 
-// 6: rules of the next match
+// 6: rules of the match about to start (or of the next one)
 
 function rules() {
   return S.draft || (S.state ? S.state.next : null);
@@ -602,20 +680,43 @@ function renderRules() {
   renderList($('rules-list'), rows, S.cur.rules);
   const st = S.state;
   if (!st) return;
+  const now = prematch();
+  setText($('rules-title'), now ? 'この試合のルール' : '次の試合のルール');
   $('rules-note').textContent = S.draft
-    ? '変更があります: Enter (保存の行) か :w で保存 · u で元に戻す'
-    : JSON.stringify({ ...st.next, bots: 0 }) !== JSON.stringify({ ...st.settings, bots: 0 })
-      ? `この試合: ${rulesText(st.settings)}`
-      : st.phase === 'lobby'
-        ? '「試合を開始」でこのルールの試合が始まります'
+    ? `変更があります: Enter (保存の行) か :w で保存 · u で元に戻す${now ? ' · 保存するとこれから始まる試合にすぐ反映' : ''}`
+    : now
+      ? st.phase === 'countdown'
+        ? 'まもなく始まる試合のルールです。秒読み中も変えられます'
+        : '「試合を開始」でこのルールの試合が始まります。変えるとすぐ反映されます'
+      : JSON.stringify({ ...st.next, bots: 0 }) !== JSON.stringify({ ...st.settings, bots: 0 })
+        ? `いまの試合: ${rulesText(st.settings)}`
         : '変更は次の試合から反映されます';
 }
 
+function setText(el, text) {
+  if (el && el.textContent !== text) el.textContent = text;
+}
+
+/// Saves the rules. When the bots' skill changes and some bots already
+/// there play at another skill, asks whether they take the new one too.
 function saveRules() {
   if (!S.draft || !S.state) return;
-  send({ t: 'settings', settings: { ...S.draft, bots: S.state.next.bots } });
-  S.draft = null;
-  renderRules();
+  const draft = S.draft;
+  const host = S.state.next;
+  const save = (relevel) => {
+    send({ t: 'settings', settings: { ...draft, bots: S.state.next.bots }, relevel });
+    if (S.draft === draft) S.draft = null;
+    renderRules();
+  };
+  const others = bots().filter((b) => (b.level || 3) !== draft.bot_skill);
+  if (draft.bot_skill === host.bot_skill || !others.length) return save(false);
+  const lv = draft.bot_skill;
+  const n = bots().length;
+  ask(
+    `bot の強さ (全体) を ${lv} (${SKILL_NAMES[lv - 1]}) にします。\nすでにいる bot ${n} 体も ${lv} にしますか？\n\nはい: ${n} 体ともすぐ ${lv} にする\nいいえ: いまの強さのまま (これから加わる bot だけ ${lv})`,
+    () => save(true),
+    () => save(false),
+  );
 }
 
 // ---------------------------------------------------------------- monitor
@@ -624,20 +725,73 @@ let tileKey = '';
 const tileEls = new Map();
 let tileCols = 1;
 
-/// Everyone whose view may be on the monitor (bots if asked for).
+/// Everyone whose view may be on the monitor (bots if asked for), in
+/// ranking order or by name.
 function viewable() {
-  return players().filter((p) => S.showBots || !p.bot);
+  const list = players().filter((p) => S.showBots || !p.bot);
+  if (S.order === 'name') list.sort((a, b) => byName.compare(a.name, b.name) || a.id - b.id);
+  return list;
 }
 
-/// Most views drawn at once when sized automatically (more go onto pages:
-/// hundreds of bots would leave specks).
-const AUTO_MAX = 25;
+function setOrder(order) {
+  S.order = order;
+  saveView();
+  note(order === 'name' ? 'タイルの並び: 名前順 (五十音・ABC)' : 'タイルの並び: 順位');
+  layoutTiles(true);
+}
 
-/// Views a page holds: the chosen number, or (automatic) everyone up to
-/// AUTO_MAX. 0: all of them, sized to fit.
+/// A view is not drawn narrower than this when the number is automatic:
+/// past it, the rest go onto pages.
+const MIN_TILE = 240;
+/// Title bar and status bar of a tile (px).
+const TILE_BARS = 20 + 22 + 2;
+const TILE_GAP = 6;
+
+/// The largest tiles that fit `n` of them in W × H: {cols, w}.
+function bestGrid(n, W, H) {
+  let best = { cols: 1, w: 0 };
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    let w = (W - TILE_GAP * (cols - 1)) / cols;
+    const h = w * (9 / 16) + TILE_BARS;
+    if (h * rows + TILE_GAP * (rows - 1) > H) w = ((H - TILE_GAP * (rows - 1)) / rows - TILE_BARS) * (16 / 9);
+    if (w > best.w) best = { cols, w };
+  }
+  return best;
+}
+
+let autoKey = '';
+let autoPer = 0;
+
+/// Automatic: everyone, while all of them fit at least MIN_TILE wide;
+/// otherwise as many as fill the screen at that size, row after full row
+/// (whatever the number: 15, 28, 42 ...). 0: everyone.
+function autoPerPage() {
+  const box = $('tiles');
+  const W = Math.max(1, box.clientWidth - 12);
+  const H = Math.max(1, box.clientHeight - 12);
+  const cam = camOn() ? 1 : 0;
+  const n = viewable().length;
+  const key = `${W}x${H}:${cam}:${n}`;
+  if (key === autoKey) return autoPer;
+  autoKey = key;
+  const min = Math.min(MIN_TILE, W);
+  if (bestGrid(n + cam, W, H).w >= min - 0.5) {
+    autoPer = 0;
+    return 0;
+  }
+  const cols = Math.max(1, Math.floor((W + TILE_GAP) / (min + TILE_GAP)));
+  const w = (W - TILE_GAP * (cols - 1)) / cols;
+  const rows = Math.max(1, Math.floor((H + TILE_GAP) / (w * (9 / 16) + TILE_BARS + TILE_GAP)));
+  autoPer = Math.max(1, cols * rows - cam);
+  return autoPer;
+}
+
+/// Views a page holds: the chosen number, or as many as fit (automatic).
+/// 0: all of them.
 function perPage() {
   if (S.perPage > 0) return S.perPage;
-  return viewable().length > AUTO_MAX ? AUTO_MAX : 0;
+  return autoPerPage();
 }
 
 function pageCount() {
@@ -681,13 +835,16 @@ function setPerPage(v) {
     if (i >= 0) S.page = Math.floor(i / v);
   }
   saveView();
-  note(v > 0 ? `表示数: ${v}` : '表示数: 自動 (全員が入る大きさ)');
+  note(v > 0 ? `表示数: ${v}` : '表示数: 自動 (画面に入るだけ)');
   layoutTiles(true);
 }
 
+/// One more or fewer at a time, any number (from automatic: from what it
+/// shows now).
 function stepPerPage(d) {
-  const i = PER_PAGE.indexOf(S.perPage);
-  setPerPage(PER_PAGE[clamp((i < 0 ? 0 : i) + d, 0, PER_PAGE.length - 1)]);
+  const now = S.perPage > 0 ? S.perPage : perPage() || viewable().length;
+  const v = now + d;
+  setPerPage(v < 1 ? 0 : Math.min(MAX_PER_PAGE, v));
 }
 
 function turnPage(d) {
@@ -720,8 +877,10 @@ function renderMonitorBar() {
   const bar = $('monitor-bar');
   const n = viewable().length;
   const pages = pageCount();
+  const auto = S.perPage > 0 ? 0 : perPage();
   const items = [
-    ['per', '表示数', S.perPage > 0 ? `${S.perPage}` : n > AUTO_MAX ? `自動 (${AUTO_MAX} ずつ)` : `自動 (${n})`, false],
+    ['per', '表示数', S.perPage > 0 ? `${S.perPage}` : auto > 0 ? `自動 (${auto} ずつ)` : `自動 (${n})`, false],
+    ['sort', '並び', S.order === 'name' ? '名前順' : '順位', false],
     ['page', 'ページ', S.solo != null ? '1 人' : `${S.page + 1} / ${pages}`, pages <= 1 || S.solo != null],
     ['cycle', '巡回', S.cycle > 0 ? `${S.cycle} 秒ごと` : 'しない', pages <= 1],
     ['bots', 'bot', S.showBots ? '出す' : '出さない', false],
@@ -740,7 +899,14 @@ $('monitor-bar').addEventListener('click', (e) => {
   const item = e.target.closest('[data-k]');
   if (!a || !item) return;
   const d = Number(a.dataset.d);
-  ({ per: () => stepPerPage(d), page: () => turnPage(d), cycle: () => stepCycle(d), bots: () => setShowBots(!S.showBots), cam: () => stepCam(d) })[item.dataset.k]();
+  ({
+    per: () => stepPerPage(d),
+    sort: () => setOrder(S.order === 'name' ? 'rank' : 'name'),
+    page: () => turnPage(d),
+    cycle: () => stepCycle(d),
+    bots: () => setShowBots(!S.showBots),
+    cam: () => stepCam(d),
+  })[item.dataset.k]();
 });
 
 /// Lays the tiles out so all of them fit, each a 16:9 picture with its
@@ -765,23 +931,15 @@ function layoutTiles(force) {
         : `モニター — 視点 (${viewable().length})${pages > 1 ? ` · ${S.page + 1} / ${pages} ページ` : ''}`;
   renderMonitorBar();
   if (map) return;
-  const key = JSON.stringify([ids, S.solo, S.mode, S.perPage]);
+  const key = JSON.stringify([ids, S.solo, S.mode, S.perPage, perPage()]);
   if (force || key !== tileKey) {
     tileKey = key;
     const W = box.clientWidth - 12;
     const H = box.clientHeight - 12;
-    const gap = 6;
-    const bars = 20 + 22 + 2;
+    const bars = TILE_BARS;
     // A fixed number of views keeps one size from page to page.
     const n = S.solo != null ? 1 : Math.max(1, (perPage() > 0 ? perPage() : shown().length) + (camOn() ? 1 : 0));
-    let best = { cols: 1, w: 0 };
-    for (let cols = 1; cols <= n; cols++) {
-      const rows = Math.ceil(n / cols);
-      let w = (W - gap * (cols - 1)) / cols;
-      const h = w * (9 / 16) + bars;
-      if (h * rows + gap * (rows - 1) > H) w = ((H - gap * (rows - 1)) / rows - bars) * (16 / 9);
-      if (w > best.w) best = { cols, w };
-    }
+    const best = bestGrid(n, W, H);
     tileCols = best.cols;
     const w = Math.max(80, Math.floor(best.w));
     box.style.gridTemplateColumns = `repeat(${best.cols}, ${w}px)`;
@@ -1399,8 +1557,9 @@ function showMessage(title, text) {
   setMode('msg');
 }
 
-/// A question: y / Enter yes, n / Esc no.
-function ask(text, yes) {
+/// A question: y / Enter yes, n / Esc no. With a `no` to run, "no" is an
+/// answer too (n), and Esc calls the whole thing off.
+function ask(text, yes, no = null) {
   $('msg-title').textContent = '確認';
   $('msg-icon').hidden = false;
   const body = $('msg-body');
@@ -1408,8 +1567,10 @@ function ask(text, yes) {
   body.textContent = text;
   $('msg-btns').innerHTML = '';
   S.msgYes = yes;
+  S.msgNo = no;
   addBtn('はい (y)', () => answer(true), true);
   addBtn('いいえ (n)', () => answer(false), false);
+  if (no) addBtn('キャンセル (Esc)', () => answer(null), false);
   $('msgwin').hidden = false;
   setMode('confirm');
 }
@@ -1423,15 +1584,19 @@ function addBtn(label, fn, def) {
   $('msg-btns').appendChild(b);
 }
 
+/// true: yes, false: no, null: called off.
 function answer(ok) {
   const yes = S.msgYes;
+  const no = S.msgNo;
   closeMessage();
-  if (ok && yes) yes();
+  if (ok === true && yes) yes();
+  else if (ok === false && no) no();
 }
 
 function closeMessage() {
   $('msgwin').hidden = true;
   S.msgYes = null;
+  S.msgNo = null;
   setMode('normal');
 }
 
@@ -1452,7 +1617,8 @@ const HELP = `管理ページのキー (マウスでも操作できます)
   Enter            実行
 
 1 モニター   hjkl 選手を選ぶ · Enter 1 人を大きく · b bot の視点も出す
-             + / - 一度に出す数 (= で自動: 全員が入る大きさ)
+             s タイルの並び: 順位 / 名前順 (五十音・ABC)
+             + / - 一度に出す数を 1 つずつ ({n}+ で n ずつ。= で自動: 画面に入るだけ)
              ] / [ (Ctrl-f / Ctrl-b) 次 / 前のページ · c ページの巡回 (10 秒ごと)
              a カメラを自動に (観戦の自動カメラと同じ: 見どころを追い、1 対 1 は両方の体力)
              o カメラを手動に (CAMERA モード: k/j 前後 · h/l 旋回 · H/L 横 · K/J 上下
@@ -1462,13 +1628,18 @@ F            モニターを全画面に (もう一度でもとに戻す。Enter
 2 試合       開始 (h / l で秒読み) · 取り消し · 終了 · 待機に戻す · 自動で次へ
 3 マップ     j / k 選手を選ぶ · Enter モニターで大きく
 4 順位       Enter 視点を大きく · w 観戦に回す · dd 退出させる · h / l bot の強さ
-5 bot        1 行目 h / l で数 · bot の行で h / l 強さ · a 全体の強さに戻す
-6 ルール     h / l で変更 · Enter / :w 保存 · u 元に戻す (次の試合から)
+5 bot        強さ 5〜1 の行で h / l その強さの数 · 合計の行で数 (全体の強さで増減)
+             番号の振り方 (強い順 / 弱い順 / ランダム) · bot の行で h / l 強さ · a 全体の強さに戻す
+6 ルール     h / l で変更 · Enter / :w 保存 · u 元に戻す
+             待機中・秒読み中はこれから始まる試合、試合中・結果は次の試合のルール
+             bot の強さを変えると、いる bot も変えるか聞きます (y 変える · n そのまま)
 7 ログ       j / k スクロール
 
 コマンド (:)
   start [秒]   end   cancel   lobby   auto on|off   status
-  bots 数      level 名前 1〜5|auto   set time=分 frags=数 skill=1〜5 respawn=on|off ring=on|off tanks=on|off
+  bots 数      bots 5:5 4:2 (強さごとの数)   order strong|weak|random (番号)
+  level 名前 1〜5|auto   level all 1〜5|auto
+  set time=分 frags=数 skill=1〜5 respawn=on|off ring=on|off tanks=on|off
   kick 名前    watch 名前   say 文   w (ルール保存)   q (ログオフ)   {n} (n 番のウィンドウへ)
   fs (全画面)  cam auto|free|off (カメラ)`;
 
@@ -1700,6 +1871,10 @@ function windowKey(key, n, count) {
       note(S.showBots ? 'bot の視点も出します' : 'bot の視点を隠します');
       return true;
     }
+    if (key === 's') {
+      setOrder(S.order === 'name' ? 'rank' : 'name');
+      return true;
+    }
     return false;
   }
   if (w === 'map' || w === 'rank') {
@@ -1898,7 +2073,8 @@ document.addEventListener('keydown', (e) => {
   if (m === 'confirm') {
     e.preventDefault();
     if (e.key === 'y' || e.key === 'Y' || e.key === 'Enter') answer(true);
-    else if (e.key === 'n' || e.key === 'N' || escKey) answer(false);
+    else if (e.key === 'n' || e.key === 'N') answer(false);
+    else if (escKey) answer(S.msgNo ? null : false);
     return;
   }
   if (m === 'camera') {
@@ -1946,7 +2122,7 @@ function listClick(w, e) {
   const a = e.target.closest('a[data-d]');
   if (r && r.ok !== false) {
     if (a && r.adj) r.adj(Number(a.dataset.d));
-    else if (!a && (w === 'match' || w === 'rules')) {
+    else if (!a && (w === 'match' || w === 'rules' || (w === 'bots' && r.run))) {
       if (r.toggle) r.adj(1);
       else if (r.run) r.run();
     }
@@ -1986,7 +2162,7 @@ $('rank-acts').addEventListener('click', (e) => {
 });
 $('cmdwin').querySelector('.x').addEventListener('click', closeCommand);
 $('saywin').querySelector('.x').addEventListener('click', closeSay);
-$('msgwin').querySelector('.x').addEventListener('click', () => answer(false));
+$('msgwin').querySelector('.x').addEventListener('click', () => answer(S.msgNo ? null : false));
 window.addEventListener('resize', () => layoutTiles(true));
 
 // ---------------------------------------------------------------- start

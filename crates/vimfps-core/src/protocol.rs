@@ -8,7 +8,7 @@ use crate::weapons::{Gun, Inventory, Slot};
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a message changes shape. Client and server must agree.
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 6;
 
 fn default_bot_skill() -> u8 {
     3
@@ -451,6 +451,17 @@ pub struct MatchSettings {
     pub tanks: bool,
 }
 
+/// How the bots are numbered (bot-1, bot-2 ...): by their skill, strongest
+/// or weakest first, or in no order at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BotOrder {
+    #[default]
+    Strong,
+    Weak,
+    Random,
+}
+
 /// From the admin page.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -469,8 +480,15 @@ pub enum AdminMsg {
     End,
     /// Back to the waiting room at once (no results).
     Lobby,
-    /// Rules of the next match.
-    Settings { settings: MatchSettings },
+    /// Rules of the match about to start (waiting, counting down), or of
+    /// the next one (during a match and its results).
+    Settings {
+        settings: MatchSettings,
+        /// The bots already there take the new skill too (they keep theirs
+        /// otherwise).
+        #[serde(default)]
+        relevel: bool,
+    },
     /// Go on to the next match by itself after the results.
     Auto { on: bool },
     /// The number of bots, at once.
@@ -481,6 +499,16 @@ pub enum AdminMsg {
         #[serde(default)]
         level: Option<u8>,
     },
+    /// Every bot's skill at once (None: all back to the room's skill).
+    BotLevelAll {
+        #[serde(default)]
+        level: Option<u8>,
+    },
+    /// How many bots of each skill, at once: `counts[0]` of skill 1 ...
+    /// `counts[4]` of skill 5.
+    BotMix { counts: Vec<u32> },
+    /// How the bots are numbered.
+    BotOrder { order: BotOrder },
     /// Disconnect a player.
     Kick { id: ClientId },
     /// Move a player to the spectators.
@@ -569,6 +597,11 @@ pub struct AdminState {
     pub settings: MatchSettings,
     /// Rules of the next match.
     pub next: MatchSettings,
+    /// Bots of each skill: `[skill 1, ..., skill 5]`.
+    #[serde(default)]
+    pub bot_mix: Vec<u32>,
+    #[serde(default)]
+    pub bot_order: BotOrder,
     /// Ranked as in the match.
     pub players: Vec<AdminPlayer>,
     pub tanks: Vec<TankState>,
@@ -632,6 +665,20 @@ mod tests {
         assert_eq!(m, AdminMsg::Start { countdown: 5.0 });
         let m: AdminMsg = serde_json::from_str(r#"{"t":"kick","id":3}"#).unwrap();
         assert_eq!(m, AdminMsg::Kick { id: 3 });
+        let m: AdminMsg = serde_json::from_str(r#"{"t":"bot_mix","counts":[0,0,1,2,5]}"#).unwrap();
+        assert_eq!(
+            m,
+            AdminMsg::BotMix {
+                counts: vec![0, 0, 1, 2, 5]
+            }
+        );
+        let m: AdminMsg = serde_json::from_str(r#"{"t":"bot_order","order":"random"}"#).unwrap();
+        assert_eq!(
+            m,
+            AdminMsg::BotOrder {
+                order: BotOrder::Random
+            }
+        );
         // A bare match_start (older shape) still reads.
         let s: ServerMsg = serde_json::from_str(r#"{"t":"match_start"}"#).unwrap();
         assert!(matches!(s, ServerMsg::MatchStart { respawn: true, .. }));

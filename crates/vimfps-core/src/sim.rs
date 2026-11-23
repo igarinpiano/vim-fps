@@ -366,6 +366,8 @@ struct InputState {
 struct Bot {
     /// Its own skill 1..=5, set by the host's admin (None: the room's).
     level: Option<u8>,
+    /// Where it goes when the admin numbers the bots in no order.
+    order_key: u32,
     waypoint: Vec3,
     wander_timer: f32,
     target: Option<ClientId>,
@@ -568,8 +570,103 @@ pub struct Room {
     pickups_wait: f32,
     out: Vec<(Target, ServerMsg)>,
     bots_wanted: u32,
+    /// How the admin wants the bots numbered.
+    bot_order: BotOrder,
     /// Walking routes for bots (built from the map on first use).
     nav: std::sync::OnceLock<crate::nav::NavGrid>,
+}
+
+/// How a bot stands for rounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AmmoNeed {
+    Enough,
+    /// Only what the magazines hold is left.
+    Low,
+    /// Not one round in any gun.
+    Out,
+}
+
+fn ammo_need(inv: &Inventory) -> AmmoNeed {
+    if inv.guns.iter().all(|g| g.ammo + g.reserve == 0) {
+        AmmoNeed::Out
+    } else if inv.guns.iter().all(|g| g.reserve == 0) {
+        AmmoNeed::Low
+    } else {
+        AmmoNeed::Enough
+    }
+}
+
+/// Whether taking this pickup gives a bot more rounds: a box of ammo while
+/// some gun is short, a gun it holds (its rounds go to that one), or any
+/// gun when a hand is free or a gun it has is empty.
+fn pickup_refills(inv: &Inventory, kind: PickupKind) -> bool {
+    match kind {
+        PickupKind::Ammo => inv
+            .guns
+            .iter()
+            .any(|g| g.reserve < g.gun.stats().reserve_max),
+        k => gun_of(k).is_some_and(|gun| {
+            inv.guns.iter().any(|g| g.gun == gun)
+                || inv.guns.len() < MAX_GUNS
+                || inv.guns.iter().any(|g| g.ammo + g.reserve == 0)
+        }),
+    }
+}
+
+/// The gun to fight with: the one in hand while it has rounds in it, else
+/// the other one if it has, else whichever has rounds to load. None: both
+/// are empty.
+fn fighting_gun(inv: &Inventory) -> Option<Slot> {
+    let slot = |i: usize| if i == 0 { Slot::Gun0 } else { Slot::Gun1 };
+    let held = inv.gun_index();
+    let loaded = |i: usize| inv.guns[i].ammo > 0;
+    let spare = |i: usize| inv.guns[i].reserve > 0;
+    let order: Vec<usize> = match held {
+        Some(h) => std::iter::once(h)
+            .chain((0..inv.guns.len()).filter(|&i| i != h))
+            .collect(),
+        None => (0..inv.guns.len()).collect(),
+    };
+    order
+        .iter()
+        .copied()
+        .find(|&i| loaded(i))
+        .or_else(|| order.iter().copied().find(|&i| spare(i)))
+        .map(slot)
+}
+
+/// "10 分 · 25 キル先取 · bot 7 体 (強さ 3) · リングあり · 戦車あり"
+pub fn rules_text(s: &MatchSettings) -> String {
+    format!(
+        "{} 分 · {} · bot {} 体 (強さ {}) · リング{} · 戦車{}",
+        s.time_limit,
+        if s.respawn {
+            format!("{} キル先取", s.frag_limit)
+        } else {
+            "復活なし".into()
+        },
+        s.bots,
+        s.bot_skill,
+        if s.ring { "あり" } else { "なし" },
+        if s.tanks { "あり" } else { "なし" },
+    )
+}
+
+/// "7 体 (強さ 5 が 5 体、強さ 4 が 2 体)"
+pub fn mix_text(mix: &[u32]) -> String {
+    let total: u32 = mix.iter().sum();
+    let parts: Vec<String> = mix
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, n)| **n > 0)
+        .map(|(i, n)| format!("強さ {} が {n} 体", i + 1))
+        .collect();
+    if parts.is_empty() {
+        "なし".into()
+    } else {
+        format!("{total} 体 ({})", parts.join("、"))
+    }
 }
 
 fn gun_of(kind: PickupKind) -> Option<Gun> {
@@ -645,6 +742,7 @@ impl Room {
             } else {
                 cfg.bots.min(bot_cap(&cfg))
             },
+            bot_order: BotOrder::default(),
             cfg,
             map,
             players: BTreeMap::new(),
@@ -1500,48 +1598,121 @@ impl Room {
             .collect();
         while bots.len() > self.bots_wanted as usize {
             let id = bots.pop().unwrap();
-            self.unseat(id);
-            self.players.remove(&id);
-            self.roster_dirty = true;
+            self.remove_bot(id);
         }
         while bots.len() < self.bots_wanted as usize {
-            let id = self.alloc_id();
-            let mut n = bots.len() + 1;
-            while self.players.values().any(|p| p.name == format!("bot-{n}")) {
-                n += 1;
-            }
-            let bot = Bot {
-                level: None,
-                waypoint: Vec3::ZERO,
-                wander_timer: 0.0,
-                target: None,
-                reaction: 0.0,
-                aim_err: (0.0, 0.0),
-                err_timer: 0.0,
-                last_pos: Vec3::ZERO,
-                stuck_timer: 0.0,
-                stuck_n: 0,
-                no_tank: 0.0,
-                detour: 0.0,
-                path: Vec::new(),
-                path_to: Vec3::ZERO,
-                path_check: 0.0,
-                path_fail: 0.0,
-                replan: false,
-                cover: None,
-                throw_cd: 0.0,
-                heard: None,
-                dummy: self.map.targets.get(bots.len()).map(|t| (t.pos, t.strafe)),
-            };
-            let name = if bot.dummy.is_some() {
-                format!("的-{n}")
-            } else {
-                format!("bot-{n}")
-            };
-            self.add_player(id, name, Some(bot));
-            self.spawn(id);
-            bots.push(id);
+            bots.push(self.add_bot(None));
         }
+    }
+
+    /// A new bot of this skill (None: the room's), on the field at once
+    /// (in the waiting room: when the match starts).
+    fn add_bot(&mut self, level: Option<u8>) -> ClientId {
+        let id = self.alloc_id();
+        let count = self.players.values().filter(|p| p.bot.is_some()).count();
+        let mut n = count + 1;
+        while self
+            .players
+            .values()
+            .any(|p| p.name == format!("bot-{n}") || p.name == format!("的-{n}"))
+        {
+            n += 1;
+        }
+        let bot = Bot {
+            level: level.map(|l| l.clamp(1, 5)),
+            // Its own number (not from the room's dice: the match plays
+            // out the same with or without the admin's numbering).
+            order_key: Rng::new(self.cfg.seed ^ (id as u64).wrapping_mul(0x2545_F491)).next_u64()
+                as u32,
+            waypoint: Vec3::ZERO,
+            wander_timer: 0.0,
+            target: None,
+            reaction: 0.0,
+            aim_err: (0.0, 0.0),
+            err_timer: 0.0,
+            last_pos: Vec3::ZERO,
+            stuck_timer: 0.0,
+            stuck_n: 0,
+            no_tank: 0.0,
+            detour: 0.0,
+            path: Vec::new(),
+            path_to: Vec3::ZERO,
+            path_check: 0.0,
+            path_fail: 0.0,
+            replan: false,
+            cover: None,
+            throw_cd: 0.0,
+            heard: None,
+            dummy: self.map.targets.get(count).map(|t| (t.pos, t.strafe)),
+        };
+        let name = if bot.dummy.is_some() {
+            format!("的-{n}")
+        } else {
+            format!("bot-{n}")
+        };
+        self.add_player(id, name, Some(bot));
+        self.spawn(id);
+        id
+    }
+
+    fn remove_bot(&mut self, id: ClientId) {
+        self.unseat(id);
+        self.players.remove(&id);
+        self.roster_dirty = true;
+    }
+
+    /// A bot's skill as it plays (its own, or the room's).
+    fn level_of(&self, b: &Bot) -> u8 {
+        b.level.unwrap_or(self.cfg.bot_skill)
+    }
+
+    /// The bots (not the firing range's dummies), oldest first.
+    fn bot_ids(&self) -> Vec<ClientId> {
+        self.players
+            .values()
+            .filter(|p| p.bot.as_ref().is_some_and(|b| b.dummy.is_none()))
+            .map(|p| p.id)
+            .collect()
+    }
+
+    /// Bots of each skill: `[skill 1, ..., skill 5]`.
+    pub fn bot_mix(&self) -> [u32; 5] {
+        let mut mix = [0u32; 5];
+        for p in self.players.values() {
+            if let Some(b) = p.bot.as_ref().filter(|b| b.dummy.is_none()) {
+                mix[self.level_of(b) as usize - 1] += 1;
+            }
+        }
+        mix
+    }
+
+    /// Numbers the bots bot-1, bot-2 ... in the admin's order (the
+    /// strongest first, the weakest first, or shuffled).
+    fn renumber_bots(&mut self) {
+        let mut ids = self.bot_ids();
+        let key = |r: &Room, id: &ClientId| {
+            let b = r.players[id].bot.as_ref().unwrap();
+            (r.level_of(b), b.order_key)
+        };
+        match self.bot_order {
+            BotOrder::Strong => ids.sort_by_key(|id| (std::cmp::Reverse(key(self, id).0), *id)),
+            BotOrder::Weak => ids.sort_by_key(|id| (key(self, id).0, *id)),
+            BotOrder::Random => ids.sort_by_key(|id| key(self, id).1),
+        }
+        for (i, id) in ids.into_iter().enumerate() {
+            let name = format!("bot-{}", i + 1);
+            let p = self.players.get_mut(&id).unwrap();
+            if p.name != name {
+                p.name = name;
+                self.roster_dirty = true;
+            }
+        }
+    }
+
+    /// Before a match (waiting or counting down): the bots may be numbered
+    /// again whenever they change. In a match their names stay put.
+    fn prematch(&self) -> bool {
+        matches!(self.phase(), Phase::Lobby | Phase::Countdown)
     }
 
     fn spawn(&mut self, id: ClientId) {
@@ -2038,6 +2209,7 @@ impl Room {
         if let Some(s) = self.next.take() {
             self.apply_settings(&s);
         }
+        self.renumber_bots();
         self.left = self.cfg.time_limit;
         let ids: Vec<ClientId> = self.players.keys().copied().collect();
         for id in &ids {
@@ -2146,21 +2318,82 @@ impl Room {
         s
     }
 
-    /// The number of bots, at once (also in a match under way).
+    /// The number of bots, at once (also in a match under way). New ones
+    /// play at the room's skill.
     pub fn admin_bots(&mut self, n: u32) -> Result<String, String> {
         let n = n.min(bot_cap(&self.cfg));
         self.set_bots(n);
-        self.cfg.bots = n;
-        if let Some(s) = &mut self.next {
-            s.bots = n;
-        }
+        self.bots_changed(n);
         self.sys(format!("bot の数: {n}"));
         Ok(format!("bot を {n} 体にしました"))
     }
 
+    /// After the bots changed: their number in the rules, their names.
+    fn bots_changed(&mut self, n: u32) {
+        self.bots_wanted = n;
+        self.cfg.bots = n;
+        if let Some(s) = &mut self.next {
+            s.bots = n;
+        }
+        if self.prematch() {
+            self.renumber_bots();
+        }
+    }
+
+    /// How many bots of each skill (`counts[0]`: skill 1 ...), at once.
+    /// Bots of a skill there are too many of leave (the newest first);
+    /// missing ones join.
+    pub fn admin_bot_mix(&mut self, counts: &[u32]) -> Result<String, String> {
+        if counts.len() != 5 {
+            return Err("強さ 1〜5 それぞれの数を指定してください".into());
+        }
+        let cap = bot_cap(&self.cfg);
+        let total = counts.iter().fold(0u32, |a, &n| a.saturating_add(n));
+        if total > cap {
+            return Err(format!("bot は合わせて {cap} 体までです (いま {total} 体)"));
+        }
+        for lv in 1..=5u8 {
+            let want = counts[lv as usize - 1] as usize;
+            let mut ids: Vec<ClientId> = self
+                .bot_ids()
+                .into_iter()
+                .filter(|id| self.level_of(self.players[id].bot.as_ref().unwrap()) == lv)
+                .collect();
+            while ids.len() > want {
+                let id = ids.pop().unwrap();
+                self.remove_bot(id);
+            }
+            for _ in ids.len()..want {
+                self.add_bot(Some(lv));
+            }
+        }
+        self.bots_changed(total);
+        let text = mix_text(&self.bot_mix());
+        self.sys(format!("bot: {text}"));
+        Ok(format!("bot: {text}"))
+    }
+
+    /// How the bots are numbered: at once before a match, otherwise when the
+    /// next one starts (names do not change in the middle of a match).
+    pub fn admin_bot_order(&mut self, order: BotOrder) -> Result<String, String> {
+        self.bot_order = order;
+        let what = match order {
+            BotOrder::Strong => "強い順",
+            BotOrder::Weak => "弱い順",
+            BotOrder::Random => "ランダム",
+        };
+        if self.prematch() {
+            self.renumber_bots();
+            Ok(format!("bot の番号を{what}に振り直しました"))
+        } else {
+            Ok(format!(
+                "bot の番号は次の試合の開始時に{what}で振り直します"
+            ))
+        }
+    }
+
     /// One bot's skill (None: back to the room's), at once.
     pub fn admin_bot_level(&mut self, id: ClientId, level: Option<u8>) -> Result<String, String> {
-        let room = self.cfg.bot_skill;
         let Some(p) = self.players.get_mut(&id) else {
             return Err("その bot はいません".into());
         };
@@ -2170,13 +2403,54 @@ impl Room {
         if b.dummy.is_some() {
             return Err("射撃訓練場の的です".into());
         }
+        let was = p.name.clone();
         b.level = level.map(|l| l.clamp(1, 5));
-        let l = b.level.unwrap_or(room);
+        let own = b.level.is_some();
+        if self.prematch() {
+            self.renumber_bots();
+        }
+        let p = &self.players[&id];
+        let l = self.level_of(p.bot.as_ref().unwrap());
         let text = format!(
-            "{} の強さ: {l} ({}){}",
-            p.name,
+            "{}{} の強さ: {l} ({}){}",
+            was,
+            if p.name != was {
+                format!(" (→ {})", p.name)
+            } else {
+                String::new()
+            },
             BOT_SKILL_NAMES[l as usize - 1],
-            if b.level.is_none() {
+            if own { "" } else { " · 全体の設定" }
+        );
+        self.sys(text.clone());
+        Ok(text)
+    }
+
+    /// Every bot's skill (None: all back to the room's), at once.
+    pub fn admin_bot_level_all(&mut self, level: Option<u8>) -> Result<String, String> {
+        let ids = self.bot_ids();
+        if ids.is_empty() {
+            return Err("bot はいません".into());
+        }
+        let level = level.map(|l| l.clamp(1, 5));
+        for id in &ids {
+            self.players
+                .get_mut(id)
+                .unwrap()
+                .bot
+                .as_mut()
+                .unwrap()
+                .level = level;
+        }
+        if self.prematch() {
+            self.renumber_bots();
+        }
+        let l = level.unwrap_or(self.cfg.bot_skill);
+        let text = format!(
+            "bot {} 体の強さ: {l} ({}){}",
+            ids.len(),
+            BOT_SKILL_NAMES[l as usize - 1],
+            if level.is_none() {
                 " · 全体の設定"
             } else {
                 ""
@@ -2258,9 +2532,11 @@ impl Room {
         Ok("待機中に戻しました".into())
     }
 
-    /// Rules of the next match (in the waiting room: the one about to be
-    /// started).
-    pub fn admin_settings(&mut self, s: MatchSettings) -> Result<String, String> {
+    /// Rules of the match about to start (waiting or counting down: they
+    /// apply at once), or of the next one (during a match and its results).
+    /// The skill of the bots already there changes only with `relevel`;
+    /// otherwise each keeps the skill it plays at.
+    pub fn admin_settings(&mut self, s: MatchSettings, relevel: bool) -> Result<String, String> {
         if !s.time_limit.is_finite() || s.time_limit <= 0.0 {
             return Err("時間が正しくありません".into());
         }
@@ -2271,24 +2547,42 @@ impl Room {
             bot_skill: s.bot_skill.clamp(1, 5),
             ..s
         };
-        let text = format!(
-            "{} 分 · {} · bot {} 体 (強さ {}) · リング{} · 戦車{}",
-            s.time_limit,
-            if s.respawn {
-                format!("{} キル先取", s.frag_limit)
+        let text = rules_text(&s);
+        let prematch = self.prematch();
+        let bots = self.bot_ids();
+        let mut also = String::new();
+        if s.bot_skill != self.next_settings().bot_skill && !bots.is_empty() {
+            let now = self.cfg.bot_skill;
+            for id in &bots {
+                let b = self.players.get_mut(id).unwrap().bot.as_mut().unwrap();
+                if relevel {
+                    // Before the match the room's skill is theirs at once;
+                    // in a match it would be only from the next one.
+                    b.level = if prematch { None } else { Some(s.bot_skill) };
+                } else if b.level.is_none() {
+                    // Keeps the skill it plays at.
+                    b.level = Some(now);
+                }
+            }
+            also = if relevel {
+                format!(" · いる bot {} 体も強さ {}", bots.len(), s.bot_skill)
             } else {
-                "復活なし".into()
-            },
-            s.bots,
-            s.bot_skill,
-            if s.ring { "あり" } else { "なし" },
-            if s.tanks { "あり" } else { "なし" },
-        );
+                " · いる bot の強さはそのまま".into()
+            };
+        }
         // The number of bots changes at once (a match under way too).
         self.set_bots(s.bots);
-        self.next = Some(s);
-        self.sys(format!("次の試合: {text}"));
-        Ok(format!("次の試合の設定: {text}"))
+        if prematch {
+            self.next = None;
+            self.apply_settings(&s);
+            self.renumber_bots();
+            self.sys(format!("この試合のルール: {text}"));
+            Ok(format!("この試合のルール: {text}{also}"))
+        } else {
+            self.next = Some(s);
+            self.sys(format!("次の試合: {text}"));
+            Ok(format!("次の試合の設定: {text}{also}"))
+        }
     }
 
     pub fn auto(&self) -> bool {
@@ -2411,10 +2705,7 @@ impl Room {
                 tank: p.tank,
                 respawn: if p.alive { 0.0 } else { r2(p.respawn.max(0.0)) },
                 ping: None,
-                level: p
-                    .bot
-                    .as_ref()
-                    .map(|b| b.level.unwrap_or(self.cfg.bot_skill)),
+                level: p.bot.as_ref().map(|b| self.level_of(b)),
                 own_level: p.bot.as_ref().is_some_and(|b| b.level.is_some()),
             })
             .collect();
@@ -2426,6 +2717,8 @@ impl Room {
             auto: self.auto,
             settings: self.settings(),
             next: self.next_settings(),
+            bot_mix: self.bot_mix().to_vec(),
+            bot_order: self.bot_order,
             players,
             tanks: self.tank_states(),
             grenades: self.grenade_states(),
@@ -2558,7 +2851,9 @@ impl Room {
         let pos = p.pos;
         let mut taken = Vec::new();
         for (i, k) in self.pickups.iter().enumerate() {
-            if !k.active || k.pos.distance(Vec3::new(pos.x, 0.0, pos.z)) > 1.6 {
+            // Within reach on the ground (pickups lie on the terrain, at its
+            // height: on a hill too).
+            if !k.active || (k.pos - pos).length_xz() > 1.6 || (k.pos.y - pos.y).abs() > 2.0 {
                 continue;
             }
             let ok = match k.kind {
@@ -3227,12 +3522,35 @@ impl Room {
             self.pickups
                 .iter()
                 .filter(|k| k.active && k.kind == PickupKind::Medkit)
-                .map(|k| (k.pos, k.pos.distance(Vec3::new(me.pos.x, 0.0, me.pos.z))))
+                .map(|k| (k.pos, (k.pos - me.pos).length_xz()))
                 .filter(|(_, d)| *d < 80.0)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(p, _)| p)
         } else {
             None
+        };
+        // Rounds. Out: not one left in any gun. Low: only what the
+        // magazines hold. Either way the nearest box of ammo (or a gun lying
+        // about, which comes loaded) is worth fetching: from anywhere when
+        // out, from close by when low.
+        let ammo = ammo_need(&me.inv);
+        let ammo_goal = if driving || ammo == AmmoNeed::Enough {
+            None
+        } else {
+            let reach = if ammo == AmmoNeed::Out { 250.0 } else { 90.0 };
+            self.pickups
+                .iter()
+                .filter(|k| k.active && pickup_refills(&me.inv, k.kind))
+                .map(|k| {
+                    (
+                        k.pos,
+                        gun_of(k.kind).is_some(),
+                        (k.pos - me.pos).length_xz(),
+                    )
+                })
+                .filter(|k| k.2 < reach)
+                .min_by(|a, b| a.2.total_cmp(&b.2))
+                .map(|(p, gun, _)| (p, gun))
         };
         let wp = me.bot.as_ref().unwrap().waypoint;
         let need_wp = me.bot.as_ref().unwrap().wander_timer <= 0.0
@@ -3362,13 +3680,17 @@ impl Room {
         match seen {
             Some((tid, chest, dist)) => {
                 b.heard = None;
-                // Fight with a gun. A heal under way goes on only when badly
+                // Fight with a gun: one with rounds in it, else one that has
+                // some to load. A heal under way goes on only when badly
                 // hurt (switching away stops it).
-                if !matches!(p.inv.sel, Slot::Gun0 | Slot::Gun1)
+                if !driving
                     && !(p.heal.is_some() && p.hp < 40.0)
-                    && p.inv.select(Slot::Gun0)
+                    && let Some(slot) = fighting_gun(&p.inv)
+                    && p.inv.sel != slot
+                    && p.inv.select(slot)
                 {
                     p.heal = None;
+                    p.reload = None;
                 }
                 if b.target != Some(tid) {
                     b.target = Some(tid);
@@ -3395,16 +3717,34 @@ impl Room {
                 let want_yaw = (-d.x).atan2(-d.z) + b.aim_err.0;
                 let want_pitch = d.y.atan2(d.length_xz()) + b.aim_err.1;
                 let ready = b.reaction <= 0.0;
+                // Nothing left to shoot: a grenade if it has one and the
+                // enemy is in throwing range, otherwise off to fetch rounds
+                // (not standing there aiming an empty gun).
+                let dry = ammo == AmmoNeed::Out && !driving;
+                let throwing = dry && p.inv.grenades > 0 && (8.0..32.0).contains(&dist);
                 let dy = wrap_angle(want_yaw - p.yaw);
-                let step = skill.turn * dt;
-                p.yaw = wrap_angle(p.yaw + dy.clamp(-step, step));
-                p.pitch += (want_pitch - p.pitch).clamp(-step, step);
+                if !dry || throwing {
+                    let step = skill.turn * dt;
+                    p.yaw = wrap_angle(p.yaw + dy.clamp(-step, step));
+                    p.pitch += (want_pitch - p.pitch).clamp(-step, step);
+                }
                 let aimed = dy.abs() < 0.06;
+                if throwing && ready && b.throw_cd <= 0.0 && dy.abs() < 0.15 {
+                    let v = (dist * 10.5).sqrt();
+                    want_throw = Some((((v - 6.0) / 3.5).round() as u32).clamp(1, MAX_THROW));
+                    b.throw_cd = 2.0;
+                }
                 // With its head (strong bots, on foot, the enemy not on top
                 // of it): a tank standing by is armour to get into; hurt or
                 // out of rounds, its far side is cover.
                 let enemy = chest;
-                let fall_back = if !skill.tactics || driving || dist < 8.0 {
+                let fall_back = if dry && !throwing {
+                    let nav = self
+                        .nav
+                        .get_or_init(|| crate::nav::NavGrid::build(&self.map));
+                    let goal = ammo_goal.map(|(g, _)| g).unwrap_or(b.waypoint);
+                    Some(route(nav, b, pos, goal, skill.plans, dt))
+                } else if !skill.tactics || driving || dist < 8.0 {
                     None
                 } else if let Some((t, d)) =
                     near_tank.filter(|(_, d)| *d < 15.0 || (*d < 45.0 && *d < dist * 0.5))
@@ -3456,7 +3796,7 @@ impl Room {
                             mz: if dy.abs() < 0.8 { 1 } else { 0 },
                             ..Default::default()
                         };
-                    } else {
+                    } else if !dry {
                         // There (and still in sight): down, and shoot back.
                         p.input = InputState {
                             sneak: true,
@@ -3468,6 +3808,8 @@ impl Room {
                         if ready && aimed && p.cooldown <= 0.0 {
                             p.trigger = 0.1;
                         }
+                    } else {
+                        p.input = InputState::default();
                     }
                 } else if let Some(h) = hull
                     && (dist < 14.0 || (dist > 90.0 && !aimed))
@@ -3485,13 +3827,14 @@ impl Room {
                         ..Default::default()
                     };
                 } else {
+                    let shoot = ready && aimed && !dry;
                     p.input = InputState {
                         ads: true,
                         zoom: 1,
-                        fire: ready && aimed,
+                        fire: shoot,
                         ..Default::default()
                     };
-                    if ready && aimed && p.cooldown <= 0.0 {
+                    if shoot && p.cooldown <= 0.0 {
                         p.trigger = 0.1;
                     }
                 }
@@ -3506,16 +3849,21 @@ impl Room {
                 });
                 // Behind a tank it went to (hurt): stay there for now.
                 let cover = b.cover.filter(|_| !driving && !outside_next).map(|c| c.0);
+                let fetch = ammo_goal.map(|(g, _)| g);
                 let goal = match ring_goal {
                     _ if cover.is_some() => cover.unwrap(),
                     _ if b.detour > 0.0 => b.waypoint,
                     Some(c) if outside_next => c,
+                    // An empty gun first: a noise is nothing to go to without
+                    // rounds.
+                    _ if ammo == AmmoNeed::Out && fetch.is_some() => fetch.unwrap(),
                     // Strong bots take the tank before looking into a noise.
                     _ if skill.tactics && tank_goal.is_some() => tank_goal.unwrap(),
                     _ => b
                         .heard
                         .map(|(p, _)| p)
                         .or(medkit)
+                        .or(fetch)
                         .or(tank_goal)
                         .unwrap_or(b.waypoint),
                 };
@@ -3565,6 +3913,19 @@ impl Room {
                 } else if !heal && p.heal.is_none() && p.inv.sel == Slot::Medkit {
                     p.inv.select(Slot::Gun0);
                 }
+                // A gun with nothing left in it is put away for one that has.
+                if !heal
+                    && !driving
+                    && p.heal.is_none()
+                    && p.inv
+                        .gun_index()
+                        .is_some_and(|i| p.inv.guns[i].ammo + p.inv.guns[i].reserve == 0)
+                    && let Some(slot) = fighting_gun(&p.inv)
+                    && p.inv.sel != slot
+                    && p.inv.select(slot)
+                {
+                    p.reload = None;
+                }
                 // Reload when idle (not while healing).
                 let empty = p
                     .inv
@@ -3580,6 +3941,20 @@ impl Room {
         }
         if want_use {
             self.use_key(id);
+        }
+        // At the gun it went for (for its rounds): `y`. With both hands full
+        // the empty gun is the one left behind.
+        if let Some((g, true)) = ammo_goal
+            && (g - pos).length_xz() < 2.0
+            && (g.y - pos.y).abs() < 2.0
+        {
+            let p = self.players.get_mut(&id).unwrap();
+            if p.inv.guns.len() >= MAX_GUNS
+                && let Some(i) = p.inv.guns.iter().position(|g| g.ammo + g.reserve == 0)
+            {
+                p.inv.sel = if i == 0 { Slot::Gun0 } else { Slot::Gun1 };
+            }
+            self.pickup_gun(id);
         }
         if let Some(power) = want_throw {
             self.throw(id, power);
@@ -4441,6 +4816,134 @@ mod tests {
             "back to the gun"
         );
     }
+    /// An open field `height` m up, with these pickups on it.
+    fn field_with(height: f32, pickups: Vec<(PickupKind, Vec3)>) -> Room {
+        use crate::map::{GRID, PickupSpot};
+        let half = crate::map::HALF;
+        let map = Map {
+            seed: 0,
+            half,
+            grid: GRID,
+            cell: 2.0 * half / (GRID - 1) as f32,
+            heights: vec![height; GRID * GRID],
+            solids: Vec::new(),
+            trees: Vec::new(),
+            spawns: vec![Vec3::new(0.0, height, 0.0)],
+            pickups: pickups
+                .into_iter()
+                .map(|(kind, pos)| PickupSpot {
+                    kind,
+                    pos: Vec3::new(pos.x, height, pos.z),
+                })
+                .collect(),
+            targets: Vec::new(),
+            labels: Vec::new(),
+            tanks: Vec::new(),
+            top: Default::default(),
+        };
+        Room::with_map(
+            Config {
+                ring: false,
+                tanks: false,
+                ..Default::default()
+            },
+            map,
+        )
+    }
+
+    /// A skill-5 bot at the origin with these guns, and a person standing
+    /// still `dist` m in front of it (toward -Z).
+    fn bot_facing(r: &mut Room, guns: Vec<GunSlot>, dist: f32) -> (ClientId, ClientId) {
+        let target = r.join("target", None, PROTOCOL, false).unwrap();
+        r.set_bots(1);
+        let bot = r.find("bot-1").unwrap();
+        r.teleport(bot, Vec3::ZERO, 0.0);
+        r.teleport(target, Vec3::new(0.0, 0.0, -dist), std::f32::consts::PI);
+        let p = r.players.get_mut(&bot).unwrap();
+        p.bot.as_mut().unwrap().level = Some(5);
+        p.inv.guns = guns;
+        p.inv.sel = Slot::Gun0;
+        p.inv.grenades = 0;
+        (bot, target)
+    }
+
+    #[test]
+    fn items_on_a_hill_are_picked_up() {
+        let mut r = field_with(9.0, vec![(PickupKind::Medkit, Vec3::new(3.0, 0.0, 0.0))]);
+        let a = r.join("a", None, PROTOCOL, false).unwrap();
+        r.teleport(a, Vec3::new(3.0, 0.0, 0.0), 0.0);
+        let before = r.players[&a].inv.medkits;
+        r.tick(1.0 / 60.0);
+        assert_eq!(r.players[&a].inv.medkits, before + 1);
+    }
+
+    #[test]
+    fn bots_put_an_empty_gun_away_for_a_loaded_one() {
+        let mut r = field_with(0.0, Vec::new());
+        let empty = GunSlot {
+            gun: Gun::Ar,
+            ammo: 0,
+            reserve: 0,
+        };
+        let (bot, target) = bot_facing(&mut r, vec![empty, GunSlot::full(Gun::Smg)], 15.0);
+        for _ in 0..(60 * 3) {
+            r.tick(1.0 / 60.0);
+        }
+        assert_eq!(r.players[&bot].inv.sel, Slot::Gun1);
+        assert!(
+            r.players[&target].hp < MAX_HP || !r.players[&target].alive,
+            "the bot shot with its SMG"
+        );
+    }
+
+    #[test]
+    fn bots_out_of_rounds_fetch_ammo_and_fight_on() {
+        // The box lies off to the side; the enemy stands in plain sight.
+        let mut r = field_with(4.0, vec![(PickupKind::Ammo, Vec3::new(25.0, 0.0, 10.0))]);
+        let dry = GunSlot {
+            gun: Gun::Ar,
+            ammo: 0,
+            reserve: 0,
+        };
+        let (bot, target) = bot_facing(&mut r, vec![dry], 30.0);
+        let mut fetched = false;
+        let mut hit = false;
+        for _ in 0..(60 * 20) {
+            r.tick(1.0 / 60.0);
+            let g = r.players[&bot].inv.guns[0];
+            fetched |= g.reserve > 0 || g.ammo > 0;
+            hit |= r.players[&target].hp < MAX_HP || !r.players[&target].alive;
+            if fetched && hit {
+                break;
+            }
+        }
+        assert!(fetched, "went for the ammo");
+        assert!(hit, "and shot the enemy with it");
+    }
+
+    #[test]
+    fn bots_out_of_rounds_take_a_gun_lying_about() {
+        let mut r = field_with(0.0, vec![(PickupKind::Smg, Vec3::new(-20.0, 0.0, 5.0))]);
+        let dry = GunSlot {
+            gun: Gun::Ar,
+            ammo: 0,
+            reserve: 0,
+        };
+        let (bot, target) = bot_facing(&mut r, vec![dry, dry], 30.0);
+        r.players.get_mut(&bot).unwrap().inv.guns[1].gun = Gun::Sr;
+        let mut hit = false;
+        for _ in 0..(60 * 20) {
+            r.tick(1.0 / 60.0);
+            hit |= r.players[&target].hp < MAX_HP || !r.players[&target].alive;
+            if hit {
+                break;
+            }
+        }
+        let guns: Vec<Gun> = r.players[&bot].inv.guns.iter().map(|g| g.gun).collect();
+        assert!(guns.contains(&Gun::Smg), "picked up the SMG: {guns:?}");
+        assert!(hit, "and fought with it");
+    }
+
     #[test]
     fn damage_does_not_cancel_a_heal() {
         let mut r = walled_room(Vec::new(), vec![Vec3::ZERO]);
@@ -5233,7 +5736,7 @@ mod tests {
         s.respawn = false;
         s.time_limit = 3.0;
         s.bots = 2;
-        r.admin_settings(s).unwrap();
+        r.admin_settings(s, false).unwrap();
         // Not in the match being played.
         assert!(r.cfg.respawn);
         assert_eq!(r.next_settings().time_limit, 3.0);
@@ -5248,6 +5751,128 @@ mod tests {
             out.iter()
                 .any(|(_, m)| matches!(m, ServerMsg::MatchStart { respawn: false, .. }))
         );
+    }
+
+    #[test]
+    fn rules_set_before_a_match_are_that_match() {
+        let mut r = managed(2);
+        let mut s = r.settings();
+        s.time_limit = 4.0;
+        s.respawn = false;
+        r.admin_settings(s, false).unwrap();
+        // Waiting: the match about to start has them at once.
+        assert_eq!(r.settings().time_limit, 4.0);
+        assert!(!r.cfg.respawn);
+        assert_eq!(r.settings(), r.next_settings());
+        r.admin_start(10.0).unwrap();
+        let mut s = r.settings();
+        s.frag_limit = 7;
+        r.admin_settings(s, false).unwrap();
+        assert_eq!(r.cfg.frag_limit, 7, "counting down: still this match");
+        r.admin_start(0.0).unwrap_err();
+        for _ in 0..(11 * 60) {
+            r.tick(1.0 / 60.0);
+        }
+        assert_eq!(r.phase(), Phase::Live);
+        let mut s = r.settings();
+        s.frag_limit = 9;
+        r.admin_settings(s, false).unwrap();
+        assert_eq!(r.cfg.frag_limit, 7, "in a match: the next one");
+        assert_eq!(r.next_settings().frag_limit, 9);
+    }
+
+    #[test]
+    fn changing_the_skill_asks_about_the_bots_already_there() {
+        let mut r = managed(3);
+        let levels = |r: &Room| {
+            let mut v: Vec<u8> = r
+                .admin_state()
+                .players
+                .iter()
+                .filter_map(|p| p.level)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(levels(&r), [3, 3, 3]);
+        // No: they keep the skill they play at.
+        let mut s = r.settings();
+        s.bot_skill = 5;
+        r.admin_settings(s.clone(), false).unwrap();
+        assert_eq!(levels(&r), [3, 3, 3]);
+        r.admin_bots(4).unwrap();
+        assert_eq!(levels(&r), [3, 3, 3, 5], "a new one plays at the new skill");
+        // Yes: all of them take it.
+        s.bots = 4;
+        s.bot_skill = 2;
+        r.admin_settings(s.clone(), true).unwrap();
+        assert_eq!(levels(&r), [2, 2, 2, 2]);
+        // In a match: at once too (not only from the next match).
+        r.admin_start(0.0).unwrap();
+        s.bot_skill = 4;
+        r.admin_settings(s, true).unwrap();
+        assert_eq!(levels(&r), [4, 4, 4, 4]);
+        assert_eq!(r.cfg.bot_skill, 2, "the room's skill: from the next match");
+    }
+
+    #[test]
+    fn bots_by_the_number_of_each_skill() {
+        let mut r = managed(0);
+        r.admin_bot_mix(&[0, 0, 1, 2, 5]).unwrap();
+        assert_eq!(r.bot_mix(), [0, 0, 1, 2, 5]);
+        assert_eq!(r.admin_state().bot_mix, vec![0, 0, 1, 2, 5]);
+        // Strongest first: bot-1 .. bot-5 are skill 5, then 4, 4, then 3.
+        let level = |r: &Room, name: &str| {
+            let id = r.find(name).unwrap();
+            r.admin_state()
+                .players
+                .iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .level
+                .unwrap()
+        };
+        let names = |r: &Room| {
+            (1..=r.bot_ids().len())
+                .map(|i| level(r, &format!("bot-{i}")))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&r), [5, 5, 5, 5, 5, 4, 4, 3]);
+        r.admin_bot_order(BotOrder::Weak).unwrap();
+        assert_eq!(names(&r), [3, 4, 4, 5, 5, 5, 5, 5]);
+        // Fewer of one skill, more of another; the others stay.
+        let before: Vec<ClientId> = r.bot_ids();
+        r.admin_bot_mix(&[1, 0, 1, 2, 3]).unwrap();
+        assert_eq!(r.bot_mix(), [1, 0, 1, 2, 3]);
+        let after = r.bot_ids();
+        assert_eq!(after.iter().filter(|id| before.contains(id)).count(), 6);
+        assert_eq!(names(&r), [1, 3, 4, 4, 5, 5, 5]);
+        // Shuffled: every number once, the same skills.
+        r.admin_bot_order(BotOrder::Random).unwrap();
+        let mut n = names(&r);
+        n.sort();
+        assert_eq!(n, [1, 3, 4, 4, 5, 5, 5]);
+        assert!(r.admin_bot_mix(&[0, 0, 0, 0, MAX_BOTS + 1]).is_err());
+        assert!(r.admin_bot_mix(&[1, 2]).is_err());
+        assert_eq!(r.settings().bots, 7);
+        // In a match the names stay put; the next match numbers them.
+        r.admin_bot_order(BotOrder::Strong).unwrap();
+        r.join("alice", None, PROTOCOL, false).unwrap();
+        r.admin_start(0.0).unwrap();
+        assert_eq!(names(&r), [5, 5, 5, 4, 4, 3, 1]);
+        r.admin_bot_order(BotOrder::Weak).unwrap();
+        assert_eq!(names(&r), [5, 5, 5, 4, 4, 3, 1]);
+        r.admin_bot_mix(&[1, 0, 1, 2, 4]).unwrap();
+        assert_eq!(r.bot_mix(), [1, 0, 1, 2, 4]);
+        assert_eq!(
+            names(&r),
+            [5, 5, 5, 4, 4, 3, 1, 5],
+            "a new one takes the next number"
+        );
+        // The next match numbers them in the order asked for.
+        r.admin_lobby().unwrap();
+        r.admin_start(0.0).unwrap();
+        assert_eq!(names(&r), [1, 3, 4, 4, 5, 5, 5, 5]);
     }
 
     #[test]
