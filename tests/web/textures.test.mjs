@@ -50,6 +50,9 @@ const SCENE_MODES = {
   boarding: ['normal', 'view'],
   tank: ['normal', 'view'],
   wait: ['normal'],
+  // j / k scroll the table (main.js takes them first); in the modes they
+  // are the moving keys.
+  results: ['normal', 'spectate'],
   menu: ['menu'],
   msg: ['msg'],
   form: ['form'],

@@ -37,7 +37,7 @@
         <div id="tiles"></div>
         <canvas id="bigmap" hidden></canvas>
       </div>
-      <div class="hint keys" id="monitor-hint"><kbd>hjkl</kbd> 選ぶ · <kbd>Enter</kbd> 1 人を大きく · <kbd>+</kbd>/<kbd>-</kbd> 表示数 (<kbd>=</kbd> 自動) · <kbd>]</kbd>/<kbd>[</kbd> ページ · <kbd>c</kbd> 巡回 · <kbd>b</kbd> bot · <kbd>a</kbd>/<kbd>o</kbd> カメラ 自動 / 手動 · <kbd>F</kbd> 全画面 · <kbd>m</kbd> マップ · <kbd>Esc</kbd> 一覧へ</div>
+      <div class="hint keys" id="monitor-hint"><kbd>hjkl</kbd> 選ぶ · <kbd>Enter</kbd> 1 人を大きく · <kbd>+</kbd>/<kbd>-</kbd> 表示数 (<kbd>=</kbd> 自動) · <kbd>s</kbd> 並び (順位 / 名前) · <kbd>]</kbd>/<kbd>[</kbd> ページ · <kbd>c</kbd> 巡回 · <kbd>b</kbd> bot · <kbd>a</kbd>/<kbd>o</kbd> カメラ 自動 / 手動 · <kbd>F</kbd> 全画面 · <kbd>m</kbd> マップ · <kbd>Esc</kbd> 一覧へ</div>
       <div class="hint touchonly">タイルをタップで 1 人を大きく (もう一度で一覧へ) · カメラはドラッグで向き、ボタンで移動 · □ で全画面</div>
     </div>
   </section>
@@ -83,13 +83,13 @@
       <div class="titlebar"><span><b class="wn">5</b> bot</span><span class="tb-btns"><i>_</i></span></div>
       <div class="body">
         <ol id="bot-list" class="listview plain"></ol>
-        <div class="hint"><span class="keys"><kbd>j</kbd>/<kbd>k</kbd> 選ぶ · <kbd>h</kbd>/<kbd>l</kbd> 数・強さ (<kbd>H</kbd>/<kbd>L</kbd> で 5 ずつ) · <kbd>a</kbd> 全体の強さに戻す · </span>◀ ▶ で変更 · すぐ反映</div>
+        <div class="hint"><span class="keys"><kbd>j</kbd>/<kbd>k</kbd> 選ぶ · <kbd>h</kbd>/<kbd>l</kbd> 数・強さ・番号 (<kbd>H</kbd>/<kbd>L</kbd> で 5 ずつ) · <kbd>a</kbd> 全体の強さに戻す · </span>◀ ▶ で変更 · すぐ反映</div>
       </div>
     </section>
 
-    <!-- 6: rules of the next match -->
+    <!-- 6: rules of the match about to start (or of the next one) -->
     <section id="w-rules" class="window" data-win="6" data-title="ルール">
-      <div class="titlebar"><span><b class="wn">6</b> 次の試合のルール</span><span class="tb-btns"><i>_</i></span></div>
+      <div class="titlebar"><span><b class="wn">6</b> <span id="rules-title">ルール</span></span><span class="tb-btns"><i>_</i></span></div>
       <div class="body">
         <ol id="rules-list" class="listview plain"></ol>
         <p id="rules-note" class="hint"></p>
@@ -113,7 +113,7 @@
     <div class="titlebar"><span>コマンドの実行</span><span class="tb-btns"><i class="x">×</i></span></div>
     <div class="body">
       <form id="cmdform" action="#"><label for="cmdinput">:</label><input id="cmdinput" autocomplete="off" spellcheck="false" autocapitalize="off"></form>
-      <div class="hint">start [秒] · end · lobby · cancel · auto on|off · bots 数 · level 名前 1〜5 · set time=分 … · kick 名前 · watch 名前 · say 文 · status · w (ルール保存) · help · q · ↑↓ 履歴</div>
+      <div class="hint">start [秒] · end · lobby · cancel · auto on|off · bots 数 · bots 5:5 4:2 · order strong|weak|random · level 名前 1〜5 · level all 1〜5 · set time=分 … · kick 名前 · watch 名前 · say 文 · status · w (ルール保存) · help · q · ↑↓ 履歴</div>
     </div>
   </div>
 

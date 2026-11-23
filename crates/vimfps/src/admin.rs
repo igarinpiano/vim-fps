@@ -11,7 +11,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use vimfps_core::protocol::{AdminMsg, AdminState, MatchSettings, Phase};
+use vimfps_core::protocol::{AdminMsg, AdminState, BotOrder, MatchSettings, Phase};
 use vimfps_core::{ClientId, Room};
 
 /// One person allowed in as admin.
@@ -172,11 +172,14 @@ pub fn apply(room: &mut Room, who: &str, msg: AdminMsg) -> (Result<String, Strin
         AdminMsg::Cancel => room.admin_cancel(),
         AdminMsg::End => room.admin_end(),
         AdminMsg::Lobby => room.admin_lobby(),
-        AdminMsg::Settings { settings } => room.admin_settings(settings),
+        AdminMsg::Settings { settings, relevel } => room.admin_settings(settings, relevel),
         AdminMsg::Auto { on } => Ok(room.set_auto(on)),
         AdminMsg::Spectate { id } => room.admin_spectate(id),
         AdminMsg::Bots { n } => room.admin_bots(n),
         AdminMsg::BotLevel { id, level } => room.admin_bot_level(id, level),
+        AdminMsg::BotLevelAll { level } => room.admin_bot_level_all(level),
+        AdminMsg::BotMix { counts } => room.admin_bot_mix(&counts),
+        AdminMsg::BotOrder { order } => room.admin_bot_order(order),
         AdminMsg::Say { text } => room.announce(who, &text),
         AdminMsg::Kick { id } => {
             return match room.name_of(id).map(str::to_string) {
@@ -200,10 +203,15 @@ pub const HELP: &str = "\
   end                 試合を終了 (結果を出して待機中へ)
   lobby               すぐ待機中に戻す (結果なし)
   auto on|off         結果のあと、次の試合を自動で始めるか
-  set 項目=値 ...     次の試合の設定: time=分 frags=キル数 bots=数 skill=1〜5
+  set 項目=値 ...     ルール: time=分 frags=キル数 bots=数 skill=1〜5
                       respawn=on|off ring=on|off tanks=on|off
-  bots 数             bot の数をすぐ変える (0〜500)
+                      (待機中・秒読み中はこれから始まる試合、試合中は次の試合。
+                      skill を変えても、いる bot の強さはそのまま: level all で全員)
+  bots 数             bot の数をすぐ変える (0〜500。増えた bot は全体の強さ)
+  bots 5:5 4:2 ...    強さごとの数ですぐそろえる (強さ 5 を 5 体、4 を 2 体、ほかは 0)
+  order strong|weak|random   bot の番号の振り方 (強い順・弱い順・ランダム)
   level 名前|番号 1〜5   bot 1 体の強さをすぐ変える (auto で全体の設定に戻す)
+  level all 1〜5      全員の強さをすぐ変える (auto で全員を全体の設定に)
   kick 名前|番号      退出させる
   watch 名前|番号     観戦に回す
   say テキスト        全員にメッセージ
@@ -240,11 +248,28 @@ pub fn parse_line(room: &Room, line: &str) -> Result<Option<AdminMsg>, String> {
         },
         "set" => AdminMsg::Settings {
             settings: parse_settings(room.next_settings(), rest)?,
+            relevel: false,
+        },
+        "bots" if rest.contains(':') => AdminMsg::BotMix {
+            counts: parse_mix(rest)?.to_vec(),
         },
         "bots" => AdminMsg::Bots {
             n: rest
                 .parse()
-                .map_err(|_| format!("bot の数が読めません: {rest}"))?,
+                .map_err(|_| format!("bot の数が読めません: {rest} (強さごとなら bots 5:5 4:2)"))?,
+        },
+        "order" | "botorder" => AdminMsg::BotOrder {
+            order: match rest {
+                "strong" | "level" | "強い順" => BotOrder::Strong,
+                "weak" | "弱い順" => BotOrder::Weak,
+                "random" | "ランダム" => BotOrder::Random,
+                _ => {
+                    return Err(
+                        "order strong (強い順) か weak (弱い順) か random で指定してください"
+                            .into(),
+                    );
+                }
+            },
         },
         "level" | "skill" => {
             let (name, lv) = rest
@@ -260,9 +285,12 @@ pub fn parse_line(room: &Room, line: &str) -> Result<Option<AdminMsg>, String> {
                         .ok_or("強さは 1〜5 か auto で指定してください")?,
                 )
             };
-            AdminMsg::BotLevel {
-                id: who(name.trim())?,
-                level,
+            match name.trim() {
+                "all" | "全員" => AdminMsg::BotLevelAll { level },
+                name => AdminMsg::BotLevel {
+                    id: who(name)?,
+                    level,
+                },
             }
         }
         "kick" => AdminMsg::Kick { id: who(rest)? },
@@ -273,6 +301,24 @@ pub fn parse_line(room: &Room, line: &str) -> Result<Option<AdminMsg>, String> {
         _ => return Err(format!("知らないコマンドです: {cmd} (help で一覧)")),
     };
     Ok(Some(msg))
+}
+
+/// `5:5 4:2` (skill:count ...): the bots of each skill, `[skill 1 ...
+/// skill 5]`. Skills not named get none.
+pub fn parse_mix(text: &str) -> Result<[u32; 5], String> {
+    let mut mix = [0u32; 5];
+    for word in text.split_whitespace() {
+        let (l, n) = word
+            .split_once(':')
+            .ok_or_else(|| format!("{word}: 強さ:数 で書いてください (例 bots 5:5 4:2)"))?;
+        let l = l
+            .parse::<usize>()
+            .ok()
+            .filter(|l| (1..=5).contains(l))
+            .ok_or_else(|| format!("{word}: 強さは 1〜5 です"))?;
+        mix[l - 1] = n.parse().map_err(|_| format!("{word}: 数が読めません"))?;
+    }
+    Ok(mix)
 }
 
 fn switch(v: &str) -> Option<bool> {
@@ -334,19 +380,7 @@ pub fn phase_text(st: &AdminState) -> String {
 }
 
 fn rules(s: &MatchSettings) -> String {
-    format!(
-        "{} 分 · {} · bot {} 体 (強さ {}) · リング{} · 戦車{}",
-        s.time_limit,
-        if s.respawn {
-            format!("{} キル先取", s.frag_limit)
-        } else {
-            "復活なし".into()
-        },
-        s.bots,
-        s.bot_skill,
-        if s.ring { "あり" } else { "なし" },
-        if s.tanks { "あり" } else { "なし" },
-    )
+    vimfps_core::sim::rules_text(s)
 }
 
 /// What `status` prints.
@@ -356,6 +390,17 @@ pub fn status(st: &AdminState) -> String {
     out.push_str(&format!("この試合: {}\n", rules(&st.settings)));
     if st.next != st.settings {
         out.push_str(&format!("次の試合: {}\n", rules(&st.next)));
+    }
+    if st.bot_mix.iter().any(|n| *n > 0) {
+        out.push_str(&format!(
+            "bot: {} · 番号は{}\n",
+            vimfps_core::sim::mix_text(&st.bot_mix),
+            match st.bot_order {
+                BotOrder::Strong => "強い順",
+                BotOrder::Weak => "弱い順",
+                BotOrder::Random => "ランダム",
+            }
+        ));
     }
     out.push_str(&format!(
         "結果のあと: {}\n",
@@ -486,7 +531,7 @@ mod tests {
         );
         assert!(parse_line(&room, "kick nobody").is_err());
         assert!(parse_line(&room, "dance").is_err());
-        let Some(AdminMsg::Settings { settings }) =
+        let Some(AdminMsg::Settings { settings, .. }) =
             parse_line(&room, "set time=3 bots=4 respawn=off").unwrap()
         else {
             panic!()
@@ -525,6 +570,34 @@ mod tests {
         let (r, _) = apply(&mut room, "x", AdminMsg::BotLevel { id, level: Some(3) });
         assert!(r.is_err(), "alice is not a bot");
         assert!(parse_line(&room, "level bot-2 9").is_err());
+        assert_eq!(
+            parse_line(&room, "level all 4").unwrap(),
+            Some(AdminMsg::BotLevelAll { level: Some(4) })
+        );
+        assert_eq!(
+            parse_line(&room, "bots 5:5 4:2").unwrap(),
+            Some(AdminMsg::BotMix {
+                counts: vec![0, 0, 0, 2, 5]
+            })
+        );
+        assert!(parse_line(&room, "bots 6:1").is_err());
+        assert!(parse_line(&room, "bots 5:x").is_err());
+        assert_eq!(
+            parse_line(&room, "order random").unwrap(),
+            Some(AdminMsg::BotOrder {
+                order: BotOrder::Random
+            })
+        );
+        assert!(parse_line(&room, "order sideways").is_err());
+        let (r, _) = apply(
+            &mut room,
+            "igarin",
+            AdminMsg::BotMix {
+                counts: vec![0, 0, 0, 2, 5],
+            },
+        );
+        assert!(r.is_ok(), "{r:?}");
+        assert!(status(&room.admin_state()).contains("強さ 5 が 5 体"));
         let (r, _) = apply(&mut room, "igarin", AdminMsg::Start { countdown: 0.0 });
         assert!(r.is_ok());
         let st = room.admin_state();

@@ -180,11 +180,21 @@ body.uianim #boot .boot-bar i { animation: bootbar 1.2s linear infinite; }
 #lobby-list li.me { font-weight: 700; }
 #lobby-list li.bot { color: #777; }
 #lobby-list li.watch { color: #777; font-style: italic; }
-#resultwin { left: 50%; top: 42%; transform: translate(-50%, -50%); min-width: min(360px, calc(100vw - 32px)); }
-#result-table { border-collapse: collapse; width: 100%; background: #fff; border: 1px solid #7f9db9; font-size: 13px; }
-#result-table td, #result-table th { padding: 4px 10px; text-align: left; border-bottom: 1px solid #e3e3e3; }
-#result-table th { background: #f4f3ee; font-weight: 600; }
-#result-table tr.me td { background: #dce8ff; }
+#resultwin { left: 50%; top: 46%; transform: translate(-50%, -50%); min-width: min(360px, calc(100vw - 32px)); max-width: calc(100vw - 32px); }
+/* Many players: the table scrolls inside the window (j / k, a whole row a
+   press), its header staying on top. Rows are 26 px; the box is a whole
+   number of rows tall. */
+#result-scroll { background: #fff; border: 1px solid #7f9db9; overflow-y: auto; max-height: calc(100vh - 230px); max-height: calc(round(down, 100vh - 256px, 26px) + 26px); overscroll-behavior: contain; }
+#result-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+#result-table td, #result-table th { height: 26px; box-sizing: border-box; padding: 0 10px; line-height: 25px; text-align: left; border-bottom: 1px solid #e3e3e3; white-space: nowrap; }
+#result-table td:first-child, #result-table th:first-child, #result-table td:nth-child(n+3), #result-table th:nth-child(n+3) { text-align: right; font-variant-numeric: tabular-nums; }
+#result-table td:nth-child(2) { max-width: 16em; overflow: hidden; text-overflow: ellipsis; }
+#result-table th { position: sticky; top: 0; z-index: 1; background: #f4f3ee; font-weight: 600; box-shadow: 0 1px 0 #d6d2c2; }
+#result-table tr.me td { background: #dce8ff; font-weight: 700; }
+#result-hint { margin: 6px 0 0; font-size: 12px; color: #555; }
+/* Touch: up top, clear of the keys on screen (about 130 px over the task bar). */
+body.touch #resultwin { top: 56px; transform: translateX(-50%); }
+body.touch #result-scroll { max-height: calc(100vh - 380px); max-height: calc(round(down, 100vh - 406px, 26px) + 26px); }
 
 /* ---------- taskbar ---------- */
 #taskbar {

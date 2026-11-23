@@ -64,6 +64,12 @@ export const SCENES = {
     right: [['m', 'i', ':']],
     hint: { m: '地図', i: '会話' },
   },
+  // The result screen with a ranking longer than its box: j / k scroll it.
+  results: {
+    left: UP_DOWN,
+    right: [['m', 'i', ':']],
+    hint: { k: '上へ', j: '下へ', m: '地図', i: '会話' },
+  },
   // Title menu.
   menu: {
     left: UP_DOWN,

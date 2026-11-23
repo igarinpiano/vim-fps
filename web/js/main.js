@@ -2289,15 +2289,81 @@ function damageArc(from) {
 
 function showResult(m) {
   const t = $('result-table');
-  t.innerHTML = '<tr><th>#</th><th>名前</th><th>キル</th><th>デス</th></tr>';
+  t.innerHTML = '<thead><tr><th>#</th><th>名前</th><th>キル</th><th>デス</th></tr></thead>';
+  const body = document.createElement('tbody');
   m.ranking.forEach((r, i) => {
     const tr = document.createElement('tr');
     if (r.id === game.myId) tr.className = 'me';
     tr.innerHTML = `<td>${i + 1}</td><td>${esc(r.name)}${r.bot ? ' (bot)' : ''}</td><td>${r.kills}</td><td>${r.deaths}</td>`;
-    t.appendChild(tr);
+    body.appendChild(tr);
   });
+  t.appendChild(body);
   show('resultwin');
   hideDeath();
+  // A long ranking scrolls: start where you are in it.
+  const box = $('result-scroll');
+  box.scrollTop = 0;
+  const me = t.querySelector('tr.me');
+  const row = resultRow();
+  if (me && me.offsetTop + row > box.clientHeight) box.scrollTop = Math.round((me.offsetTop - box.clientHeight / 2) / row) * row;
+  const more = box.scrollHeight > box.clientHeight + 1;
+  setText($('result-hint'), touch.active ? '上下にスワイプか j / k でスクロール' : 'j / k でスクロール (1 行ずつ) · Ctrl-d / Ctrl-u 半ページ · gg / G 先頭 / 末尾');
+  show('result-hint', more);
+}
+
+/// The result table is up and longer than its box.
+function resultScrolls() {
+  if ($('resultwin').classList.contains('hidden')) return false;
+  const box = $('result-scroll');
+  return box.scrollHeight > box.clientHeight + 1;
+}
+
+/// Height of one row of the result table (px).
+function resultRow() {
+  const tr = $('result-table').querySelector('tbody tr');
+  return (tr && tr.getBoundingClientRect().height) || 26;
+}
+
+let resultG = 0;
+/// Scrolling the result table with the keys (a long ranking does not fit):
+/// j / k a row, Ctrl-d / Ctrl-u half the box, Ctrl-f / Ctrl-b all of it,
+/// gg / G the top and the bottom. Only while it is up and scrolls.
+function resultScroll(ev) {
+  if (ev.type !== 'down' || $('resultwin').classList.contains('hidden')) return false;
+  if (!['normal', 'view', 'spectate'].includes(vim.mode)) return false;
+  const box = $('result-scroll');
+  if (box.scrollHeight <= box.clientHeight + 1) return false;
+  const row = resultRow();
+  const rows = Math.max(1, Math.floor(box.clientHeight / row) - 1);
+  const at = Math.round(box.scrollTop / row);
+  const k = ev.key;
+  if (resultG && k !== 'g') {
+    // Not gg after all: the g goes where it would have.
+    resultG = 0;
+    vim.key({ type: 'down', key: 'g', code: 'KeyG', shift: false, ctrl: false, repeat: false });
+    vim.key({ type: 'up', key: 'g', code: 'KeyG', shift: false, ctrl: false });
+  }
+  let to = null;
+  if (!ev.ctrl && (k === 'j' || k === 'ArrowDown')) to = at + 1;
+  else if (!ev.ctrl && (k === 'k' || k === 'ArrowUp')) to = at - 1;
+  else if (ev.ctrl && k === 'd') to = at + Math.ceil(rows / 2);
+  else if (ev.ctrl && k === 'u') to = at - Math.ceil(rows / 2);
+  else if (ev.ctrl && k === 'f') to = at + rows;
+  else if (ev.ctrl && k === 'b') to = at - rows;
+  else if (!ev.ctrl && k === 'G') to = 1e6;
+  else if (!ev.ctrl && k === 'g') {
+    const now = performance.now();
+    if (now - resultG < 600) {
+      resultG = 0;
+      to = 0;
+    } else {
+      resultG = now;
+      return true;
+    }
+  }
+  if (to == null) return false;
+  box.scrollTop = Math.max(0, Math.min(box.scrollHeight - box.clientHeight, to * row));
+  return true;
 }
 
 /// The clock in the task bar.
@@ -2637,6 +2703,10 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.metaKey || e.altKey || /^F\d+$/.test(e.key)) return;
+  if (resultScroll({ type: 'down', key: e.key, ctrl: e.ctrlKey })) {
+    e.preventDefault();
+    return;
+  }
   const used = vim.key({ type: 'down', key: e.key, code: e.code, shift: e.shiftKey, ctrl: e.ctrlKey, repeat: e.repeat });
   if (used || !e.ctrlKey) e.preventDefault();
 });
@@ -3497,7 +3567,8 @@ function touchScene() {
   if (m === 'insert' || m === 'command') return 'typing';
   if (['menu', 'msg', 'form', 'inventory', 'map'].includes(m)) return m;
   if (!game.conn || !game.map) return 'menu';
-  if (m === 'spectate') return game.free || game.sky ? 'fly' : 'watch';
+  if (m === 'spectate' && !resultScrolls()) return game.free || game.sky ? 'fly' : 'watch';
+  if (resultScrolls()) return 'results';
   if (game.intermission != null || !game.alive) return 'wait';
   if (game.myTank != null) return 'tank';
   return tankInReach() ? 'boarding' : 'combat';
@@ -3662,6 +3733,7 @@ const touch = new TouchPad($('touchpad'), settings, (ev) => {
     }
     return;
   }
+  if (resultScroll(ev)) return;
   vim.key(ev);
 });
 

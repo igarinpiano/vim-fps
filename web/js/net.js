@@ -1,7 +1,7 @@
 // Connections. Both kinds look the same to the game: send(obj), and
 // onmessage(msg) / onclose(reason) callbacks.
 
-export const PROTOCOL = 5;
+export const PROTOCOL = 6;
 
 /// WebSocket to a CLI host. The page's own host when url is omitted.
 export class WsConnection {
